@@ -5,6 +5,8 @@
 #include "ConfigManager.h"
 #include "SettingsWindow.h"
 #include "resource.h"
+#include <shlwapi.h>
+#pragma comment(lib, "shlwapi.lib")
 
 // ---------------------------------------------------------------------------
 // Control IDs
@@ -725,6 +727,55 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 }
 
 // ---------------------------------------------------------------------------
+// Ensure nvofapi64.dll is available (auto-copy from System32 if missing)
+// ---------------------------------------------------------------------------
+static void EnsureNvofapiAvailable()
+{
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    PathRemoveFileSpecW(exePath);
+
+    wchar_t targetNvof[MAX_PATH] = {};
+    PathCombineW(targetNvof, exePath, L"nvofapi64.dll");
+
+    wchar_t sysDir[MAX_PATH] = {};
+    GetSystemDirectoryW(sysDir, MAX_PATH);
+    wchar_t srcNvof[MAX_PATH] = {};
+    PathCombineW(srcNvof, sysDir, L"nvofapi64.dll");
+
+    // If nvofapi64.dll is missing in the .exe directory, automatically copy from System32
+    if (GetFileAttributesW(targetNvof) == INVALID_FILE_ATTRIBUTES)
+    {
+        if (GetFileAttributesW(srcNvof) != INVALID_FILE_ATTRIBUTES)
+        {
+            if (CopyFileW(srcNvof, targetNvof, FALSE))
+            {
+                DLSS_Log("[Init] nvofapi64.dll System32'den basariyla uygulama klasorune kopyalandi.");
+            }
+            else
+            {
+                DLSS_Log("[Init] nvofapi64.dll kopyalanamadi (hata=%lu), dogrudan System32'den yuklenecek.", GetLastError());
+            }
+        }
+        else
+        {
+            DLSS_Log("[Init] Bilgi: System32 altinda nvofapi64.dll bulunamadi.");
+        }
+    }
+
+    // Preload nvofapi64.dll into process memory
+    HMODULE hNvof = LoadLibraryW(targetNvof);
+    if (!hNvof && GetFileAttributesW(srcNvof) != INVALID_FILE_ATTRIBUTES)
+    {
+        hNvof = LoadLibraryW(srcNvof);
+    }
+    if (hNvof)
+    {
+        DLSS_Log("[Init] nvofapi64.dll basariyla bellege yuklendi (0x%p).", hNvof);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WinMain
 // ---------------------------------------------------------------------------
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
@@ -743,6 +794,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
             ProcessPowerThrottling, &ppt, sizeof(ppt));
     }
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+
+    // Automatically ensure nvofapi64.dll is present and preloaded
+    EnsureNvofapiAvailable();
 
     DLSS_Log("[Main] VLSS5 launcher started.");
 
