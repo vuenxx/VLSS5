@@ -1,0 +1,72 @@
+﻿# ===================================================================
+# Visual Studio / MSBuild C++ Ignore Rules
+# ===================================================================
+
+# Visual Studio temporary & user-specific files
+.vs/
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+*.VC.db
+*.VC.opendb
+
+# Build output directories
+x64/
+x86/
+Win32/
+ARM/
+ARM64/
+Debug/
+Release/
+
+# Project intermediate build folders
+VLSS5/
+v-graphic5/
+[Bb]in/
+[Oo]bj/
+build/
+
+# Compilation object files & debugging symbols
+*.obj
+*.iobj
+*.ipdb
+*.idb
+*.pdb
+*.ilk
+*.tlog
+*.recipe
+*.res
+*.pch
+*.exp
+
+# MSBuild logs & cleanup files
+*.log
+*.Build.CppClean.log
+*.FileListAbsolute.txt
+
+# Crash dumps & backups
+*.dmp
+*.bak
+*.tmp
+
+# ===================================================================
+# Binaries & Proprietary NVIDIA Model Weights
+# (nvngx_dlssnr.dll exceeds GitHub's 100MB limit)
+# ===================================================================
+*.exe
+*.dll
+*.rar
+*.zip
+*.7z
+
+# Runtime configuration & session logs
+vlss5_config.ini
+vlss5_dlss.log
+
+# ===================================================================
+# OS generated files
+# ===================================================================
+Thumbs.db
+Desktop.ini
+.DS_Store
