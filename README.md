@@ -52,3 +52,11 @@ Bu projenin hakları saklıdır.
 * **⚠️ Sorumluluk Reddi:** Programın kullanımından doğabilecek tüm sorumluluk ve riskler (oyun hesabı yaptırımları, ban, sistem veya donanım arızaları vb.) tamamen kullanıcıya aittir; geliştiriciler hiçbir sorumluluk kabul etmez.
 
 Detaylar için [LICENSE](LICENSE) dosyasına göz atabilirsiniz.
+
+---
+
+## 🤝 Teşekkürler & İlham (Credits)
+
+Bu projenin geliştirilmesinde sağladığı ilham ve açık kaynak topluluğuna kattığı değerli çalışmalar için teşekkürler:
+
+* **[Dagherbou / OptiScaler_DLSSNR](https://github.com/Dagherbou/OptiScaler_DLSSNR)** — İlham kaynağı olan harika çalışmaları için sonsuz teşekkürler ve saygılar (Respect & Big Thanks)!
