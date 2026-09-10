@@ -27,8 +27,13 @@ c) TİCARİ KULLANIM YASAĞI:
 4. TELİF HAKKI BİLDİRİMLERİ
 Yazılım veya kaynak dosyaları içerisindeki hiçbir telif hakkı, marka veya geliştirici bildirimi kaldırılamaz, değiştirilemez veya gizlenemez.
 
-5. GARANTİ REDDİ VE SORUMLULUK SINIRLAMASI
-BU YAZILIM, TELİF HAKKI SAHİPLERİ TARAFINDAN "OLDUĞU GİBİ" SAĞLANMIŞTIR. YAZILIMIN KULLANIMINDAN VEYA KULLANILAMAMASINDAN DOĞABİLECEK HİÇBİR DOĞRUDAN, DOLAYLI VEYA KAZARA OLUŞABİLECEK ZARARDAN GELİŞTİRİCİLER VE TELİF HAKKI SAHİPLERİ SORUMLU TUTULAMAZ.
+5. KULLANICI SORUMLULUĞU VE GARANTİ REDDİ (ÖNEMLİ)
+a) TAM KULLANICI SORUMLULUĞU:
+   Bu programın kullanımından doğabilecek HER TÜRLÜ RİSK, SORUMLULUK VE SONUÇ (oyun hesabı yasaklamaları/ban cezaları, üçüncü taraf anti-cheat veya oyun yapımcısı yaptırımları, donanım veya sistem arızaları, performans düşüşleri, veri veya profil kayıpları dahil ancak bunlarla sınırlı olmamak üzere) TAMAMEN VE YALNIZCA KULLANICIYA AİTTİR.
+b) GELİŞTİRİCİ MUAFİYETİ:
+   Yazarlar, geliştiriciler ve telif hakkı sahipleri; yazılımın kullanımından, yanlış kullanımından veya çalıştırılmasından kaynaklanan hiçbir doğrudan, dolaylı, özel, arızi veya cezai zarardan ötürü hiçbir koşulda hukuki ya da cezai olarak sorumlu tutulamaz.
+c) PEŞİNEN KABUL:
+   Yazılımı indiren, derleyen, açan veya kullanan her kişi, bu şartları ve programın çalıştırılmasından doğabilecek tüm risklerin münhasıran kendisine ait olduğunu peşinen, gayrikabili rücu olarak kabul ve beyan eder.
 
 ================================================================================
 SECTION 2: ENGLISH TRANSLATION (LEGAL REFERENCE)
@@ -45,5 +50,10 @@ b) UPSTREAM CONTRIBUTIONS ONLY:
 c) NON-COMMERCIAL USE: 
    Commercial use, monetization, or sale of this Software or its derivative works is strictly forbidden.
 
-3. DISCLAIMER OF WARRANTY & LIMITATION OF LIABILITY
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF THIS SOFTWARE.
+3. SOLE USER RESPONSIBILITY & COMPLETE DISCLAIMER OF LIABILITY (CRITICAL)
+a) SOLE USER RESPONSIBILITY:
+   ALL RISKS, LIABILITIES, PENALTIES, AND CONSEQUENCES ARISING FROM THE USE, MISUSE, OR OPERATION OF THIS SOFTWARE (INCLUDING, WITHOUT LIMITATION, GAME ACCOUNT BANS OR SUSPENSIONS, THIRD-PARTY ANTI-CHEAT ACTIONS, HARDWARE FAILURES, OPERATING SYSTEM INSTABILITY, OR LOSS OF DATA) REST SOLELY AND ENTIRELY WITH THE USER.
+b) DEVELOPER EXEMPTION:
+   IN NO EVENT SHALL THE AUTHORS, DEVELOPERS, OR COPYRIGHT HOLDERS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE.
+c) EXPRESS ACCEPTANCE:
+   BY DOWNLOADING, COMPILING, EXECUTING, OR USING THIS SOFTWARE, THE USER EXPRESSLY, VOLUNTARILY, AND IRREVOCABLY ASSUMES ALL ASSOCIATED RISKS AND RELEASES THE DEVELOPERS AND AUTHORS FROM ANY AND ALL LEGAL CLAIMS OR LIABILITIES.
