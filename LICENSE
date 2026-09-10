@@ -1,39 +1,49 @@
-﻿VLSS5 Kaynak Kodu ve Kullanım Lisansı (Source-Available License)
+﻿VLSS5 KAYNAK KODU VE KULLANIM LİSANSI
+(VLSS5 Source-Available & Upstream Contribution License)
 
-Telif Hakkı (c) 2026 VLSS5 / Berkay Küçükbekar. Tüm hakları saklıdır.
+Sürüm: 1.0 (2026)
+Telif Hakkı (c) 2026 Berkay Küçükbekar / VLSS5. Tüm Hakları Saklıdır.
 
-Bu yazılımın kaynak koduna erişim, inceleme ve doğrudan ana VLSS5 deposuna katkıda bulunmak amacıyla geliştirme yapma izni verilmiştir.
+================================================================================
+BÖLÜM 1: TÜRKÇE LİSANS METNİ (ESAS METİN)
+================================================================================
 
-AŞAĞIDAKİ KOŞULLAR GEÇERLİDİR:
+1. TANIMLAR VE KAPSAM
+Bu Lisans Sözleşmesi, "VLSS5" yazılımının ("Yazılım") kaynak kodunu, ikili (binary) dosyalarını, grafik ve görsel varlıklarını ve ilgili tüm dokümantasyonunu kapsar.
 
-1. DAĞITIM YASAĞI (NO REDISTRIBUTION):
-Bu yazılımın veya kaynak kodunun (orijinal ya da değiştirilmiş halleri dahil) başka herhangi bir mecrada, internet sitesinde, depoda veya üçüncü taraflarca yeniden dağıtılması, paylaşılması, satılması veya yayınlanması kesinlikle YASAKTIR.
+2. VERİLEN HAKLAR VE İZİNLER
+İşbu lisans koşullarına uyulması şartıyla, kullanıcılara aşağıdaki haklar tanınmıştır:
+a) Yazılımın kaynak kodunu kişisel olarak inceleme, yerel ortamda derleme ve kişisel oyun ortamında çalıştırma.
+b) Yazılımın performansını veya uyumluluğunu artırmak, hatalarını gidermek amacıyla kod üzerinde değişiklik ve geliştirme yapma.
 
-2. DEĞİŞİKLİKLER VE GELİŞTİRMELER:
-Proje üzerinde geliştirmeler yapılabilir; ancak bu değişiklikler kopyalanıp başka yerde bağımsız olarak dağıtılamaz. Yapılan değişiklikler ve iyileştirmeler yalnızca orijinal ana VLSS5 projesine katkı (Pull Request) olarak sunulabilir.
+3. KISITLAMALAR VE DAĞITIM YASAĞI (ÖNEMLİ)
+a) DAĞITIM YASAĞI (NO REDISTRIBUTION): 
+   Bu yazılımın veya kaynak kodunun (orijinal, değiştirilmiş, derlenmiş veya türetilmiş halleri dahil) başka herhangi bir mecrada, internet sitesinde, GitHub/GitLab vb. depolarda bağımsız olarak YENİDEN DAĞITILMASI, PAYLAŞILMASI, SATILMASI, KİRALANMASI VEYA YAYINLANMASI KESİNLİKLE YASAKTIR.
+b) SADECE ANA PROJEYE KATKI: 
+   Kod üzerinde yapılan tüm geliştirmeler, hata düzeltmeleri ve optimizasyonlar yalnızca orijinal ana VLSS5 GitHub deposuna doğrudan katkı (Pull Request) olarak sunulabilir. Projeyi kopyalayıp/forklayıp kendi adı veya başka bir isim altında bağımsız olarak üçüncü taraflara dağıtmak yasaktır.
+c) TİCARİ KULLANIM YASAĞI: 
+   Bu yazılım, kaynak kodları ve tüm türevleri hiçbir koşulda ticari amaçla kullanılamaz, ücret karşılığı satılamaz veya paraya dönüştürülemez.
 
-3. TİCARİ KULLANIM YASAĞI:
-Bu yazılım ve bileşenleri hiçbir şekilde ticari amaçla kullanılamaz, kiralanamaz veya satılamaz.
+4. TELİF HAKKI BİLDİRİMLERİ
+Yazılım veya kaynak dosyaları içerisindeki hiçbir telif hakkı, marka veya geliştirici bildirimi kaldırılamaz, değiştirilemez veya gizlenemez.
 
-4. GARANTİ REDDİ:
-BU YAZILIM "OLDUĞU GİBİ" SAĞLANMAKTADIR. YAZILIMIN KULLANIMINDAN DOĞABİLECEK HERHANGİ BİR DOĞRUDAN VEYA DOLAYLI ZARARDAN GELİŞTİRİCİLER SORUMLU TUTULAMAZ.
+5. GARANTİ REDDİ VE SORUMLULUK SINIRLAMASI
+BU YAZILIM, TELİF HAKKI SAHİPLERİ TARAFINDAN "OLDUĞU GİBİ" SAĞLANMIŞTIR. YAZILIMIN KULLANIMINDAN VEYA KULLANILAMAMASINDAN DOĞABİLECEK HİÇBİR DOĞRUDAN, DOLAYLI VEYA KAZARA OLUŞABİLECEK ZARARDAN GELİŞTİRİCİLER VE TELİF HAKKI SAHİPLERİ SORUMLU TUTULAMAZ.
 
---------------------------------------------------------------------------------
+================================================================================
+SECTION 2: ENGLISH TRANSLATION (LEGAL REFERENCE)
+================================================================================
 
-VLSS5 Custom Source-Available License (English Summary)
+1. GRANT OF RIGHTS
+Subject to the terms and conditions of this License, you are granted permission to inspect, locally compile, run the Software for personal use, and develop improvements or bug fixes.
 
-Copyright (c) 2026 VLSS5 / Berkay Küçükbekar. All rights reserved.
+2. STRICT PROHIBITION ON REDISTRIBUTION
+a) NO REDISTRIBUTION: 
+   Redistribution, republishing, mirroring, sublicensing, selling, renting, or public hosting of this Software or its source code (in whole or in part, modified or unmodified) on any external website, repository, or distribution platform is strictly prohibited.
+b) UPSTREAM CONTRIBUTIONS ONLY: 
+   All improvements, modifications, and enhancements must be submitted directly to the official VLSS5 repository as contributions (e.g., Pull Requests). Creating a standalone distribution or public fork under this or any other name is not permitted.
+c) NON-COMMERCIAL USE: 
+   Commercial use, monetization, or sale of this Software or its derivative works is strictly forbidden.
 
-Permission is granted to inspect and modify this software solely for the purpose of contributing back to the official upstream VLSS5 repository.
-
-1. NO REDISTRIBUTION:
-Redistribution of this software or its source code, in whole or in part, modified or unmodified, outside the official VLSS5 repository is strictly prohibited.
-
-2. CONTRIBUTIONS ONLY:
-Modifications and enhancements may not be distributed separately. All improvements must be contributed directly to the official VLSS5 project.
-
-3. NON-COMMERCIAL:
-Commercial use or monetization is strictly prohibited.
-
-4. NO WARRANTY:
-THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND.
+3. DISCLAIMER OF WARRANTY & LIMITATION OF LIABILITY
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES, OR OTHER LIABILITY ARISING FROM THE USE OF THIS SOFTWARE.
