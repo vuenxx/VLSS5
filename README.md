@@ -12,7 +12,7 @@
 
 ## ⚡ Genel Bakış
 
-**VLSS5**, çalışan herhangi bir pencere veya çerçevesiz oyunda **VLSS5** nöral teknolojisinin kullanılmasına olanak tanır. Tamamen performans ve akıcılık odaklı olarak tasarlanmıştır.
+**VLSS5**, çalışan herhangi bir pencere veya çerçevesiz oyunda **DLSS5** nöral teknolojisinin kullanılmasına olanak tanır. Tamamen performans ve akıcılık odaklı olarak tasarlanmıştır.
 
 ---
 
@@ -38,7 +38,7 @@
 | **`Alt + S`** | Katmanı Başlat / Kapat *(Arayüzden değiştirilebilir)* |
 | **`F8`** | Hedef pencereye yeniden odakla ve boyutu eşitle |
 | **`F9`** | Canlı FPS sayacını aç / kapat |
-| **`F10`** | VLSS5 efektini anlık olarak aç / kapat |
+| **`F10`** | DLSS5 efektini anlık olarak aç / kapat |
 
 ---
 
