@@ -46,9 +46,9 @@
 
 Bu projenin hakları saklıdır.
 
-* Proje üzerinde geliştirmeler ve iyileştirmeler yapılabilir.
-* **Proje kopyalanıp, değiştirilip başka bir yerde bağımsız olarak dağıtılamaz.**
-* Yapılan tüm geliştirmeler ve değişiklikler yalnızca ana VLSS5 projesine katkı (Pull Request) olarak kabul edilir.
-* **Sorumluluk Reddi:** Programın kullanımından doğabilecek tüm sorumluluk ve riskler (oyun hesabı yaptırımları, ban, sistem veya donanım arızaları vb.) tamamen kullanıcıya aittir; geliştiriciler hiçbir sorumluluk kabul etmez.
+* **Proje Geliştirme:** Proje üzerinde geliştirmeler ve hata düzeltmeleri yapılabilir (katkılar Pull Request olarak kabul edilir).
+* **🎥 İçerik Üreticileri & Yayıncılar (SERBEST):** YouTube, Twitch, Kick, TikTok veya herhangi bir platformda yazılımı kullanarak video çekmek, canlı yayın yapmak, FPS/benchmark testleri ve incelemeler paylaşmak **tamamen serbesttir ve teşvik edilir.**
+* **⛔ Dağıtım Yasağı:** Programın dosyalarını (`.exe`, `.dll`, kaynak kodları) indirip başka bir siteye/depoya yüklemek, kopyalayıp bağımsız olarak dağıtmak veya satmak **kesinlikle yasaktır.** İndirme için yalnızca resmi GitHub sayfası paylaşılabilir.
+* **⚠️ Sorumluluk Reddi:** Programın kullanımından doğabilecek tüm sorumluluk ve riskler (oyun hesabı yaptırımları, ban, sistem veya donanım arızaları vb.) tamamen kullanıcıya aittir; geliştiriciler hiçbir sorumluluk kabul etmez.
 
 Detaylar için [LICENSE](LICENSE) dosyasına göz atabilirsiniz.

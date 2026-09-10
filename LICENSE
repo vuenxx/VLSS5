@@ -1,4 +1,4 @@
-﻿VLSS5 KAYNAK KODU VE KULLANIM LİSANSI
+VLSS5 KAYNAK KODU VE KULLANIM LİSANSI
 (VLSS5 Source-Available & Upstream Contribution License)
 
 Sürüm: 1.0 (2026)
@@ -15,10 +15,13 @@ Bu Lisans Sözleşmesi, "VLSS5" yazılımının ("Yazılım") kaynak kodunu, iki
 İşbu lisans koşullarına uyulması şartıyla, kullanıcılara aşağıdaki haklar tanınmıştır:
 a) Yazılımın kaynak kodunu kişisel olarak inceleme, yerel ortamda derleme ve kişisel oyun ortamında çalıştırma.
 b) Yazılımın performansını veya uyumluluğunu artırmak, hatalarını gidermek amacıyla kod üzerinde değişiklik ve geliştirme yapma.
+c) İÇERİK ÜRETİMİ, YAYIN VE VİDEO İZNİ (TAMAMEN SERBESTTİR VE TEŞVİK EDİLİR):
+   Yazılımı kullanarak oyun oynamak, video çekmek (YouTube, TikTok, Instagram vb.), canlı yayın yapmak (Twitch, Kick, YouTube vb.), performans/FPS karşılaştırmaları, inceleme ve tanıtım içerikleri üretmek, ekran görüntülerini ve resmi GitHub indirme bağlantısını paylaşmak TAMAMEN SERBESTTİR VE TEŞVİK EDİLMEKTEDİR.
 
 3. KISITLAMALAR VE DAĞITIM YASAĞI (ÖNEMLİ)
-a) DAĞITIM YASAĞI (NO REDISTRIBUTION): 
-   Bu yazılımın veya kaynak kodunun (orijinal, değiştirilmiş, derlenmiş veya türetilmiş halleri dahil) başka herhangi bir mecrada, internet sitesinde, GitHub/GitLab vb. depolarda bağımsız olarak YENİDEN DAĞITILMASI, PAYLAŞILMASI, SATILMASI, KİRALANMASI VEYA YAYINLANMASI KESİNLİKLE YASAKTIR.
+a) YAZILIM VE KOD DAĞITIM YASAĞI (NO SOFTWARE / CODE REDISTRIBUTION): 
+   Bu yazılımın derlenmiş çalıştırılabilir dosyalarının (.exe, .dll vb.) veya kaynak kodunun (orijinal, değiştirilmiş veya türetilmiş halleri dahil) başka herhangi bir internet sitesine (Mega, Google Drive, dosya yükleme siteleri, bağımsız web siteleri, başka GitHub/GitLab hesapları vb.) yüklenmesi, YENİDEN DAĞITILMASI, SATILMASI, KİRALANMASI VEYA İZİNSİZ REPACK YAPILMASI KESİNLİKLE YASAKTIR. Kullanıcılar indirme için yalnızca resmi ana GitHub deposuna bağlantı (link) verebilir.
+   *(Önemli Not: Video çekmek, oyun içi görüntüleri ve incelemeleri paylaşmak bu kısıtlamaya kesinlikle dahil DEĞİLDİR; serbesttir).*
 b) SADECE ANA PROJEYE KATKI: 
    Kod üzerinde yapılan tüm geliştirmeler, hata düzeltmeleri ve optimizasyonlar yalnızca orijinal ana VLSS5 GitHub deposuna doğrudan katkı (Pull Request) olarak sunulabilir. Projeyi kopyalayıp/forklayıp kendi adı veya başka bir isim altında bağımsız olarak üçüncü taraflara dağıtmak yasaktır.
 c) TİCARİ KULLANIM YASAĞI: 
@@ -40,11 +43,16 @@ SECTION 2: ENGLISH TRANSLATION (LEGAL REFERENCE)
 ================================================================================
 
 1. GRANT OF RIGHTS
-Subject to the terms and conditions of this License, you are granted permission to inspect, locally compile, run the Software for personal use, and develop improvements or bug fixes.
+Subject to the terms and conditions of this License, you are granted permission to:
+a) Inspect, locally compile, and run the Software for personal use.
+b) Develop improvements, optimizations, or bug fixes for personal use or upstream contribution.
+c) CONTENT CREATION & STREAMING (FULLY PERMITTED & ENCOURAGED):
+   Create gameplay videos (YouTube, TikTok, etc.), stream gameplay (Twitch, Kick, YouTube, etc.), produce benchmark comparisons and reviews, and share screenshots or links to the official repository. Showcasing and reviewing the Software is fully permitted and encouraged.
 
-2. STRICT PROHIBITION ON REDISTRIBUTION
-a) NO REDISTRIBUTION: 
-   Redistribution, republishing, mirroring, sublicensing, selling, renting, or public hosting of this Software or its source code (in whole or in part, modified or unmodified) on any external website, repository, or distribution platform is strictly prohibited.
+2. STRICT PROHIBITION ON SOFTWARE / CODE REDISTRIBUTION
+a) NO BINARY OR SOURCE REDISTRIBUTION: 
+   Redistribution, republishing, re-uploading, mirroring, sublicensing, selling, renting, or public re-hosting of the Software executables (.exe, .dll) or source code on external websites, file hosting services (Mega, Google Drive, etc.), or external repositories is strictly prohibited. Users may only share links to the official GitHub repository.
+   *(Note: Gameplay footage, video reviews, and streaming are expressly EXEMPT from this restriction and are permitted).*
 b) UPSTREAM CONTRIBUTIONS ONLY: 
    All improvements, modifications, and enhancements must be submitted directly to the official VLSS5 repository as contributions (e.g., Pull Requests). Creating a standalone distribution or public fork under this or any other name is not permitted.
 c) NON-COMMERCIAL USE: 
