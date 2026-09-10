@@ -5,14 +5,14 @@
 <h1 align="center">VLSS5</h1>
 
 <p align="center">
-  <strong>Her pencerede DLSS 5 kullanılmasına olanak sağlayan, tamamen performans odaklı oyun katmanı.</strong>
+  <strong>Her pencerede VLSS5 kullanılmasına olanak sağlayan, tamamen performans odaklı oyun katmanı.</strong>
 </p>
 
 ---
 
 ## ⚡ Genel Bakış
 
-**VLSS5**, çalışan herhangi bir pencere veya çerçevesiz oyunda **DLSS 5** teknolojisinin kullanılmasına olanak tanır. Tamamen performans ve akıcılık odaklı olarak tasarlanmıştır.
+**VLSS5**, çalışan herhangi bir pencere veya çerçevesiz oyunda **VLSS5** nöral teknolojisinin kullanılmasına olanak tanır. Tamamen performans ve akıcılık odaklı olarak tasarlanmıştır.
 
 ---
 
@@ -38,7 +38,7 @@
 | **`Alt + S`** | Katmanı Başlat / Kapat *(Arayüzden değiştirilebilir)* |
 | **`F8`** | Hedef pencereye yeniden odakla ve boyutu eşitle |
 | **`F9`** | Canlı FPS sayacını aç / kapat |
-| **`F10`** | DLSS 5 efektini anlık olarak aç / kapat |
+| **`F10`** | VLSS5 efektini anlık olarak aç / kapat |
 
 ---
 

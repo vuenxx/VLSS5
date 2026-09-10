@@ -79,46 +79,56 @@ void ConfigManager::Load()
         return;
     }
 
-    m_config.preset = GetPrivateProfileIntW(L"DLSS5", L"Preset", 0, ini.c_str());
+    const wchar_t* sec = L"VLSS5";
+    wchar_t testBuf[16] = {};
+    GetPrivateProfileStringW(L"VLSS5", L"Intensity", L"", testBuf, _countof(testBuf), ini.c_str());
+    if (testBuf[0] == L'\0')
+    {
+        GetPrivateProfileStringW(L"DLSS5", L"Intensity", L"", testBuf, _countof(testBuf), ini.c_str());
+        if (testBuf[0] != L'\0')
+            sec = L"DLSS5";
+    }
+
+    m_config.preset = GetPrivateProfileIntW(sec, L"Preset", 0, ini.c_str());
     if (m_config.preset < 0 || m_config.preset > 3) m_config.preset = 0;
 
-    m_config.style = GetPrivateProfileIntW(L"DLSS5", L"Style", 0, ini.c_str());
+    m_config.style = GetPrivateProfileIntW(sec, L"Style", 0, ini.c_str());
     if (m_config.style < 0 || m_config.style > 2) m_config.style = 0;
 
     wchar_t buf[64] = {};
-    GetPrivateProfileStringW(L"DLSS5", L"Intensity", L"1.0", buf, _countof(buf), ini.c_str());
+    GetPrivateProfileStringW(sec, L"Intensity", L"1.0", buf, _countof(buf), ini.c_str());
     m_config.intensity = static_cast<float>(_wtof(buf));
     if (m_config.intensity < 0.0f) m_config.intensity = 0.0f;
     if (m_config.intensity > 2.0f) m_config.intensity = 2.0f;
 
-    GetPrivateProfileStringW(L"DLSS5", L"LocalStructure", L"1.0", buf, _countof(buf), ini.c_str());
+    GetPrivateProfileStringW(sec, L"LocalStructure", L"1.0", buf, _countof(buf), ini.c_str());
     m_config.localStructure = static_cast<float>(_wtof(buf));
     if (m_config.localStructure < 0.0f) m_config.localStructure = 0.0f;
     if (m_config.localStructure > 2.0f) m_config.localStructure = 2.0f;
 
-    GetPrivateProfileStringW(L"DLSS5", L"LocalTone", L"1.0", buf, _countof(buf), ini.c_str());
+    GetPrivateProfileStringW(sec, L"LocalTone", L"1.0", buf, _countof(buf), ini.c_str());
     m_config.localTone = static_cast<float>(_wtof(buf));
     if (m_config.localTone < 0.0f) m_config.localTone = 0.0f;
     if (m_config.localTone > 2.0f) m_config.localTone = 2.0f;
 
-    GetPrivateProfileStringW(L"DLSS5", L"SkinStructure", L"-1.0", buf, _countof(buf), ini.c_str());
+    GetPrivateProfileStringW(sec, L"SkinStructure", L"-1.0", buf, _countof(buf), ini.c_str());
     m_config.skinStructure = static_cast<float>(_wtof(buf));
     if (m_config.skinStructure < -1.0f) m_config.skinStructure = -1.0f;
     if (m_config.skinStructure > 2.0f)  m_config.skinStructure = 2.0f;
 
-    m_config.useAutoMask = (GetPrivateProfileIntW(L"DLSS5", L"UseAutoMask", 1, ini.c_str()) != 0);
+    m_config.useAutoMask = (GetPrivateProfileIntW(sec, L"UseAutoMask", 1, ini.c_str()) != 0);
 
-    m_config.resolutionScale = GetPrivateProfileIntW(L"DLSS5", L"ResolutionScale", 100, ini.c_str());
+    m_config.resolutionScale = GetPrivateProfileIntW(sec, L"ResolutionScale", 100, ini.c_str());
     if (m_config.resolutionScale < 50)  m_config.resolutionScale = 50;
     if (m_config.resolutionScale > 100) m_config.resolutionScale = 100;
 
-    GetPrivateProfileStringW(L"DLSS5", L"Sharpness", L"0.30", buf, _countof(buf), ini.c_str());
+    GetPrivateProfileStringW(sec, L"Sharpness", L"0.30", buf, _countof(buf), ini.c_str());
     m_config.sharpness = static_cast<float>(_wtof(buf));
     if (m_config.sharpness < 0.0f) m_config.sharpness = 0.0f;
     if (m_config.sharpness > 1.0f) m_config.sharpness = 1.0f;
 
-    m_config.temporalStabilizer = (GetPrivateProfileIntW(L"DLSS5", L"TemporalStabilizer", 0, ini.c_str()) != 0);
-    m_config.opticalFlow        = (GetPrivateProfileIntW(L"DLSS5", L"OpticalFlow", 1, ini.c_str()) != 0);
+    m_config.temporalStabilizer = (GetPrivateProfileIntW(sec, L"TemporalStabilizer", 0, ini.c_str()) != 0);
+    m_config.opticalFlow        = (GetPrivateProfileIntW(sec, L"OpticalFlow", 1, ini.c_str()) != 0);
 
     m_config.settingsVk  = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"SettingsVk", VK_INSERT, ini.c_str()));
     m_config.settingsMod = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"SettingsMod", 0, ini.c_str()));
@@ -142,17 +152,17 @@ void ConfigManager::Save()
         WritePrivateProfileStringW(sec, key, buf, ini.c_str());
     };
 
-    writeInt(L"DLSS5", L"Preset", m_config.preset);
-    writeInt(L"DLSS5", L"Style", m_config.style);
-    writeFloat(L"DLSS5", L"Intensity", m_config.intensity);
-    writeFloat(L"DLSS5", L"LocalStructure", m_config.localStructure);
-    writeFloat(L"DLSS5", L"LocalTone", m_config.localTone);
-    writeFloat(L"DLSS5", L"SkinStructure", m_config.skinStructure);
-    writeInt(L"DLSS5", L"UseAutoMask", m_config.useAutoMask ? 1 : 0);
-    writeInt(L"DLSS5", L"ResolutionScale", m_config.resolutionScale);
-    writeFloat(L"DLSS5", L"Sharpness", m_config.sharpness);
-    writeInt(L"DLSS5", L"TemporalStabilizer", m_config.temporalStabilizer ? 1 : 0);
-    writeInt(L"DLSS5", L"OpticalFlow", m_config.opticalFlow ? 1 : 0);
+    writeInt(L"VLSS5", L"Preset", m_config.preset);
+    writeInt(L"VLSS5", L"Style", m_config.style);
+    writeFloat(L"VLSS5", L"Intensity", m_config.intensity);
+    writeFloat(L"VLSS5", L"LocalStructure", m_config.localStructure);
+    writeFloat(L"VLSS5", L"LocalTone", m_config.localTone);
+    writeFloat(L"VLSS5", L"SkinStructure", m_config.skinStructure);
+    writeInt(L"VLSS5", L"UseAutoMask", m_config.useAutoMask ? 1 : 0);
+    writeInt(L"VLSS5", L"ResolutionScale", m_config.resolutionScale);
+    writeFloat(L"VLSS5", L"Sharpness", m_config.sharpness);
+    writeInt(L"VLSS5", L"TemporalStabilizer", m_config.temporalStabilizer ? 1 : 0);
+    writeInt(L"VLSS5", L"OpticalFlow", m_config.opticalFlow ? 1 : 0);
 
     writeInt(L"Hotkeys", L"SettingsVk", static_cast<int>(m_config.settingsVk));
     writeInt(L"Hotkeys", L"SettingsMod", static_cast<int>(m_config.settingsMod));

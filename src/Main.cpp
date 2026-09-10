@@ -335,15 +335,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SF(g_chkFps, g_fontNormal);
         Button_SetCheck(g_chkFps, g_fpsEnabled ? BST_CHECKED : BST_UNCHECKED);
 
-        // ---- DLSS 5 Switch Checkbox ----
-        g_chkDlss = CreateWindowW(L"BUTTON", L" DLSS 5 (Nöral)",
+        // ---- VLSS5 Switch Checkbox ----
+        g_chkDlss = CreateWindowW(L"BUTTON", L" VLSS5 (Nöral)",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
             350, 290, 210, 24,
             hwnd, reinterpret_cast<HMENU>(IDC_CHK_DLSS), nullptr, nullptr);
         SF(g_chkDlss, g_fontNormal);
         Button_SetCheck(g_chkDlss, g_dlssEnabled ? BST_CHECKED : BST_UNCHECKED);
 
-        // ---- Keybind Panel Labels & DLSS 5 Settings Button ----
+        // ---- Keybind Panel Labels & VLSS5 Settings Button ----
         HWND lblKeybindTitle = CreateWindowW(L"STATIC", L"Overlay Kısayolu:",
             WS_CHILD | WS_VISIBLE, 28, 350, 130, 22,
             hwnd, nullptr, nullptr, nullptr);
@@ -362,7 +362,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_KEYBIND), nullptr, nullptr);
         SF(g_btnKeybind, g_fontNormal);
 
-        g_btnDlssSettings = CreateWindowW(L"BUTTON", L"⚙ DLSS 5 Ayarları",
+        g_btnDlssSettings = CreateWindowW(L"BUTTON", L"⚙ VLSS5 Ayarları",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
             358, 346, 202, 30,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_DLSS_SETTINGS), nullptr, nullptr);
@@ -428,12 +428,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // Header Subtitle
         SetTextColor(hdc, COLOR_TEXT_MUTED);
         SelectObject(hdc, g_fontSubtitle);
-        TextOutW(hdc, 76, 40, L"Her yerde VLSS5 kullanabilirsiniz!", 54);
+        const wchar_t subTitle[] = L"Yüksek Performanslı Nöral Oyun Overlay Sistemi";
+        TextOutW(hdc, 76, 40, subTitle, static_cast<int>(wcslen(subTitle)));
 
         // Keyboard Tips in Header
         SetTextColor(hdc, COLOR_TEXT_MUTED);
         SelectObject(hdc, g_fontSmall);
-        TextOutW(hdc, 315, 24, L"[F8] Odakla |  [F9] FPS  |  [F10] VLSS5  |  [Alt+S] Uygula", 52);
+        const wchar_t tips[] = L"[F8] Odak  |  [F9] FPS  |  [F10] VLSS5  |  [Alt+S] Başlat";
+        TextOutW(hdc, 280, 24, tips, static_cast<int>(wcslen(tips)));
 
         // 3. Card Panel behind Keybind row
         RECT cardKeybind = { 20, 336, 570, 386 };
@@ -593,9 +595,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         {
             g_dlssEnabled = (Button_GetCheck(g_chkDlss) == BST_CHECKED);
             if (g_dlssEnabled)
-                SetStatus(L"DLSS 5 etkin: Native NVIDIA NGX nöral iyileştirme devrede.");
+                SetStatus(L"VLSS5 etkin: Nöral iyileştirme devrede.");
             else
-                SetStatus(L"DLSS 5 kapalı: Standart doğrudan görüntü modu.");
+                SetStatus(L"VLSS5 kapalı: Standart doğrudan görüntü modu.");
             break;
         }
 

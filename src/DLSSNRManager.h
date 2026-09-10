@@ -109,7 +109,7 @@ private:
     int       m_preset                = 0;
     int       m_style                 = 0;
     float     m_localStructure        = 0.0f;
-    float     m_localTone             = 0.0f;
+    float     m_localTone             = 1.0f;
     float     m_skinStructure         = 0.0f;
     int       m_useAutoMask           = 0;
     int       m_uiCorrection          = 0;

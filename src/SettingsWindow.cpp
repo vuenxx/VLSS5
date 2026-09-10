@@ -104,7 +104,7 @@ void SettingsWindow::Show(HWND parent)
         s_hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             L"VLSS5_SettingsWindowClass",
-            L"DLSS 5 Nöral Yapılandırma",
+            L"VLSS5 Nöral Yapılandırma",
             WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
             x, y, w, h,
             parent, nullptr, s_hInstance, nullptr);
@@ -161,11 +161,11 @@ void SettingsWindow::SetOnConfigChanged(ConfigChangedCallback cb)
 void SettingsWindow::CreateControls(HWND hwnd)
 {
     // --- Header ---
-    HWND lblTitle = CreateWindowW(L"STATIC", L"DLSS 5 NÖRAL AYARLAR",
+    HWND lblTitle = CreateWindowW(L"STATIC", L"VLSS5 NÖRAL AYARLAR",
         WS_CHILD | WS_VISIBLE, 24, 16, 400, 24, hwnd, nullptr, nullptr, nullptr);
     SetFont(lblTitle, s_fontTitle);
 
-    HWND lblSubtitle = CreateWindowW(L"STATIC", L"NVIDIA NGX Feature 18 Canlı Yapılandırma Paneli",
+    HWND lblSubtitle = CreateWindowW(L"STATIC", L"VLSS5 Gelişmiş Canlı Yapılandırma Paneli",
         WS_CHILD | WS_VISIBLE, 24, 40, 400, 18, hwnd, nullptr, nullptr, nullptr);
     SetFont(lblSubtitle, s_fontSmall);
 
@@ -239,8 +239,8 @@ void SettingsWindow::CreateControls(HWND hwnd)
 
     y += 28;
 
-    // --- Checkbox: Optical Flow Motion Tracking ---
-    s_chkStabilizer = CreateWindowW(L"BUTTON", L" Optik Akış & Hareket Takibi (Optical Flow)",
+    // --- Checkbox: Shadow Artifact Stabilizer (Beta) ---
+    s_chkStabilizer = CreateWindowW(L"BUTTON", L" Gölge Bozulma Önleyici (BETA)",
         WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
         24, y, 396, 24, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SW_CHK_STABILIZER)), s_hInstance, nullptr);
     SetFont(s_chkStabilizer, s_fontNormal);

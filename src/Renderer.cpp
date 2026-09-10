@@ -461,11 +461,11 @@ void Renderer::UpdateFps(ID3D11DeviceContext* ctx, int fps, bool forceRedraw)
     const wchar_t* dlssLabel = L"• OFF";
     if (dlssnrOn)
     {
-        dlssLabel = L"• DLSS 5";
+        dlssLabel = L"• VLSS5";
     }
     else if (dlssOn)
     {
-        dlssLabel = L"• DLAA";
+        dlssLabel = L"• VLSS5";
     }
 
     wchar_t text[48];
