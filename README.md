@@ -8,6 +8,11 @@
   <strong>Her pencerede DLSS5 kullanılmasına olanak sağlayan, tamamen performans odaklı oyun katmanı.</strong>
 </p>
 
+<p align="center">
+  <a href="https://www.youtube.com/@vuenxxmx"><img src="https://img.shields.io/badge/YouTube-@vuenxxmx-FF0000?style=for-the-badge&logo=youtube&logoColor=white" alt="YouTube" /></a>
+  <a href="https://discord.com/invite/SnRpn3ADNF"><img src="https://img.shields.io/badge/Discord-Sunucumuz-5865F2?style=for-the-badge&logo=discord&logoColor=white" alt="Discord" /></a>
+</p>
+
 ---
 
 ## ⚡ Genel Bakış
