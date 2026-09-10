@@ -5,7 +5,7 @@
 <h1 align="center">VLSS5</h1>
 
 <p align="center">
-  <strong>Her pencerede VLSS5 kullanılmasına olanak sağlayan, tamamen performans odaklı oyun katmanı.</strong>
+  <strong>Her pencerede DLSS5 kullanılmasına olanak sağlayan, tamamen performans odaklı oyun katmanı.</strong>
 </p>
 
 ---
