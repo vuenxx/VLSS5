@@ -32,7 +32,7 @@
 ## 🖥️ Sistem Gereksinimleri
 
 * **Ekran Kartı:** NVIDIA GeForce RTX serisi bir ekran kartı gereklidir.
-* *(⚠️ Sadece *RTX 50, 40 VE 30 serisinde * test edilmiştir.)*
+* *(⚠️ Sadece *RTX 50, 40 VE 30 serisinde test edilmiştir.)*
 
 ---
 
