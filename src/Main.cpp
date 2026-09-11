@@ -798,6 +798,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     // Automatically ensure nvofapi64.dll is present and preloaded
     EnsureNvofapiAvailable();
 
+    // Automatically ensure _nvngx.dll and nvngx.dll are present and up to date
+    EnsureNGXAvailable();
+
     DLSS_Log("[Main] VLSS5 launcher started.");
 
     // Register main window class with custom V5 icon

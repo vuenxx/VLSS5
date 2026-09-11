@@ -55,17 +55,45 @@ bool D3D12Interop::Init(ID3D11Device* d3d11Dev, ID3D11DeviceContext* d3d11Ctx, i
         return false;
     }
 
-    // Create Direct Command Queue
+    // Create Direct Command Queue with elevated GPU scheduling priority (GLOBAL_REALTIME or HIGH)
+    // so VLSS5's DLSS/Neural Rendering passes get prioritized by the WDDM GPU scheduler.
     D3D12_COMMAND_QUEUE_DESC qDesc = {};
-    qDesc.Type = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    qDesc.Type     = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    qDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+
+    // Check hardware/driver support for GLOBAL_REALTIME queue priority via CheckFeatureSupport
+    D3D12_FEATURE_DATA_COMMAND_QUEUE_PRIORITY queuePriority = {};
+    queuePriority.CommandListType = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    queuePriority.Priority        = D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME;
+
+    if (SUCCEEDED(m_d3d12Device->CheckFeatureSupport(
+            D3D12_FEATURE_COMMAND_QUEUE_PRIORITY,
+            &queuePriority,
+            sizeof(queuePriority))) &&
+        queuePriority.PriorityForTypeIsSupported)
+    {
+        qDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME;
+    }
+
     hr = m_d3d12Device->CreateCommandQueue(&qDesc, IID_PPV_ARGS(&m_cmdQueue));
+    if (FAILED(hr) && qDesc.Priority == D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME)
+    {
+        // GLOBAL_REALTIME creation can fail if process lacks sufficient privileges; fallback to HIGH
+        DLSS_Log("[D3D12Interop] GLOBAL_REALTIME queue creation failed (0x%08X), falling back to HIGH priority.", hr);
+        qDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+        hr = m_d3d12Device->CreateCommandQueue(&qDesc, IID_PPV_ARGS(&m_cmdQueue));
+    }
+
     if (FAILED(hr))
     {
         DLSS_Log("[D3D12Interop] ERROR: CreateCommandQueue failed: 0x%08X", hr);
         return false;
     }
 
-    // Create Command Allocators (double-buffered)
+    DLSS_Log("[D3D12Interop] Command queue created with %s priority.",
+             (qDesc.Priority == D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME) ? "GLOBAL_REALTIME" : "HIGH");
+
+    // Create Command Allocators (triple-buffered)
     for (UINT i = 0; i < kCmdAllocCount; ++i)
     {
         hr = m_d3d12Device->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_cmdAlloc[i]));
@@ -74,6 +102,7 @@ bool D3D12Interop::Init(ID3D11Device* d3d11Dev, ID3D11DeviceContext* d3d11Ctx, i
             DLSS_Log("[D3D12Interop] ERROR: CreateCommandAllocator[%u] failed: 0x%08X", i, hr);
             return false;
         }
+        m_allocFenceValue[i] = 0;
     }
     m_allocIndex = 0;
 
@@ -437,6 +466,7 @@ void D3D12Interop::Cleanup()
     for (UINT i = 0; i < kCmdAllocCount; ++i)
     {
         m_cmdAlloc[i].Reset();
+        m_allocFenceValue[i] = 0;
     }
     m_allocIndex = 0;
     m_cmdQueue.Reset();
@@ -542,8 +572,32 @@ bool D3D12Interop::BeginFrame(
     // 4. Queue D3D12 CommandQueue wait for D3D11 fence
     m_cmdQueue->Wait(m_fenceInD12.Get(), m_frameIndex);
 
-    // 5. Double-buffered command allocator rotation: prevents resetting a busy command allocator!
+    // 5. Triple-buffered command allocator rotation with per-allocator fence tracking:
+    // Before reusing this command allocator, check if its last submitted fence value has completed on GPU.
+    // The CPU is ONLY stalled if the GPU has not finished yet (eliminating per-frame blocking).
     m_allocIndex = (m_allocIndex + 1) % kCmdAllocCount;
+    UINT64 neededFenceVal = m_allocFenceValue[m_allocIndex];
+    if (m_fenceOutD12 && neededFenceVal > 0 && m_fenceOutD12->GetCompletedValue() < neededFenceVal)
+    {
+        if (m_hFenceEvent)
+        {
+            m_fenceOutD12->SetEventOnCompletion(neededFenceVal, m_hFenceEvent);
+            DWORD waitRes = WaitForSingleObject(m_hFenceEvent, 1000); // Only waits if GPU hasn't caught up
+            if (waitRes == WAIT_TIMEOUT)
+            {
+                DLSS_Log("[D3D12Interop] WARNING: D3D12 GPU wait timeout (1000ms) waiting for fence %llu on alloc[%u] (frame #%llu)!",
+                    neededFenceVal, m_allocIndex, m_frameIndex);
+                if (m_d3d12Device)
+                {
+                    HRESULT rr = m_d3d12Device->GetDeviceRemovedReason();
+                    if (FAILED(rr))
+                    {
+                        DLSS_Log("[D3D12Interop] CRITICAL: D3D12 Device Removed! Reason: 0x%08X", rr);
+                    }
+                }
+            }
+        }
+    }
     m_cmdAlloc[m_allocIndex]->Reset();
     m_cmdList->Reset(m_cmdAlloc[m_allocIndex].Get(), nullptr);
 
@@ -597,27 +651,13 @@ bool D3D12Interop::EndFrame()
     // 5. Signal D3D12 output fence
     m_cmdQueue->Signal(m_fenceOutD12.Get(), m_frameIndex);
 
-    // 6. Queue D3D11 context wait for D3D12 to finish processing
+    // 6. Queue D3D11 context wait for D3D12 to finish processing (GPU-side sync)
     m_d3d11Ctx4->Wait(m_fenceOutD11.Get(), m_frameIndex);
 
-    // 7. CPU synchronization: ensure D3D12 completion before D3D11 presents/draws
-    if (m_hFenceEvent)
-    {
-        m_fenceOutD12->SetEventOnCompletion(m_frameIndex, m_hFenceEvent);
-        DWORD waitRes = WaitForSingleObject(m_hFenceEvent, 1000); // 1000ms realistic GPU timeout
-        if (waitRes == WAIT_TIMEOUT)
-        {
-            DLSS_Log("[D3D12Interop] WARNING: D3D12 GPU wait timeout (1000ms) on frame #%llu!", m_frameIndex);
-            if (m_d3d12Device)
-            {
-                HRESULT rr = m_d3d12Device->GetDeviceRemovedReason();
-                if (FAILED(rr))
-                {
-                    DLSS_Log("[D3D12Interop] CRITICAL: D3D12 Device Removed! Reason: 0x%08X", rr);
-                }
-            }
-        }
-    }
+    // 7. Track the submitted fence value for this allocator.
+    // The CPU is NOT blocked here; GPU-side Wait (m_d3d11Ctx4->Wait) is sufficient,
+    // allowing full CPU/GPU concurrency and asynchronous presentation.
+    m_allocFenceValue[m_allocIndex] = m_frameIndex;
 
     return true;
 }

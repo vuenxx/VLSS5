@@ -64,9 +64,9 @@ bool App::InitD3D()
 
     // GPU Thread Priority: Boost our queue priority so overlay work doesn't starve
     // behind a game pegging the GPU at 90-100%.
-    // Priority range: -7 to +7 (default is 0). Elevated privileges allow +5,
+    // Priority range: -7 to +7 (default is 0). Maximum is +7,
     // guaranteeing overlay rendering & preemption even when the game stresses the GPU to 100%.
-    static constexpr INT kDefaultGpuPriority = 5;
+    static constexpr INT kDefaultGpuPriority = 7;
     ComPtr<IDXGIDevice2> dxgiDevice2;
     if (SUCCEEDED(m_device.As(&dxgiDevice2)) && dxgiDevice2)
     {

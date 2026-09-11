@@ -52,6 +52,149 @@ void DLSS_Log(const char* fmt, ...)
 }
 
 // ---------------------------------------------------------------------------
+// FindNvidiaDriverStorePath
+// ---------------------------------------------------------------------------
+bool FindNvidiaDriverStorePath(wchar_t* outPath, size_t maxLen)
+{
+    if (!outPath || maxLen == 0) return false;
+    outPath[0] = L'\0';
+
+    // 1. Try finding NGXCore from registry (using WOW64_64KEY to ensure 64-bit view)
+    wchar_t driverPath[MAX_PATH] = {};
+    DWORD dataSize = sizeof(driverPath);
+    LSTATUS status = RegGetValueW(
+        HKEY_LOCAL_MACHINE,
+        L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore",
+        L"FullPath",
+        RRF_RT_REG_SZ | RRF_SUBKEY_WOW6464KEY,
+        nullptr,
+        driverPath,
+        &dataSize);
+
+    if (status == ERROR_SUCCESS && wcslen(driverPath) > 0)
+    {
+        wchar_t testDll[MAX_PATH] = {};
+        PathCombineW(testDll, driverPath, L"_nvngx.dll");
+        if (GetFileAttributesW(testDll) != INVALID_FILE_ATTRIBUTES)
+        {
+            DLSS_Log("[NGX] Registry NGXCore FullPath: %ls", driverPath);
+            wcsncpy_s(outPath, maxLen, driverPath, _TRUNCATE);
+            return true;
+        }
+    }
+
+    DLSS_Log("[NGX] Registry NGXCore not found or invalid (status=%ld). Scanning DriverStore...", status);
+
+    // 2. Fallback: Scan C:\Windows\System32\DriverStore\FileRepository\nv_dispi.inf_amd64_*
+    WIN32_FIND_DATAW findData;
+    HANDLE hFind = FindFirstFileW(L"C:\\Windows\\System32\\DriverStore\\FileRepository\\nv_dispi.inf_amd64_*", &findData);
+
+    FILETIME latestTime = { 0, 0 };
+    wchar_t bestPath[MAX_PATH] = {};
+
+    if (hFind != INVALID_HANDLE_VALUE)
+    {
+        do
+        {
+            if (findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+            {
+                wchar_t candidateDir[MAX_PATH] = {};
+                swprintf_s(candidateDir, L"C:\\Windows\\System32\\DriverStore\\FileRepository\\%s", findData.cFileName);
+
+                wchar_t candidateDll[MAX_PATH] = {};
+                PathCombineW(candidateDll, candidateDir, L"_nvngx.dll");
+
+                if (GetFileAttributesW(candidateDll) != INVALID_FILE_ATTRIBUTES)
+                {
+                    // Pick the directory with the most recent write time
+                    if (CompareFileTime(&findData.ftLastWriteTime, &latestTime) >= 0)
+                    {
+                        latestTime = findData.ftLastWriteTime;
+                        wcscpy_s(bestPath, candidateDir);
+                    }
+                }
+            }
+        } while (FindNextFileW(hFind, &findData));
+        FindClose(hFind);
+    }
+
+    if (wcslen(bestPath) > 0)
+    {
+        DLSS_Log("[NGX] Found DriverStore directory: %ls", bestPath);
+        wcsncpy_s(outPath, maxLen, bestPath, _TRUNCATE);
+        return true;
+    }
+
+    DLSS_Log("[NGX] Warning: No valid NVIDIA DriverStore directory found.");
+    return false;
+}
+
+// ---------------------------------------------------------------------------
+// EnsureNGXAvailable
+// ---------------------------------------------------------------------------
+void EnsureNGXAvailable()
+{
+    wchar_t exeDir[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
+    PathRemoveFileSpecW(exeDir);
+
+    wchar_t driverDir[MAX_PATH] = {};
+    if (!FindNvidiaDriverStorePath(driverDir, MAX_PATH))
+    {
+        DLSS_Log("[Init] NVIDIA DriverStore dizini bulunamadi, DLL kopyalama atlandi.");
+        return;
+    }
+
+    const wchar_t* dllsToCopy[] = { L"_nvngx.dll", L"nvngx.dll" };
+    for (const wchar_t* dllName : dllsToCopy)
+    {
+        wchar_t srcPath[MAX_PATH] = {};
+        wchar_t dstPath[MAX_PATH] = {};
+        PathCombineW(srcPath, driverDir, dllName);
+        PathCombineW(dstPath, exeDir, dllName);
+
+        if (GetFileAttributesW(srcPath) != INVALID_FILE_ATTRIBUTES)
+        {
+            bool needCopy = true;
+            if (GetFileAttributesW(dstPath) != INVALID_FILE_ATTRIBUTES)
+            {
+                WIN32_FILE_ATTRIBUTE_DATA srcAttr, dstAttr;
+                if (GetFileAttributesExW(srcPath, GetFileExInfoStandard, &srcAttr) &&
+                    GetFileAttributesExW(dstPath, GetFileExInfoStandard, &dstAttr))
+                {
+                    if (srcAttr.nFileSizeLow == dstAttr.nFileSizeLow &&
+                        srcAttr.nFileSizeHigh == dstAttr.nFileSizeHigh &&
+                        CompareFileTime(&srcAttr.ftLastWriteTime, &dstAttr.ftLastWriteTime) == 0)
+                    {
+                        needCopy = false;
+                    }
+                }
+            }
+
+            if (needCopy)
+            {
+                if (CopyFileW(srcPath, dstPath, FALSE))
+                {
+                    DLSS_Log("[Init] %ls DriverStore'dan uygulama klasorune basariyla kopyalandi.", dllName);
+                }
+                else
+                {
+                    DLSS_Log("[Init] %ls kopyalanamadi (LastError=%lu).", dllName, GetLastError());
+                }
+            }
+            else
+            {
+                DLSS_Log("[Init] %ls zaten guncel sekilde uygulama klasorunde mevcut.", dllName);
+            }
+        }
+        else
+        {
+            DLSS_Log("[Init] DriverStore'da %ls bulunamadi (%ls)", dllName, srcPath);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // LoadNGXLibrary
 // ---------------------------------------------------------------------------
 bool DLSSManager::LoadNGXLibrary()
@@ -60,38 +203,47 @@ bool DLSSManager::LoadNGXLibrary()
 
     DLSS_Log("[NGX] Loading NVIDIA NGX Core library...");
 
-    // 1. Try finding NGXCore from registry
-    wchar_t driverPath[MAX_PATH] = {};
-    DWORD dataSize = sizeof(driverPath);
-    LSTATUS status = RegGetValueW(
-        HKEY_LOCAL_MACHINE,
-        L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore",
-        L"FullPath",
-        RRF_RT_REG_SZ,
-        nullptr,
-        driverPath,
-        &dataSize);
+    // 1. Try local application directory first
+    wchar_t exeDir[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
+    PathRemoveFileSpecW(exeDir);
 
-    if (status == ERROR_SUCCESS)
+    wchar_t localDll[MAX_PATH] = {};
+    PathCombineW(localDll, exeDir, L"_nvngx.dll");
+
+    if (GetFileAttributesW(localDll) != INVALID_FILE_ATTRIBUTES)
     {
-        DLSS_Log("[NGX] Registry HKLM\\...\\NGXCore FullPath: %ls", driverPath);
-        wchar_t dllFile[MAX_PATH] = {};
-        PathCombineW(dllFile, driverPath, L"_nvngx.dll");
-        DLSS_Log("[NGX] Attempting LoadLibrary on: %ls", dllFile);
-        m_hNgxDll = LoadLibraryW(dllFile);
-        if (!m_hNgxDll)
+        DLSS_Log("[NGX] Attempting LoadLibrary on local: %ls", localDll);
+        m_hNgxDll = LoadLibraryW(localDll);
+        // Verify critical export to reject stub/fake DLLs
+        if (m_hNgxDll && !GetProcAddress(m_hNgxDll, "NVSDK_NGX_D3D11_AllocateParameters"))
         {
-            PathCombineW(dllFile, driverPath, L"nvngx.dll");
-            DLSS_Log("[NGX] Attempting fallback LoadLibrary on: %ls", dllFile);
-            m_hNgxDll = LoadLibraryW(dllFile);
+            DLSS_Log("[NGX] Warning: Local _nvngx.dll is missing critical exports, falling back to DriverStore.");
+            FreeLibrary(m_hNgxDll);
+            m_hNgxDll = nullptr;
         }
     }
-    else
+
+    // 2. Try DriverStore (Registry or dynamic DriverStore scan)
+    if (!m_hNgxDll)
     {
-        DLSS_Log("[NGX] Registry query for NGXCore failed (status=%ld)", status);
+        wchar_t driverPath[MAX_PATH] = {};
+        if (FindNvidiaDriverStorePath(driverPath, MAX_PATH))
+        {
+            wchar_t dllFile[MAX_PATH] = {};
+            PathCombineW(dllFile, driverPath, L"_nvngx.dll");
+            DLSS_Log("[NGX] Attempting LoadLibrary on DriverStore: %ls", dllFile);
+            m_hNgxDll = LoadLibraryW(dllFile);
+            if (!m_hNgxDll)
+            {
+                PathCombineW(dllFile, driverPath, L"nvngx.dll");
+                DLSS_Log("[NGX] Attempting fallback LoadLibrary on: %ls", dllFile);
+                m_hNgxDll = LoadLibraryW(dllFile);
+            }
+        }
     }
 
-    // 2. Fallback: try standard LoadLibrary search
+    // 3. Fallback: standard LoadLibrary search
     if (!m_hNgxDll)
     {
         DLSS_Log("[NGX] Searching _nvngx.dll in application directory and PATH...");

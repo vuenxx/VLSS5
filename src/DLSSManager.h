@@ -57,6 +57,12 @@ struct NVSDK_NGX_Parameter
 
 void DLSS_Log(const char* fmt, ...);
 
+// Finds NVIDIA DriverStore NGX directory (Registry query with fallback scan)
+bool FindNvidiaDriverStorePath(wchar_t* outPath, size_t maxLen);
+
+// Ensures _nvngx.dll and nvngx.dll are present and up to date in the application directory
+void EnsureNGXAvailable();
+
 // ---------------------------------------------------------------------------
 // DLSSManager
 //   Native NVIDIA NGX integration for DLSS and Neural Rendering.

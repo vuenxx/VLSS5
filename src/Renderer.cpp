@@ -33,17 +33,42 @@ SamplerState      gSamp   : register(s0);
 
 cbuffer FpsConfig : register(b0)
 {
-    float2 g_screenSize;   // (width, height)
-    float2 g_fpsBoxSize;   // (180, 36)
-    int    g_fpsEnabled;   // 1 = enabled, 0 = disabled
-    float  g_sharpness;    // RCAS sharpness (0.0 = off, 0.3 = default, 1.0 = strong)
-    float2 g_padding;
+    float2 g_screenSize;       // (width, height)
+    float2 g_fpsBoxSize;       // (180, 36)
+    int    g_fpsEnabled;       // 1 = enabled, 0 = disabled
+    float  g_sharpness;        // RCAS sharpness (0.0 = off, 0.3 = default, 1.0 = strong)
+    int    g_useEdgeUpsample;  // 1 = edge-adaptive upsample, 0 = direct sample
+    float  g_pad0;
+    float2 g_srcTexelSize;     // (1.0 / workWidth, 1.0 / workHeight)
+    float2 g_pad1;
 };
+
+float4 EdgeAdaptiveUpsample(Texture2D<float4> tex, SamplerState samp, float2 uv, float2 srcTexelSize)
+{
+    // 1. 2x2 komşuluktaki 4 texel'i örnekle (bilinear taban)
+    float4 c00 = tex.Sample(samp, uv + float2(-srcTexelSize.x,  0.0f));
+    float4 c10 = tex.Sample(samp, uv + float2( srcTexelSize.x,  0.0f));
+    float4 c01 = tex.Sample(samp, uv + float2( 0.0f, -srcTexelSize.y));
+    float4 c11 = tex.Sample(samp, uv + float2( 0.0f,  srcTexelSize.y));
+    float4 center = tex.Sample(samp, uv);
+
+    // 2. Yerel kontrast/kenar yönünü tahmin et (basit Sobel benzeri fark)
+    float2 grad = float2(
+        (c10.r + c10.g + c10.b) - (c00.r + c00.g + c00.b),
+        (c11.r + c11.g + c11.b) - (c01.r + c01.g + c01.b));
+    float edgeStrength = saturate(length(grad) * 2.0f);
+
+    // 3. Kenar güçlüyse komşu ortalamadan uzaklaş (keskinlik), zayıfsa düz bilinear'a yakın kal
+    float4 neighborAvg = (c00 + c10 + c01 + c11) * 0.25f;
+    return lerp(center, center + (center - neighborAvg) * 0.5f, edgeStrength);
+}
 
 float4 PS(float4 pos : SV_Position,
           float2 uv  : TEXCOORD0) : SV_Target
 {
-    float4 color = gTex.Sample(gSamp, uv);
+    float4 color = g_useEdgeUpsample
+        ? EdgeAdaptiveUpsample(gTex, gSamp, uv, g_srcTexelSize)
+        : gTex.Sample(gSamp, uv);
 
     // AMD RCAS (Robust Contrast-Adaptive Sharpening)
     if (g_sharpness > 0.001f)
@@ -117,7 +142,10 @@ struct FpsCBufferData
     float fpsBoxSize[2];
     int   fpsEnabled;
     float sharpness;
-    float padding[2];
+    int   useEdgeUpsample;
+    float pad0;
+    float srcTexelSize[2];
+    float pad1[2];
 };
 
 // -----------------------------------------------------------------------
@@ -127,6 +155,14 @@ bool Renderer::Init(ID3D11Device* device, HWND overlayHwnd, int width, int heigh
 {
     m_width  = width;
     m_height = height;
+
+    // GPU Thread Priority: Boost to maximum (+7) so that VLSS5's pipeline
+    // (capture -> downscale -> NR model -> present) receives earlier time slices in WDDM scheduler.
+    ComPtr<IDXGIDevice> dxgiDevice;
+    if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice))) && dxgiDevice)
+    {
+        dxgiDevice->SetGPUThreadPriority(7); // -7..7 range, 7 = maximum
+    }
 
     if (!CreateSwapChain(device, overlayHwnd, width, height)) return false;
     if (!CreateRTV(device))                                    return false;
@@ -414,6 +450,9 @@ bool Renderer::CreateFpsResources(ID3D11Device* device)
     SelectObject(m_hFpsDC, m_hFpsBmp);
 
     m_lastRenderedFps = -1;
+    m_useEdgeUpsample = false;
+    m_srcTexelSize[0] = (m_width > 0) ? (1.0f / static_cast<float>(m_width)) : 0.0f;
+    m_srcTexelSize[1] = (m_height > 0) ? (1.0f / static_cast<float>(m_height)) : 0.0f;
 
     ComPtr<ID3D11DeviceContext> ctx;
     device->GetImmediateContext(&ctx);
@@ -519,15 +558,21 @@ void Renderer::UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx)
     if (!m_fpsCBuffer) return;
 
     FpsCBufferData cb = {};
-    cb.screenSize[0] = static_cast<float>(m_width);
-    cb.screenSize[1] = static_cast<float>(m_height);
-    cb.fpsBoxSize[0] = static_cast<float>(kFpsWidth);
-    cb.fpsBoxSize[1] = static_cast<float>(kFpsHeight);
-    cb.fpsEnabled    = m_fpsEnabled ? 1 : 0;
-    cb.sharpness     = m_sharpness;
+    cb.screenSize[0]     = static_cast<float>(m_width);
+    cb.screenSize[1]     = static_cast<float>(m_height);
+    cb.fpsBoxSize[0]     = static_cast<float>(kFpsWidth);
+    cb.fpsBoxSize[1]     = static_cast<float>(kFpsHeight);
+    cb.fpsEnabled        = m_fpsEnabled ? 1 : 0;
+    cb.sharpness         = m_sharpness;
+    cb.useEdgeUpsample   = m_useEdgeUpsample ? 1 : 0;
+    cb.pad0              = 0.0f;
+    cb.srcTexelSize[0]   = m_srcTexelSize[0];
+    cb.srcTexelSize[1]   = m_srcTexelSize[1];
+    cb.pad1[0]           = 0.0f;
+    cb.pad1[1]           = 0.0f;
 
     ctx->UpdateSubresource(m_fpsCBuffer.Get(), 0, nullptr, &cb, 0, 0);
-    m_cbufferDirty   = false;
+    m_cbufferDirty       = false;
 }
 
 // -----------------------------------------------------------------------
@@ -688,12 +733,28 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     ID3D11ShaderResourceView* srvs[2] = { renderSRV, m_fpsSRV.Get() };
     ctx->PSSetShaderResources(0, 2, srvs);
 
+    bool useLinear = (usedDlssNr && m_dlssnrManager && m_dlssnrManager->GetResolutionScale() < 0.999f);
+    int workW = (m_dlssnrManager && usedDlssNr) ? m_dlssnrManager->GetWorkWidth() : m_width;
+    int workH = (m_dlssnrManager && usedDlssNr) ? m_dlssnrManager->GetWorkHeight() : m_height;
+    if (workW <= 0) workW = m_width;
+    if (workH <= 0) workH = m_height;
+
+    float texelX = (workW > 0) ? (1.0f / static_cast<float>(workW)) : 0.0f;
+    float texelY = (workH > 0) ? (1.0f / static_cast<float>(workH)) : 0.0f;
+
+    if (m_useEdgeUpsample != useLinear || m_srcTexelSize[0] != texelX || m_srcTexelSize[1] != texelY)
+    {
+        m_useEdgeUpsample = useLinear;
+        m_srcTexelSize[0] = texelX;
+        m_srcTexelSize[1] = texelY;
+        m_cbufferDirty = true;
+    }
+
     if (m_cbufferDirty)
     {
         UpdateFpsConstantBuffer(ctx);
     }
 
-    bool useLinear = (usedDlssNr && m_dlssnrManager && m_dlssnrManager->GetResolutionScale() < 0.999f);
     ID3D11SamplerState* activeSampler = useLinear ? m_linearSampler.Get() : m_sampler.Get();
     ctx->PSSetSamplers(0, 1, &activeSampler);
     ctx->PSSetConstantBuffers(0, 1, m_fpsCBuffer.GetAddressOf());

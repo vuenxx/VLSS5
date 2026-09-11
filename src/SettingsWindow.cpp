@@ -269,6 +269,55 @@ void SettingsWindow::CreateControls(HWND hwnd)
     SetFont(s_btnClose, s_fontBold);
 }
 
+void SettingsWindow::UpdateLiveLabels()
+{
+    wchar_t buf[32];
+
+    int intPos = static_cast<int>(SendMessageW(s_sliderIntensity, TBM_GETPOS, 0, 0));
+    swprintf_s(buf, L"%.2fx", intPos / 100.0f);
+    SetWindowTextW(s_lblIntensityVal, buf);
+
+    int structPos = static_cast<int>(SendMessageW(s_sliderStructure, TBM_GETPOS, 0, 0));
+    swprintf_s(buf, L"%.2fx", structPos / 100.0f);
+    SetWindowTextW(s_lblStructureVal, buf);
+
+    int tonePos = static_cast<int>(SendMessageW(s_sliderTone, TBM_GETPOS, 0, 0));
+    swprintf_s(buf, L"%.2fx", tonePos / 100.0f);
+    SetWindowTextW(s_lblToneVal, buf);
+
+    int skinPos = static_cast<int>(SendMessageW(s_sliderSkin, TBM_GETPOS, 0, 0));
+    float skinVal = (skinPos / 100.0f) - 1.0f;
+    if (skinVal <= -0.99f)
+    {
+        SetWindowTextW(s_lblSkinVal, L"Otomatik");
+    }
+    else
+    {
+        swprintf_s(buf, L"%.2fx", skinVal);
+        SetWindowTextW(s_lblSkinVal, buf);
+    }
+
+    int sharpPos = static_cast<int>(SendMessageW(s_sliderSharpness, TBM_GETPOS, 0, 0));
+    wchar_t sharpBuf[32];
+    if (sharpPos <= 0)
+        swprintf_s(sharpBuf, L"Kapalı");
+    else
+        swprintf_s(sharpBuf, L"%%%d", sharpPos);
+    SetWindowTextW(s_lblSharpnessVal, sharpBuf);
+
+    int scalePos = static_cast<int>(SendMessageW(s_sliderResScale, TBM_GETPOS, 0, 0));
+    wchar_t scaleBuf[48];
+    if (scalePos >= 100)
+        swprintf_s(scaleBuf, L"%%100 (Kalite)");
+    else if (scalePos >= 85)
+        swprintf_s(scaleBuf, L"%%%d (Dengeli)", scalePos);
+    else if (scalePos >= 70)
+        swprintf_s(scaleBuf, L"%%%d (Performans)", scalePos);
+    else
+        swprintf_s(scaleBuf, L"%%%d (Ultra Perf)", scalePos);
+    SetWindowTextW(s_lblResScaleVal, scaleBuf);
+}
+
 void SettingsWindow::UpdateControlValues()
 {
     const auto& cfg = ConfigManager::Get().Config();
@@ -279,55 +328,27 @@ void SettingsWindow::UpdateControlValues()
     // Intensity: 0.0 - 2.0 -> 0 - 200
     int intPos = static_cast<int>(cfg.intensity * 100.0f + 0.5f);
     SendMessageW(s_sliderIntensity, TBM_SETPOS, TRUE, intPos);
-    wchar_t buf[32];
-    swprintf_s(buf, L"%.2fx", cfg.intensity);
-    SetWindowTextW(s_lblIntensityVal, buf);
 
     // Local Structure: 0.0 - 2.0 -> 0 - 200
     int structPos = static_cast<int>(cfg.localStructure * 100.0f + 0.5f);
     SendMessageW(s_sliderStructure, TBM_SETPOS, TRUE, structPos);
-    swprintf_s(buf, L"%.2fx", cfg.localStructure);
-    SetWindowTextW(s_lblStructureVal, buf);
 
     // Local Tone: 0.0 - 2.0 -> 0 - 200
     int tonePos = static_cast<int>(cfg.localTone * 100.0f + 0.5f);
     SendMessageW(s_sliderTone, TBM_SETPOS, TRUE, tonePos);
-    swprintf_s(buf, L"%.2fx", cfg.localTone);
-    SetWindowTextW(s_lblToneVal, buf);
 
     // Skin Structure: -1.0 - 2.0 -> 0 - 300
-    int skinPos = static_cast<int>((cfg.skinStructure + 1.0f) * 100.0f + 0.5f);
+    int skinPos = (cfg.skinStructure <= -0.99f) ? 0 : static_cast<int>((cfg.skinStructure + 1.0f) * 100.0f + 0.5f);
     SendMessageW(s_sliderSkin, TBM_SETPOS, TRUE, skinPos);
-    if (cfg.skinStructure <= -0.99f)
-        SetWindowTextW(s_lblSkinVal, L"Otomatik");
-    else
-    {
-        swprintf_s(buf, L"%.2fx", cfg.skinStructure);
-        SetWindowTextW(s_lblSkinVal, buf);
-    }
 
     // Sharpness: 0.0 - 1.0 -> 0 - 100
     int sharpPos = static_cast<int>(cfg.sharpness * 100.0f + 0.5f);
     SendMessageW(s_sliderSharpness, TBM_SETPOS, TRUE, sharpPos);
-    wchar_t sharpBuf[32];
-    if (cfg.sharpness <= 0.001f)
-        swprintf_s(sharpBuf, L"Kapalı");
-    else
-        swprintf_s(sharpBuf, L"%%%d", sharpPos);
-    SetWindowTextW(s_lblSharpnessVal, sharpBuf);
 
     // Resolution Scale: 50 - 100
     SendMessageW(s_sliderResScale, TBM_SETPOS, TRUE, cfg.resolutionScale);
-    wchar_t scaleBuf[48];
-    if (cfg.resolutionScale >= 100)
-        swprintf_s(scaleBuf, L"%%100 (Kalite)");
-    else if (cfg.resolutionScale >= 85)
-        swprintf_s(scaleBuf, L"%%%d (Dengeli)", cfg.resolutionScale);
-    else if (cfg.resolutionScale >= 70)
-        swprintf_s(scaleBuf, L"%%%d (Performans)", cfg.resolutionScale);
-    else
-        swprintf_s(scaleBuf, L"%%%d (Ultra Perf)", cfg.resolutionScale);
-    SetWindowTextW(s_lblResScaleVal, scaleBuf);
+
+    UpdateLiveLabels();
 
     Button_SetCheck(s_chkAutoMask, cfg.useAutoMask ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(s_chkStabilizer, cfg.opticalFlow ? BST_CHECKED : BST_UNCHECKED);
@@ -346,58 +367,30 @@ void SettingsWindow::OnSettingChanged()
 
     int intPos = static_cast<int>(SendMessageW(s_sliderIntensity, TBM_GETPOS, 0, 0));
     cfg.intensity = intPos / 100.0f;
-    wchar_t buf[32];
-    swprintf_s(buf, L"%.2fx", cfg.intensity);
-    SetWindowTextW(s_lblIntensityVal, buf);
 
     int structPos = static_cast<int>(SendMessageW(s_sliderStructure, TBM_GETPOS, 0, 0));
     cfg.localStructure = structPos / 100.0f;
-    swprintf_s(buf, L"%.2fx", cfg.localStructure);
-    SetWindowTextW(s_lblStructureVal, buf);
 
     int tonePos = static_cast<int>(SendMessageW(s_sliderTone, TBM_GETPOS, 0, 0));
     cfg.localTone = tonePos / 100.0f;
-    swprintf_s(buf, L"%.2fx", cfg.localTone);
-    SetWindowTextW(s_lblToneVal, buf);
 
     int skinPos = static_cast<int>(SendMessageW(s_sliderSkin, TBM_GETPOS, 0, 0));
     cfg.skinStructure = (skinPos / 100.0f) - 1.0f;
     if (cfg.skinStructure <= -0.99f)
     {
         cfg.skinStructure = -1.0f;
-        SetWindowTextW(s_lblSkinVal, L"Otomatik");
-    }
-    else
-    {
-        swprintf_s(buf, L"%.2fx", cfg.skinStructure);
-        SetWindowTextW(s_lblSkinVal, buf);
     }
 
     int sharpPos = static_cast<int>(SendMessageW(s_sliderSharpness, TBM_GETPOS, 0, 0));
     cfg.sharpness = sharpPos / 100.0f;
-    wchar_t sharpBuf[32];
-    if (cfg.sharpness <= 0.001f)
-        swprintf_s(sharpBuf, L"Kapalı");
-    else
-        swprintf_s(sharpBuf, L"%%%d", sharpPos);
-    SetWindowTextW(s_lblSharpnessVal, sharpBuf);
 
     int scalePos = static_cast<int>(SendMessageW(s_sliderResScale, TBM_GETPOS, 0, 0));
     cfg.resolutionScale = scalePos;
-    wchar_t scaleBuf[48];
-    if (cfg.resolutionScale >= 100)
-        swprintf_s(scaleBuf, L"%%100 (Kalite)");
-    else if (cfg.resolutionScale >= 85)
-        swprintf_s(scaleBuf, L"%%%d (Dengeli)", cfg.resolutionScale);
-    else if (cfg.resolutionScale >= 70)
-        swprintf_s(scaleBuf, L"%%%d (Performans)", cfg.resolutionScale);
-    else
-        swprintf_s(scaleBuf, L"%%%d (Ultra Perf)", cfg.resolutionScale);
-    SetWindowTextW(s_lblResScaleVal, scaleBuf);
 
     cfg.useAutoMask = (Button_GetCheck(s_chkAutoMask) == BST_CHECKED);
     cfg.opticalFlow = (Button_GetCheck(s_chkStabilizer) == BST_CHECKED);
 
+    UpdateLiveLabels();
 
     ConfigManager::Get().Save();
 
@@ -510,8 +503,19 @@ LRESULT CALLBACK SettingsWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
     }
 
     case WM_HSCROLL:
-        OnSettingChanged();
+    {
+        WORD scrollCode = LOWORD(wParam);
+        bool isFinalPosition = (scrollCode == TB_ENDTRACK || scrollCode == TB_THUMBPOSITION);
+
+        UpdateLiveLabels(); // sadece görsel label güncellemesi, her zaman çalışsın
+
+        HWND src = reinterpret_cast<HWND>(lParam);
+        bool isExpensiveSlider = (src == s_sliderResScale); // preset/style zaten combo, ayrı ele alınıyor
+
+        if (!isExpensiveSlider || isFinalPosition)
+            OnSettingChanged();
         return 0;
+    }
 
     case WM_COMMAND:
     {

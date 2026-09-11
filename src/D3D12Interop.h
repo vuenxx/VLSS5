@@ -69,9 +69,10 @@ private:
     // D3D12 core
     ComPtr<ID3D12Device>               m_d3d12Device;
     ComPtr<ID3D12CommandQueue>         m_cmdQueue;
-    static constexpr UINT              kCmdAllocCount = 2;
+    static constexpr UINT              kCmdAllocCount = 3;
     ComPtr<ID3D12CommandAllocator>     m_cmdAlloc[kCmdAllocCount];
     UINT                               m_allocIndex = 0;
+    UINT64                             m_allocFenceValue[kCmdAllocCount] = {};
     ComPtr<ID3D12GraphicsCommandList>  m_cmdList;
 
     // Shared resources (Input: Captured WGC Frame)

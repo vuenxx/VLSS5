@@ -2,6 +2,8 @@
 #include "ConfigManager.h"
 #include "DLSSManager.h"
 #include <cstdio>
+#include <shlwapi.h>
+#pragma comment(lib, "shlwapi.lib")
 
 bool DLSSNRManager::Init(ID3D12Device* device, ID3D12CommandQueue* queue, int width, int height)
 {
@@ -89,32 +91,46 @@ bool DLSSNRManager::LoadNGXCore()
 {
     if (m_hNgxCore && m_params) return true;
 
-    // Find driver store NGXCore path from registry
-    HKEY hKey = nullptr;
-    wchar_t driverPath[MAX_PATH] = {};
-    DWORD size = sizeof(driverPath);
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\NVIDIA Corporation\\Global\\NGXCore", 0, KEY_READ, &hKey) == ERROR_SUCCESS)
+    // 1. Try local application directory first
+    wchar_t exeDir[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
+    PathRemoveFileSpecW(exeDir);
+
+    wchar_t localDll[MAX_PATH] = {};
+    PathCombineW(localDll, exeDir, L"_nvngx.dll");
+
+    if (GetFileAttributesW(localDll) != INVALID_FILE_ATTRIBUTES)
     {
-        RegQueryValueExW(hKey, L"FullPath", nullptr, nullptr, (LPBYTE)driverPath, &size);
-        RegCloseKey(hKey);
+        DLSS_Log("[DLSS-NR] Loading NGX Core from local: %ls", localDll);
+        m_hNgxCore = LoadLibraryW(localDll);
+        if (m_hNgxCore && !GetProcAddress(m_hNgxCore, "NVSDK_NGX_D3D12_Init_Ext"))
+        {
+            DLSS_Log("[DLSS-NR] Warning: Local _nvngx.dll is missing D3D12 entry points, falling back to DriverStore.");
+            FreeLibrary(m_hNgxCore);
+            m_hNgxCore = nullptr;
+        }
     }
 
-    wchar_t ngxDllPath[MAX_PATH] = {};
-    if (wcslen(driverPath) > 0)
-    {
-        swprintf_s(ngxDllPath, L"%s\\_nvngx.dll", driverPath);
-    }
-    else
-    {
-        wcscpy_s(ngxDllPath, L"_nvngx.dll");
-    }
-
-    DLSS_Log("[DLSS-NR] Loading NGX Core from: %ls", ngxDllPath);
-    m_hNgxCore = LoadLibraryW(ngxDllPath);
+    // 2. Try DriverStore (Registry or dynamic scan)
     if (!m_hNgxCore)
     {
+        wchar_t driverPath[MAX_PATH] = {};
+        if (FindNvidiaDriverStorePath(driverPath, MAX_PATH))
+        {
+            wchar_t ngxDllPath[MAX_PATH] = {};
+            PathCombineW(ngxDllPath, driverPath, L"_nvngx.dll");
+            DLSS_Log("[DLSS-NR] Loading NGX Core from DriverStore: %ls", ngxDllPath);
+            m_hNgxCore = LoadLibraryW(ngxDllPath);
+        }
+    }
+
+    // 3. Fallback: standard LoadLibrary search
+    if (!m_hNgxCore)
+    {
+        DLSS_Log("[DLSS-NR] Searching _nvngx.dll via standard LoadLibrary...");
         m_hNgxCore = LoadLibraryW(L"_nvngx.dll");
     }
+
     if (!m_hNgxCore)
     {
         DLSS_Log("[DLSS-NR] ERROR: Cannot load _nvngx.dll! LastError=%lu", GetLastError());

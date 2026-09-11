@@ -22,6 +22,7 @@ private:
 
     static void CreateControls(HWND hwnd);
     static void UpdateControlValues();
+    static void UpdateLiveLabels();
     static void OnSettingChanged();
     static void StartKeybindCapture();
     static void EndKeybindCapture();

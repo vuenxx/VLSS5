@@ -87,12 +87,14 @@ private:
     bool                             m_lastRenderedDlss = false;
     bool                             m_lastRenderedDlssNr = false;
 
-    int  m_width           = 0;
-    int  m_height          = 0;
-    bool m_tearingSupported = false;
-    bool m_vsyncEnabled    = false;
-    float m_sharpness      = 0.30f;
-    bool  m_cbufferDirty   = true;
+    int   m_width            = 0;
+    int   m_height           = 0;
+    bool  m_tearingSupported = false;
+    bool  m_vsyncEnabled     = false;
+    float m_sharpness        = 0.30f;
+    bool  m_useEdgeUpsample  = false;
+    float m_srcTexelSize[2]  = { 0.0f, 0.0f };
+    bool  m_cbufferDirty     = true;
 
     std::unique_ptr<DLSSManager>         m_dlssManager;
     std::unique_ptr<DLSSNRManager>       m_dlssnrManager;
