@@ -20,7 +20,7 @@ void DLSS_Log(const char* fmt, ...)
         wchar_t path[MAX_PATH] = {};
         GetModuleFileNameW(nullptr, path, MAX_PATH);
         PathRemoveFileSpecW(path);
-        PathCombineW(path, path, L"vlss5_dlss.log");
+        PathCombineW(path, path, L"vlss5_logs.log");
         s_logFile = _wfsopen(path, L"w", _SH_DENYNO);
         if (s_logFile)
         {
@@ -577,7 +577,7 @@ ID3D11ShaderResourceView* DLSSManager::Evaluate(
         m_ngxParams->Set("DLSS.Input.Bias.Current.Color.Mask", static_cast<ID3D11Resource*>(reactiveMaskTexture));
 
     m_ngxParams->Set("Reset", m_reset ? 1 : 0);
-    m_ngxParams->Set("Sharpness", m_sharpness);
+    m_ngxParams->Set("Sharpness", 0.0f);
     m_reset = false;
 
     // Subrect dimensions, jitter, and MV scale — REQUIRED by NVIDIA NGX for DLSS evaluation

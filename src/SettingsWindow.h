@@ -44,8 +44,6 @@ private:
     static HWND s_lblToneVal;
     static HWND s_sliderSkin;
     static HWND s_lblSkinVal;
-    static HWND s_sliderSharpness;
-    static HWND s_lblSharpnessVal;
     static HWND s_sliderResScale;
     static HWND s_lblResScaleVal;
     static HWND s_chkAutoMask;

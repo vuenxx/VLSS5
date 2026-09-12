@@ -35,8 +35,51 @@ App::~App()
     g_appInstance = nullptr;
 }
 
+// Find IDXGIAdapter matching the configured GPU name, or prioritize RTX, or fallback to first hardware adapter
+static ComPtr<IDXGIAdapter1> FindConfiguredAdapter(const std::wstring& targetGpuName)
+{
+    ComPtr<IDXGIFactory1> factory;
+    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
+        return nullptr;
+
+    ComPtr<IDXGIAdapter1> matchedAdapter;
+    ComPtr<IDXGIAdapter1> rtxAdapter;
+    ComPtr<IDXGIAdapter1> firstHardwareAdapter;
+
+    UINT i = 0;
+    ComPtr<IDXGIAdapter1> adapter;
+    while (factory->EnumAdapters1(i++, &adapter) != DXGI_ERROR_NOT_FOUND)
+    {
+        DXGI_ADAPTER_DESC1 desc{};
+        adapter->GetDesc1(&desc);
+
+        if (!(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
+        {
+            if (!firstHardwareAdapter)
+                firstHardwareAdapter = adapter;
+
+            if (!rtxAdapter && (wcsstr(desc.Description, L"RTX") != nullptr || wcsstr(desc.Description, L"rtx") != nullptr))
+                rtxAdapter = adapter;
+
+            if (!targetGpuName.empty() && targetGpuName != L"Auto" && wcsstr(desc.Description, targetGpuName.c_str()) != nullptr)
+            {
+                matchedAdapter = adapter;
+                break;
+            }
+        }
+    }
+
+    if (matchedAdapter)
+        return matchedAdapter;
+
+    if (rtxAdapter)
+        return rtxAdapter;
+
+    return firstHardwareAdapter;
+}
+
 // ==========================================================================
-// InitD3D  (called once, device shared for the entire session)
+// InitD3D  (called once per session or on GPU switch)
 // ==========================================================================
 
 bool App::InitD3D()
@@ -51,14 +94,43 @@ bool App::InitD3D()
     D3D_FEATURE_LEVEL requested = D3D_FEATURE_LEVEL_11_0;
     D3D_FEATURE_LEVEL obtained  = {};
 
+    const std::wstring& preferredGpu = ConfigManager::Get().Config().selectedGpu;
+    ComPtr<IDXGIAdapter1> chosenAdapter = FindConfiguredAdapter(preferredGpu);
+
+    D3D_DRIVER_TYPE driverType = chosenAdapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
+
+    if (chosenAdapter)
+    {
+        DXGI_ADAPTER_DESC1 desc{};
+        chosenAdapter->GetDesc1(&desc);
+        DLSS_Log("[App] Initializing D3D11 device on selected GPU: %ls", desc.Description);
+    }
+    else
+    {
+        DLSS_Log("[App] Initializing D3D11 device on default hardware adapter.");
+    }
+
     HRESULT hr = D3D11CreateDevice(
-        nullptr,                // default adapter
-        D3D_DRIVER_TYPE_HARDWARE,
+        chosenAdapter.Get(),
+        driverType,
         nullptr,
         flags,
         &requested, 1,
         D3D11_SDK_VERSION,
         &m_device, &obtained, &m_context);
+
+    if (FAILED(hr) && chosenAdapter)
+    {
+        DLSS_Log("[App] Selected GPU initialization failed (0x%08X), falling back to default hardware adapter.", hr);
+        hr = D3D11CreateDevice(
+            nullptr,
+            D3D_DRIVER_TYPE_HARDWARE,
+            nullptr,
+            flags,
+            &requested, 1,
+            D3D11_SDK_VERSION,
+            &m_device, &obtained, &m_context);
+    }
 
     if (FAILED(hr)) return false;
 
@@ -74,6 +146,19 @@ bool App::InitD3D()
     }
 
     return true;
+}
+
+void App::SetPreferredGpu(const std::wstring& gpuName)
+{
+    if (m_state == AppState::Menu)
+    {
+        if (m_device)
+        {
+            m_context.Reset();
+            m_device.Reset();
+            DLSS_Log("[App] Preferred GPU set to '%ls'. Reset D3D11 device for next session.", gpuName.c_str());
+        }
+    }
 }
 
 // ==========================================================================
@@ -111,8 +196,10 @@ bool App::CreateOverlayWindow(HWND targetHwnd)
 
     if (!m_overlayHwnd) return false;
 
-    // Alpha = 255 → fully opaque visual output, layered enabled for mouse passthrough
-    SetLayeredWindowAttributes(m_overlayHwnd, 0, 255, LWA_ALPHA);
+    // Alpha = 254 → visually indistinguishable from 255 (fully opaque to the eye),
+    // but prevents Windows DWM from classifying the underlying game window as completely occluded.
+    // This allows the game to keep its Direct Flip / Reflex / Frame Generation scheduling active and unthrottled.
+    SetLayeredWindowAttributes(m_overlayHwnd, 0, 254, LWA_ALPHA);
 
     // Ekran görüntüsü (SS), Win+Shift+S, PrintScreen ve kayıt araçlarında DLSS 5 çıktısının
     // net şekilde görünmesi için WDA_NONE kullanıyoruz.
@@ -186,14 +273,9 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
     SettingsWindow::SetOnConfigChanged([this](const Dlss5Config& cfg) {
         if (m_renderer)
         {
-            m_renderer->SetSharpness(cfg.sharpness);
             if (m_renderer->GetDLSSNRManager())
             {
                 m_renderer->GetDLSSNRManager()->ApplyConfig(cfg);
-            }
-            if (m_renderer->GetDLSSManager())
-            {
-                m_renderer->GetDLSSManager()->SetSharpness(cfg.sharpness);
             }
         }
     });
@@ -230,6 +312,12 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
     m_fpsFrameCount = 0;
     m_currentFps    = 0;
     m_renderer->UpdateFps(m_context.Get(), 0);
+
+    // Log system state (process priority, power throttling, battery) at session start
+    LogSystemInfo();
+
+    // Start watchdog thread (500 ms polling, 2 s hang threshold)
+    StartWatchdog();
 
     m_state   = AppState::Capturing;
     m_running = true;
@@ -570,22 +658,67 @@ void App::Render(ID3D11ShaderResourceView* srv)
 {
     if (!srv) return;
 
+    LARGE_INTEGER frameStart, t0, t1, t2, perfFreq;
+    QueryPerformanceFrequency(&perfFreq);
+    QueryPerformanceCounter(&frameStart);
+
+    // --- Watchdog: mark render stage ---
+    m_currentStage.store("render", std::memory_order_relaxed);
+    QueryPerformanceCounter(&m_stageEnteredTime);
+
     // Measure our overlay window's actual render FPS
     m_fpsFrameCount++;
-    LARGE_INTEGER now;
-    QueryPerformanceCounter(&now);
-    double elapsed = double(now.QuadPart - m_fpsLastTime.QuadPart) / double(m_fpsFreq.QuadPart);
+    double elapsed = double(frameStart.QuadPart - m_fpsLastTime.QuadPart) / double(m_fpsFreq.QuadPart);
     if (elapsed >= 0.5) // update every 500 ms for a clean, stable reading
     {
         m_currentFps = static_cast<int>((m_fpsFrameCount / elapsed) + 0.5);
         m_fpsFrameCount = 0;
-        m_fpsLastTime = now;
+        m_fpsLastTime = frameStart;
         m_renderer->UpdateFps(m_context.Get(), m_currentFps);
     }
 
+    // --- RenderFrame stage ---
+    m_currentStage.store("RenderFrame", std::memory_order_relaxed);
+    QueryPerformanceCounter(&m_stageEnteredTime);
+    QueryPerformanceCounter(&t0);
     m_renderer->RenderFrame(m_context.Get(), srv);
+    QueryPerformanceCounter(&t1);
+
+    // --- Present stage ---
+    m_currentStage.store("Present", std::memory_order_relaxed);
+    QueryPerformanceCounter(&m_stageEnteredTime);
     m_renderer->Present();
+    QueryPerformanceCounter(&t2);
+
+    m_currentStage.store("idle", std::memory_order_relaxed);
+
+    // Compute timings
+    double renderMs  = double(t1.QuadPart - t0.QuadPart) * 1000.0 / double(perfFreq.QuadPart);
+    double presentMs = double(t2.QuadPart - t1.QuadPart) * 1000.0 / double(perfFreq.QuadPart);
+    double totalMs   = double(t2.QuadPart - frameStart.QuadPart) * 1000.0 / double(perfFreq.QuadPart);
+
+    // Accumulate for 5-second summary
+    m_sumTotalMs += totalMs;
+    if (totalMs > m_maxTotalMs) m_maxTotalMs = totalMs;
+    m_timingSamples++;
+
+    // Slow-frame threshold: >3× running average
+    if (m_timingSamples > 5)
+    {
+        double avgMs = m_sumTotalMs / static_cast<double>(m_timingSamples);
+        if (totalMs > avgMs * 3.0)
+            DLSS_Log("[Perf] YAVAS KARE: toplam=%.2f ms (ort=%.2f ms) | render=%.2f ms | present=%.2f ms",
+                totalMs, avgMs, renderMs, presentMs);
+    }
+
+    // 5-second perf summary
+    FlushPerfStats();
+
+    // 5-second WGC capture stats summary
+    if (m_captureManager)
+        m_captureManager->FlushCaptureStats();
 }
+
 
 // ==========================================================================
 // StopOverlay
@@ -597,6 +730,10 @@ void App::StopOverlay()
 
     m_running = false;
     m_state   = AppState::Menu;
+
+    // Stop watchdog before tearing down resources
+    StopWatchdog();
+    m_currentStage.store("idle", std::memory_order_relaxed);
 
     SettingsWindow::Hide();
 
@@ -671,4 +808,144 @@ LRESULT CALLBACK App::OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
     default:
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
+}
+
+// ==========================================================================
+// LogSystemInfo — Process priority, power throttling, battery status
+// ==========================================================================
+
+void App::LogSystemInfo()
+{
+    // 1. Process priority class
+    DWORD prio = GetPriorityClass(GetCurrentProcess());
+    const char* prioStr = "UNKNOWN";
+    switch (prio)
+    {
+    case IDLE_PRIORITY_CLASS:          prioStr = "IDLE"; break;
+    case BELOW_NORMAL_PRIORITY_CLASS:  prioStr = "BELOW_NORMAL"; break;
+    case NORMAL_PRIORITY_CLASS:        prioStr = "NORMAL"; break;
+    case ABOVE_NORMAL_PRIORITY_CLASS:  prioStr = "ABOVE_NORMAL"; break;
+    case HIGH_PRIORITY_CLASS:          prioStr = "HIGH"; break;
+    case REALTIME_PRIORITY_CLASS:      prioStr = "REALTIME"; break;
+    }
+    DLSS_Log("[System] Surec onceligi: %s (0x%08X)", prioStr, prio);
+
+    // 2. Power throttling state (Windows 10 1709+)
+    PROCESS_POWER_THROTTLING_STATE pts = {};
+    pts.Version = PROCESS_POWER_THROTTLING_CURRENT_VERSION;
+    if (GetProcessInformation(GetCurrentProcess(),
+            ProcessPowerThrottling, &pts, sizeof(pts)))
+    {
+        bool throttled = (pts.StateMask & PROCESS_POWER_THROTTLING_EXECUTION_SPEED) != 0;
+        DLSS_Log("[System] Guc kisitmasi (EcoQoS): %s  (StateMask=0x%08X, ControlMask=0x%08X)",
+            throttled ? "AKTIF (YAVAS MOD!)" : "DEVRE DISI", pts.StateMask, pts.ControlMask);
+    }
+    else
+    {
+        DLSS_Log("[System] GetProcessInformation(PowerThrottling) basarisiz (eski Windows surumu?)");
+    }
+
+    // 3. Battery / power source
+    SYSTEM_POWER_STATUS sps = {};
+    if (GetSystemPowerStatus(&sps))
+    {
+        const char* acLine = (sps.ACLineStatus == 1) ? "AC (priz)" :
+                             (sps.ACLineStatus == 0) ? "BATARYA"   : "bilinmiyor";
+        char batStr[32] = {};
+        if (sps.BatteryFlag == 128) // no battery
+            strcpy_s(batStr, "yok");
+        else
+            snprintf(batStr, sizeof(batStr), "%%%u", sps.BatteryLifePercent);
+
+        DLSS_Log("[System] Guc kaynagi: %s | Batarya: %s | BatteryFlag=0x%02X",
+            acLine, batStr, sps.BatteryFlag);
+    }
+}
+
+// ==========================================================================
+// StartWatchdog / StopWatchdog / WatchdogThreadProc
+//   Low-priority background thread that wakes every 500 ms.
+//   If the main render thread has been stuck in the same stage for >2 s,
+//   it logs a [Watchdog] warning.
+// ==========================================================================
+
+void App::StartWatchdog()
+{
+    if (m_watchdogRunning.load()) return;
+
+    QueryPerformanceCounter(&m_stageEnteredTime);
+    m_currentStage.store("idle", std::memory_order_relaxed);
+    m_watchdogRunning.store(true, std::memory_order_relaxed);
+
+    m_watchdogThread = CreateThread(
+        nullptr, 0, WatchdogThreadProc, this, 0, nullptr);
+
+    if (m_watchdogThread)
+        SetThreadPriority(m_watchdogThread, THREAD_PRIORITY_LOWEST);
+}
+
+void App::StopWatchdog()
+{
+    m_watchdogRunning.store(false, std::memory_order_relaxed);
+    if (m_watchdogThread)
+    {
+        WaitForSingleObject(m_watchdogThread, 2000);
+        CloseHandle(m_watchdogThread);
+        m_watchdogThread = nullptr;
+    }
+}
+
+DWORD WINAPI App::WatchdogThreadProc(LPVOID param)
+{
+    App* app = static_cast<App*>(param);
+    LARGE_INTEGER freq;
+    QueryPerformanceFrequency(&freq);
+
+    while (app->m_watchdogRunning.load(std::memory_order_relaxed))
+    {
+        Sleep(500);
+
+        const char* stage = app->m_currentStage.load(std::memory_order_relaxed);
+        if (!stage || strcmp(stage, "idle") == 0) continue;
+
+        LARGE_INTEGER now;
+        QueryPerformanceCounter(&now);
+        double stuckMs = static_cast<double>(now.QuadPart - app->m_stageEnteredTime.QuadPart)
+                         * 1000.0 / static_cast<double>(freq.QuadPart);
+
+        if (stuckMs > 2000.0)
+            DLSS_Log("[Watchdog] UYARI: render thread '%s' asamasinda %.0f ms dir takildi!",
+                stage, stuckMs);
+    }
+    return 0;
+}
+
+// ==========================================================================
+// FlushPerfStats — Per-frame pipeline timing 5-second summary
+// ==========================================================================
+
+void App::FlushPerfStats()
+{
+    if (m_timingSamples == 0) return;
+
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+
+    if (m_lastPerfLogTime.QuadPart != 0)
+    {
+        LARGE_INTEGER freq;
+        QueryPerformanceFrequency(&freq);
+        double sinceMs = static_cast<double>(now.QuadPart - m_lastPerfLogTime.QuadPart)
+                         * 1000.0 / static_cast<double>(freq.QuadPart);
+        if (sinceMs < 5000.0) return;
+    }
+    m_lastPerfLogTime = now;
+
+    double avgMs = m_sumTotalMs / static_cast<double>(m_timingSamples);
+    DLSS_Log("[Perf] ozet: %llu kare | ort toplam: %.2f ms | maks toplam: %.2f ms",
+        m_timingSamples, avgMs, m_maxTotalMs);
+
+    m_sumTotalMs    = 0.0;
+    m_maxTotalMs    = 0.0;
+    m_timingSamples = 0;
 }

@@ -182,7 +182,17 @@ bool D3D12Interop::CreateDownscaleResources()
     SamplerState      gLinear : register(s0);
     float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     {
-        return gSrcTex.Sample(gLinear, uv);
+        // 4-tap jittered box filter for smooth anti-aliased proxy downsampling
+        float2 dims;
+        gSrcTex.GetDimensions(dims.x, dims.y);
+        float2 halfTexel = 0.5f / dims;
+
+        float4 s0 = gSrcTex.Sample(gLinear, uv + float2(-halfTexel.x, -halfTexel.y));
+        float4 s1 = gSrcTex.Sample(gLinear, uv + float2( halfTexel.x, -halfTexel.y));
+        float4 s2 = gSrcTex.Sample(gLinear, uv + float2(-halfTexel.x,  halfTexel.y));
+        float4 s3 = gSrcTex.Sample(gLinear, uv + float2( halfTexel.x,  halfTexel.y));
+
+        return 0.25f * (s0 + s1 + s2 + s3);
     }
     )HLSL";
 
@@ -592,8 +602,36 @@ bool D3D12Interop::BeginFrame(
                     HRESULT rr = m_d3d12Device->GetDeviceRemovedReason();
                     if (FAILED(rr))
                     {
-                        DLSS_Log("[D3D12Interop] CRITICAL: D3D12 Device Removed! Reason: 0x%08X", rr);
+                        const char* rrDesc = "bilinmeyen hata";
+                        switch (rr)
+                        {
+                        case DXGI_ERROR_DEVICE_HUNG:
+                            rrDesc = "DEVICE_HUNG: GPU surucusu yanit vermedi (TDR tetiklendi)";
+                            break;
+                        case DXGI_ERROR_DEVICE_REMOVED:
+                            rrDesc = "DEVICE_REMOVED: GPU fiziksel olarak kaldirildi veya surucusu yeniden yuklendi";
+                            break;
+                        case DXGI_ERROR_DEVICE_RESET:
+                            rrDesc = "DEVICE_RESET: GPU surucusu sifirlandi (surucu çökmesi / kurtarma)";
+                            break;
+                        case DXGI_ERROR_DRIVER_INTERNAL_ERROR:
+                            rrDesc = "DRIVER_INTERNAL_ERROR: NVIDIA surucu ic hatasi (BSOD riskteyiz!)";
+                            break;
+                        case DXGI_ERROR_INVALID_CALL:
+                            rrDesc = "INVALID_CALL: gecersiz D3D12 cagri dizisi (uygulama hatasi)";
+                            break;
+                        default:
+                            break;
+                        }
+                        DLSS_Log("[D3D12Interop] KRITIK: D3D12 Cihaz Kaldirildi! (0x%08X) %s", rr, rrDesc);
                     }
+                }
+                // Also check D3D11 device
+                if (m_d3d11Dev)
+                {
+                    HRESULT rr11 = m_d3d11Dev->GetDeviceRemovedReason();
+                    if (FAILED(rr11))
+                        DLSS_Log("[D3D12Interop] KRITIK: D3D11 Cihaz da Kaldirildi! (0x%08X)", rr11);
                 }
             }
         }

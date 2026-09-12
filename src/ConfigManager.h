@@ -11,13 +11,15 @@ struct Dlss5Config
     float skinStructure  = -1.0f;   // -1.0 = Otomatik / takip et, 0.0 - 2.0 = Manuel ten ayarı
     bool  useAutoMask    = true;    // Otomatik ten maskesi
     int   resolutionScale = 100;    // 50 - 100 (% Model Çözünürlüğü / Performans Modu)
-    float sharpness      = 0.30f;   // 0.00 - 1.00 (AMD RCAS Keskinleştirme)
     bool  temporalStabilizer = false;// Gölge & hareket sabitleyici (Zorunlu reset bayrağı)
     bool  opticalFlow        = true; // Optik akış hareket vektörleri (GPU tabanlı gerçek zamanlı hareket takibi)
 
     // Settings window toggle hotkey (Default: INSERT)
     UINT  settingsVk     = VK_INSERT;
     UINT  settingsMod    = 0;       // MOD_CONTROL, MOD_ALT, MOD_SHIFT vs. (0 = bare key)
+
+    // Selected GPU adapter description (e.g. L"Auto" or specific name)
+    std::wstring selectedGpu = L"Auto";
 
     std::wstring FormatHotkey() const;
 };

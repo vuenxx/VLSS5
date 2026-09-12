@@ -1,7 +1,7 @@
 #include "CaptureManager.h"
 
-// 3 frame pool buffers allow GPU to pipelining without dropping frames
-static constexpr int32_t kFramePoolBufferCount = 3;
+// 5 frame pool buffers allow GPU pipelining at high refresh rates (120-240 FPS / Frame Gen) without dropping frames
+static constexpr int32_t kFramePoolBufferCount = 5;
 
 // -----------------------------------------------------------------------
 // Start
@@ -66,6 +66,27 @@ bool CaptureManager::Start(HWND targetHwnd, ID3D11Device* device)
             HANDLE evt = m_frameEvent;
             if (evt)
                 SetEvent(evt);
+
+            // --- WGC frame-gap health measurement ---
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            if (m_lastFrameArrivalTime.QuadPart != 0)
+            {
+                LARGE_INTEGER freq;
+                QueryPerformanceFrequency(&freq);
+                double gapMs = static_cast<double>(now.QuadPart - m_lastFrameArrivalTime.QuadPart)
+                               * 1000.0 / static_cast<double>(freq.QuadPart);
+
+                if (gapMs > m_maxFrameGapMs) m_maxFrameGapMs = gapMs;
+                m_sumFrameGapMs += gapMs;
+                m_frameGapSamples++;
+
+                // Threshold: >200 ms means WGC may have been paused (window minimised/occluded)
+                if (gapMs > 200.0)
+                    DLSS_Log("[Capture] UYARI: iki WGC karesi arasinda %.1f ms bosluk "
+                             "(pencere minimize/occluded olmus ya da capture session durmus olabilir)", gapMs);
+            }
+            m_lastFrameArrivalTime = now;
         });
 
     // --- 5. Create session and start capture ---
@@ -110,6 +131,12 @@ void CaptureManager::Stop()
     Sleep(15);
 
     ReleaseCurrentFrame();
+
+    if (m_nextFrame)
+    {
+        m_nextFrame.Close();
+        m_nextFrame = nullptr;
+    }
 
     for (auto& entry : m_srvCache)
     {
@@ -158,22 +185,62 @@ ID3D11ShaderResourceView* CaptureManager::AcquireCurrentFrameSRV(ID3D11Device* d
 {
     if (!m_newFrame.load(std::memory_order_acquire)) return nullptr;
 
-    auto frame = m_framePool.TryGetNextFrame();
-    if (!frame) return nullptr;
+    winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame frame{ nullptr };
 
-    // Latency eliminator: if multiple frames arrived, keep the absolute freshest
-    while (auto newerFrame = m_framePool.TryGetNextFrame())
+    if (m_nextFrame)
     {
-        frame.Close();
-        frame = newerFrame;
+        frame = m_nextFrame;
+        m_nextFrame = nullptr;
+    }
+    else
+    {
+        frame = m_framePool.TryGetNextFrame();
     }
 
-    m_newFrame.store(false, std::memory_order_relaxed);
+    if (!frame)
+    {
+        m_newFrame.store(false, std::memory_order_relaxed);
+        m_nullFrameStreak++;
+        if (m_nullFrameStreak == kNullFrameWarnThreshold)
+            DLSS_Log("[Capture] UYARI: %u ardisik TryGetNextFrame() null donus "
+                     "(WGC session donmus ya da oyun penceresi gizlenmis olabilir)", kNullFrameWarnThreshold);
+        return nullptr;
+    }
+    m_nullFrameStreak = 0; // sifirla: gecerli frame geldi
+
+    // Check if another frame has already arrived in the pool
+    auto peekFrame = m_framePool.TryGetNextFrame();
+    if (peekFrame)
+    {
+        // If there is severe backlog (3+ frames accumulated, e.g. after lag spike or stall),
+        // drain older frames to keep latency low, but preserve sequential cadence when backlog is small (120-240 FPS / Frame Gen).
+        while (auto newerFrame = m_framePool.TryGetNextFrame())
+        {
+            frame.Close();
+            frame = peekFrame;
+            peekFrame = newerFrame;
+        }
+
+        m_nextFrame = peekFrame;
+        // Keep m_newFrame = true so the render loop immediately consumes the next queued frame without sleeping
+        m_newFrame.store(true, std::memory_order_release);
+    }
+    else
+    {
+        m_nextFrame = nullptr;
+        m_newFrame.store(false, std::memory_order_relaxed);
+    }
 
     // --- Check for window resize ---
     auto size = frame.ContentSize();
     if (size.Width != m_captureSize.Width || size.Height != m_captureSize.Height)
     {
+        if (m_nextFrame)
+        {
+            m_nextFrame.Close();
+            m_nextFrame = nullptr;
+        }
+
         m_captureSize = size;
         m_width       = size.Width;
         m_height      = size.Height;
@@ -193,6 +260,7 @@ ID3D11ShaderResourceView* CaptureManager::AcquireCurrentFrameSRV(ID3D11Device* d
             size);
 
         frame.Close();
+        m_newFrame.store(false, std::memory_order_relaxed);
         return nullptr;
     }
 
@@ -304,7 +372,7 @@ bool CaptureManager::CopyFrame(ID3D11DeviceContext* ctx, ID3D11Texture2D* dst)
         m_framePool.Recreate(
             m_winrtDevice,
             winrt::Windows::Graphics::DirectX::DirectXPixelFormat::B8G8R8A8UIntNormalized,
-            3,
+            kFramePoolBufferCount,
             size);
 
         frame.Close();
@@ -326,4 +394,37 @@ bool CaptureManager::CopyFrame(ID3D11DeviceContext* ctx, ID3D11Texture2D* dst)
 
     frame.Close();
     return SUCCEEDED(hr);
+}
+
+// -----------------------------------------------------------------------
+// FlushCaptureStats — call every ~5 s from the render thread
+//   Logs a health summary of WGC frame delivery and resets accumulators.
+// -----------------------------------------------------------------------
+void CaptureManager::FlushCaptureStats()
+{
+    LARGE_INTEGER now;
+    QueryPerformanceCounter(&now);
+
+    // Throttle: only log every 5 seconds
+    if (m_lastGapLogTime.QuadPart != 0)
+    {
+        LARGE_INTEGER freq;
+        QueryPerformanceFrequency(&freq);
+        double sinceLastMs = static_cast<double>(now.QuadPart - m_lastGapLogTime.QuadPart)
+                             * 1000.0 / static_cast<double>(freq.QuadPart);
+        if (sinceLastMs < 5000.0) return;
+    }
+    m_lastGapLogTime = now;
+
+    if (m_frameGapSamples > 0)
+    {
+        double avgGapMs = m_sumFrameGapMs / static_cast<double>(m_frameGapSamples);
+        DLSS_Log("[Capture] ozet: %llu WGC karesi | ort bosluk: %.2f ms | maks bosluk: %.2f ms",
+            m_frameGapSamples, avgGapMs, m_maxFrameGapMs);
+
+        // Reset accumulators for the next window
+        m_maxFrameGapMs   = 0.0;
+        m_sumFrameGapMs   = 0.0;
+        m_frameGapSamples = 0;
+    }
 }

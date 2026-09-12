@@ -6,7 +6,11 @@
 #include "SettingsWindow.h"
 #include "resource.h"
 #include <shlwapi.h>
+#include <commctrl.h>
+#include <algorithm>
+#include <cwctype>
 #pragma comment(lib, "shlwapi.lib")
+#pragma comment(lib, "comctl32.lib")
 
 // ---------------------------------------------------------------------------
 // Control IDs
@@ -21,6 +25,8 @@
 #define IDC_CHK_FPS           108   // FPS Display Checkbox
 #define IDC_CHK_DLSS          109   // DLSS 5 Toggle Checkbox
 #define IDC_BTN_DLSS_SETTINGS 110   // DLSS 5 Settings Button
+#define IDC_COMBO_GPU         111   // GPU Selection ComboBox
+#define IDC_BTN_GPU_HELP      112   // GPU Help '?' Button
 #define ID_GLOBAL_HOTKEY      201   // Global capture toggle hotkey
 #define IDT_HOTKEY_TIMER      301   // Fallback hotkey poller (50ms)
 
@@ -43,9 +49,21 @@ static const COLORREF COLOR_LIST_SEL    = RGB(16, 45, 20);     // Electric green
 static std::unique_ptr<App>    g_app;
 static std::vector<WindowInfo> g_windows;
 
+struct GpuAdapterInfo
+{
+    std::wstring name;
+    std::wstring displayName;
+};
+static std::vector<GpuAdapterInfo> g_gpuList;
+
 static HWND                    g_mainHwnd        = nullptr;
 static HWND                    g_listBox         = nullptr;
 static HWND                    g_lblStatus       = nullptr;
+static HWND                    g_lblGpu          = nullptr;
+static HWND                    g_comboGpu        = nullptr;
+static HWND                    g_btnGpuHelp      = nullptr;
+static HWND                    g_tipGpuHelp      = nullptr;
+static HWND                    g_lblKeybindTitle = nullptr;
 static HWND                    g_lblKeybind      = nullptr;
 static HWND                    g_btnKeybind      = nullptr;
 static HWND                    g_btnDlssSettings = nullptr;
@@ -104,6 +122,195 @@ static void PopulateList(HWND menuHwnd)
     }
     if (!g_windows.empty())
         SendMessageW(g_listBox, LB_SETCURSEL, 0, 0);
+}
+
+static bool ContainsCaseInsensitive(const std::wstring& str, const std::wstring& search)
+{
+    if (search.empty()) return true;
+    if (str.length() < search.length()) return false;
+    auto it = std::search(
+        str.begin(), str.end(),
+        search.begin(), search.end(),
+        [](wchar_t ch1, wchar_t ch2) {
+            return towlower(ch1) == towlower(ch2);
+        });
+    return (it != str.end());
+}
+
+static HWND CreateButtonTooltip(HWND hParent, HWND hTarget, const wchar_t* text)
+{
+    HWND hTip = CreateWindowExW(
+        WS_EX_TOPMOST,
+        TOOLTIPS_CLASS,
+        nullptr,
+        WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP | TTS_BALLOON,
+        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
+        hParent, nullptr, GetModuleHandleW(nullptr), nullptr);
+
+    if (!hTip) return nullptr;
+
+    SetWindowPos(hTip, HWND_TOPMOST, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
+    TOOLINFOW ti = {};
+    ti.cbSize   = sizeof(TOOLINFOW);
+    ti.uFlags   = TTF_SUBCLASS | TTF_IDISHWND;
+    ti.hwnd     = hParent;
+    ti.uId      = reinterpret_cast<UINT_PTR>(hTarget);
+    ti.lpszText = const_cast<LPWSTR>(text);
+
+    SendMessageW(hTip, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&ti));
+    SendMessageW(hTip, TTM_SETMAXTIPWIDTH, 0, 360);
+    SendMessageW(hTip, TTM_SETDELAYTIME, TTDT_INITIAL, 50);
+    SendMessageW(hTip, TTM_SETDELAYTIME, TTDT_AUTOPOP, 10000);
+
+    return hTip;
+}
+
+static void PopulateGpuList(HWND /*hwnd*/)
+{
+    if (!g_comboGpu) return;
+
+    g_gpuList.clear();
+    SendMessageW(g_comboGpu, CB_RESETCONTENT, 0, 0);
+
+    // Option 0: Auto (RTX Priority)
+    GpuAdapterInfo autoOpt;
+    autoOpt.name = L"Auto";
+    autoOpt.displayName = L"⚡ Otomatik (RTX Öncelikli)";
+    g_gpuList.push_back(autoOpt);
+
+    ComPtr<IDXGIFactory1> factory;
+    if (SUCCEEDED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
+    {
+        UINT i = 0;
+        ComPtr<IDXGIAdapter1> adapter;
+        while (factory->EnumAdapters1(i++, &adapter) != DXGI_ERROR_NOT_FOUND)
+        {
+            DXGI_ADAPTER_DESC1 desc{};
+            adapter->GetDesc1(&desc);
+
+            if (!(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
+            {
+                GpuAdapterInfo info;
+                info.name = desc.Description;
+                SIZE_T vramMB = desc.DedicatedVideoMemory / (1024 * 1024);
+
+                wchar_t disp[256];
+                if (vramMB >= 1024)
+                {
+                    swprintf_s(disp, L"%ls (%.1f GB)", desc.Description, static_cast<float>(vramMB) / 1024.0f);
+                }
+                else if (vramMB > 0)
+                {
+                    swprintf_s(disp, L"%ls (%zu MB)", desc.Description, vramMB);
+                }
+                else
+                {
+                    swprintf_s(disp, L"%ls", desc.Description);
+                }
+
+                info.displayName = disp;
+                g_gpuList.push_back(info);
+            }
+        }
+    }
+
+    if (g_gpuList.size() <= 1)
+    {
+        GpuAdapterInfo info;
+        info.name = L"Varsayılan Grafik Kartı";
+        info.displayName = L"Varsayılan Grafik Kartı";
+        g_gpuList.push_back(info);
+    }
+
+    const std::wstring& savedGpu = ConfigManager::Get().Config().selectedGpu;
+    int selectedIndex = 0; // Default to "⚡ Otomatik (RTX Öncelikli)"
+
+    if (savedGpu.empty() || savedGpu == L"Auto")
+    {
+        selectedIndex = 0;
+        // Check if an RTX card is available to log/verify
+        bool hasRtx = false;
+        for (size_t idx = 1; idx < g_gpuList.size(); ++idx)
+        {
+            if (ContainsCaseInsensitive(g_gpuList[idx].name, L"RTX"))
+            {
+                hasRtx = true;
+                DLSS_Log("[Main] GPU Auto mode: RTX adapter ready (%ls)", g_gpuList[idx].name.c_str());
+                break;
+            }
+        }
+        if (!hasRtx && g_gpuList.size() > 1)
+        {
+            SetStatus(L"⚠ Sistemde RTX kart bulunamadı! DLSS5 için RTX gereklidir.");
+        }
+
+        if (savedGpu.empty())
+        {
+            ConfigManager::Get().Config().selectedGpu = L"Auto";
+            ConfigManager::Get().Save();
+        }
+    }
+    else
+    {
+        // Check if the saved GPU exists on this machine
+        int matchedIdx = -1;
+        for (size_t idx = 1; idx < g_gpuList.size(); ++idx)
+        {
+            if (ContainsCaseInsensitive(g_gpuList[idx].name, savedGpu))
+            {
+                matchedIdx = static_cast<int>(idx);
+                break;
+            }
+        }
+
+        if (matchedIdx != -1)
+        {
+            selectedIndex = matchedIdx;
+        }
+        else
+        {
+            // SELF-HEALING: The saved config references hardware not present on this machine!
+            // Automatically find the best GPU on this system (prioritize RTX).
+            int rtxIdx = -1;
+            for (size_t idx = 1; idx < g_gpuList.size(); ++idx)
+            {
+                if (ContainsCaseInsensitive(g_gpuList[idx].name, L"RTX"))
+                {
+                    rtxIdx = static_cast<int>(idx);
+                    break;
+                }
+            }
+
+            if (rtxIdx != -1)
+            {
+                selectedIndex = rtxIdx;
+                ConfigManager::Get().Config().selectedGpu = g_gpuList[rtxIdx].name;
+                ConfigManager::Get().Save();
+
+                std::wstring msg = L"Farklı donanım tespit edildi. Sisteminizdeki " + g_gpuList[rtxIdx].name + L" otomatik seçildi.";
+                SetStatus(msg.c_str());
+                DLSS_Log("[Main] Foreign GPU '%ls' not found. Self-healed config to: %ls", savedGpu.c_str(), g_gpuList[rtxIdx].name.c_str());
+            }
+            else
+            {
+                selectedIndex = 0; // Fallback to Auto
+                ConfigManager::Get().Config().selectedGpu = L"Auto";
+                ConfigManager::Get().Save();
+
+                SetStatus(L"⚠ Farklı donanım tespit edildi ve RTX kart bulunamadı! (DLSS5 için RTX gereklidir)");
+                DLSS_Log("[Main] Foreign GPU '%ls' not found. No RTX detected on this system.", savedGpu.c_str());
+            }
+        }
+    }
+
+    for (size_t idx = 0; idx < g_gpuList.size(); ++idx)
+    {
+        SendMessageW(g_comboGpu, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(g_gpuList[idx].displayName.c_str()));
+    }
+
+    SendMessageW(g_comboGpu, CB_SETCURSEL, selectedIndex, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -309,7 +516,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // Owner-drawn ListBox with dark background & neon highlights
         g_listBox = CreateWindowExW(0, L"LISTBOX", nullptr,
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
-            28, 102, 534, 175,
+            28, 100, 534, 160,
             hwnd, reinterpret_cast<HMENU>(IDC_WINDOWLIST), nullptr, nullptr);
         SF(g_listBox, g_fontNormal);
         SendMessageW(g_listBox, LB_SETITEMHEIGHT, 0, 30);
@@ -317,14 +524,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // ---- Refresh Button ----
         g_btnRefresh = CreateWindowW(L"BUTTON", L"Yenile",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            28, 285, 80, 34,
+            28, 272, 80, 34,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_REFRESH), nullptr, nullptr);
         SF(g_btnRefresh, g_fontBold);
 
         // ---- VSync Switch Checkbox ----
         g_chkVSync = CreateWindowW(L"BUTTON", L" VSync",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            118, 290, 85, 24,
+            118, 277, 85, 24,
             hwnd, reinterpret_cast<HMENU>(IDC_CHK_VSYNC), nullptr, nullptr);
         SF(g_chkVSync, g_fontNormal);
         Button_SetCheck(g_chkVSync, g_vsyncEnabled ? BST_CHECKED : BST_UNCHECKED);
@@ -332,7 +539,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // ---- FPS Overlay Switch Checkbox ----
         g_chkFps = CreateWindowW(L"BUTTON", L" FPS Göstergesi",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            210, 290, 130, 24,
+            210, 277, 130, 24,
             hwnd, reinterpret_cast<HMENU>(IDC_CHK_FPS), nullptr, nullptr);
         SF(g_chkFps, g_fontNormal);
         Button_SetCheck(g_chkFps, g_fpsEnabled ? BST_CHECKED : BST_UNCHECKED);
@@ -340,46 +547,67 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // ---- VLSS5 Switch Checkbox ----
         g_chkDlss = CreateWindowW(L"BUTTON", L" VLSS5 (Nöral)",
             WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            350, 290, 210, 24,
+            350, 277, 210, 24,
             hwnd, reinterpret_cast<HMENU>(IDC_CHK_DLSS), nullptr, nullptr);
         SF(g_chkDlss, g_fontNormal);
         Button_SetCheck(g_chkDlss, g_dlssEnabled ? BST_CHECKED : BST_UNCHECKED);
 
-        // ---- Keybind Panel Labels & VLSS5 Settings Button ----
-        HWND lblKeybindTitle = CreateWindowW(L"STATIC", L"Overlay Kısayolu:",
-            WS_CHILD | WS_VISIBLE, 28, 350, 130, 22,
+        // ---- GPU Selection (Inside Card) ----
+        g_lblGpu = CreateWindowW(L"STATIC", L"Grafik Kartı (GPU):",
+            WS_CHILD | WS_VISIBLE, 32, 332, 132, 22,
             hwnd, nullptr, nullptr, nullptr);
-        SF(lblKeybindTitle, g_fontNormal);
+        SF(g_lblGpu, g_fontNormal);
+
+        g_comboGpu = CreateWindowExW(0, L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
+            166, 328, 360, 200,
+            hwnd, reinterpret_cast<HMENU>(IDC_COMBO_GPU), nullptr, nullptr);
+        SF(g_comboGpu, g_fontNormal);
+
+        g_btnGpuHelp = CreateWindowW(L"BUTTON", L"?",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            532, 327, 26, 26,
+            hwnd, reinterpret_cast<HMENU>(IDC_BTN_GPU_HELP), nullptr, nullptr);
+        SF(g_btnGpuHelp, g_fontBold);
+
+        g_tipGpuHelp = CreateButtonTooltip(hwnd, g_btnGpuHelp,
+            L"DLSS5 kullanmak için RTX bir kart gereklidir. AMD kartlarda çalışmaz!");
+
+        // ---- Keybind Panel Labels & VLSS5 Settings Button (Inside Card) ----
+        g_lblKeybindTitle = CreateWindowW(L"STATIC", L"Overlay Kısayolu:",
+            WS_CHILD | WS_VISIBLE, 32, 372, 132, 22,
+            hwnd, nullptr, nullptr, nullptr);
+        SF(g_lblKeybindTitle, g_fontNormal);
 
         g_lblKeybind = CreateWindowW(L"STATIC", L"",
             WS_CHILD | WS_VISIBLE | SS_CENTER,
-            162, 346, 105, 30,
+            166, 368, 105, 30,
             hwnd, reinterpret_cast<HMENU>(IDC_LBL_KEYBIND), nullptr, nullptr);
         SF(g_lblKeybind, g_fontBold);
         UpdateKeybindLabel();
 
         g_btnKeybind = CreateWindowW(L"BUTTON", L"Değiştir",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            272, 346, 78, 30,
+            276, 368, 78, 30,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_KEYBIND), nullptr, nullptr);
         SF(g_btnKeybind, g_fontNormal);
 
         g_btnDlssSettings = CreateWindowW(L"BUTTON", L"⚙ VLSS5 Ayarları",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            358, 346, 202, 30,
+            360, 368, 200, 30,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_DLSS_SETTINGS), nullptr, nullptr);
         SF(g_btnDlssSettings, g_fontBold);
 
         // ---- Start Button (Big Neon Action Button) ----
         g_btnStart = CreateWindowW(L"BUTTON", L"BAŞLAT  ►",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            28, 400, 534, 46,
+            28, 424, 534, 46,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_START), nullptr, nullptr);
         SF(g_btnStart, g_fontTitle);
 
         // ---- Status bar ----
         g_lblStatus = CreateWindowW(L"STATIC", L"Hedef uygulamayı seçin veya istediğiniz penceredeyken ALT+S basın.",
-            WS_CHILD | WS_VISIBLE, 28, 458, 534, 20,
+            WS_CHILD | WS_VISIBLE, 28, 482, 534, 20,
             hwnd, reinterpret_cast<HMENU>(IDC_LBL_STATUS), nullptr, nullptr);
         SF(g_lblStatus, g_fontSmall);
 
@@ -387,8 +615,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         RegisterAppHotkey(hwnd);
         SetTimer(hwnd, IDT_HOTKEY_TIMER, 50, nullptr);
 
-        // Populate initial list
+        // Populate initial lists
         PopulateList(hwnd);
+        PopulateGpuList(hwnd);
         break;
     }
 
@@ -439,9 +668,9 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         const wchar_t tips[] = L"[F8] Odak  |  [F9] FPS  |  [F10] VLSS5  |  [Alt+S] Başlat";
         TextOutW(hdc, 280, 24, tips, static_cast<int>(wcslen(tips)));
 
-        // 3. Card Panel behind Keybind row
-        RECT cardKeybind = { 20, 336, 570, 386 };
-        DrawModernPanel(hdc, cardKeybind, COLOR_CARD_BG, COLOR_BORDER, 8);
+        // 3. Card Panel behind GPU & Keybind rows
+        RECT cardOptions = { 20, 318, 570, 410 };
+        DrawModernPanel(hdc, cardOptions, COLOR_CARD_BG, COLOR_BORDER, 8);
 
         EndPaint(hwnd, &ps);
         break;
@@ -530,6 +759,24 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             DrawTextW(dis->hDC, btnText, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             return TRUE;
         }
+
+        // Custom draw GPU Help '?' Button
+        if (dis->CtlID == IDC_BTN_GPU_HELP)
+        {
+            bool isPressed = (dis->itemState & ODS_SELECTED);
+            COLORREF btnBg = isPressed ? RGB(32, 42, 58) : COLOR_CARD_BG;
+            COLORREF btnBorder = isPressed ? COLOR_NEON_GREEN : COLOR_BORDER;
+            COLORREF textColor = isPressed ? COLOR_NEON_GREEN : COLOR_TEXT_MUTED;
+
+            DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBorder, 13);
+
+            SetBkMode(dis->hDC, TRANSPARENT);
+            SetTextColor(dis->hDC, textColor);
+            SelectObject(dis->hDC, g_fontBold);
+
+            DrawTextW(dis->hDC, L"?", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            return TRUE;
+        }
         break;
     }
 
@@ -543,6 +790,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (ctlHwnd == g_lblKeybind)
         {
             SetTextColor(hdc, COLOR_NEON_GREEN);
+            return reinterpret_cast<LRESULT>(g_brCard);
+        }
+
+        if (ctlHwnd == g_lblGpu || ctlHwnd == g_lblKeybindTitle)
+        {
+            SetTextColor(hdc, COLOR_TEXT_MAIN);
             return reinterpret_cast<LRESULT>(g_brCard);
         }
 
@@ -603,11 +856,53 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         }
 
-        // Refresh window list
+        // Refresh window & GPU lists
         if (ctlId == IDC_BTN_REFRESH)
         {
             PopulateList(hwnd);
-            SetStatus(L"Pencere listesi güncellendi.");
+            PopulateGpuList(hwnd);
+            SetStatus(L"Pencere ve GPU listesi güncellendi.");
+            break;
+        }
+
+        // GPU Selection change
+        if (ctlId == IDC_COMBO_GPU && HIWORD(wParam) == CBN_SELCHANGE)
+        {
+            int sel = static_cast<int>(SendMessageW(g_comboGpu, CB_GETCURSEL, 0, 0));
+            if (sel >= 0 && sel < static_cast<int>(g_gpuList.size()))
+            {
+                const std::wstring& chosenName = g_gpuList[sel].name;
+                ConfigManager::Get().Config().selectedGpu = chosenName;
+                ConfigManager::Get().Save();
+
+                if (g_app)
+                {
+                    g_app->SetPreferredGpu(chosenName);
+                }
+
+                std::wstring statusMsg;
+                if (chosenName == L"Auto")
+                {
+                    statusMsg = L"Grafik kartı: Otomatik (RTX Öncelikli)";
+                }
+                else
+                {
+                    statusMsg = L"Grafik kartı seçildi: " + g_gpuList[sel].displayName;
+                }
+                SetStatus(statusMsg.c_str());
+                DLSS_Log("[Main] GPU selection changed to: %ls", chosenName.c_str());
+            }
+            break;
+        }
+
+        // GPU Help '?' button click
+        if (ctlId == IDC_BTN_GPU_HELP)
+        {
+            MessageBoxW(
+                hwnd,
+                L"DLSS5 kullanmak için RTX bir kart gereklidir. AMD kartlarda çalışmaz!",
+                L"VLSS5 — GPU Gereksinimi",
+                MB_ICONINFORMATION | MB_OK);
             break;
         }
 
@@ -718,6 +1013,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         if (g_brBorder)     { DeleteObject(g_brBorder);     g_brBorder     = nullptr; }
         if (g_brNeon)       { DeleteObject(g_brNeon);       g_brNeon       = nullptr; }
         if (g_hLogoHeader)  { DestroyIcon(g_hLogoHeader);   g_hLogoHeader  = nullptr; }
+        if (g_tipGpuHelp)   { DestroyWindow(g_tipGpuHelp);  g_tipGpuHelp   = nullptr; }
 
         PostQuitMessage(0);
         break;
@@ -780,6 +1076,34 @@ static void EnsureNvofapiAvailable()
 // ---------------------------------------------------------------------------
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
+    // Single instance check: prevent multiple instances of VLSS5 from running simultaneously
+    HANDLE hSingleInstanceMutex = CreateMutexW(nullptr, TRUE, L"Local\\VLSS5_SingleInstance_Mutex");
+    if (GetLastError() == ERROR_ALREADY_EXISTS || !hSingleInstanceMutex)
+    {
+        if (hSingleInstanceMutex)
+        {
+            CloseHandle(hSingleInstanceMutex);
+        }
+
+        // Bring existing window to front if it's visible
+        HWND existingHwnd = FindWindowW(L"VLSS5Main", nullptr);
+        if (existingHwnd && IsWindow(existingHwnd))
+        {
+            if (IsIconic(existingHwnd))
+            {
+                ShowWindow(existingHwnd, SW_RESTORE);
+            }
+            SetForegroundWindow(existingHwnd);
+        }
+
+        MessageBoxW(
+            nullptr,
+            L"VLSS5 zaten açık, lütfen önce VLSS5'i kapatın ve yeniden deneyin.",
+            L"VLSS5",
+            MB_ICONWARNING | MB_OK | MB_TOPMOST);
+        return 0;
+    }
+
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     winrt::init_apartment();
@@ -834,7 +1158,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
         L"VLSS5 — Yüksek Performanslı Oyun Overlay",
         (WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX)),
         CW_USEDEFAULT, CW_USEDEFAULT,
-        606, 528,
+        606, 565,
         nullptr, nullptr, hInstance, nullptr);
 
     if (!hwnd)
@@ -864,6 +1188,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 
     g_app.reset();
     winrt::uninit_apartment();
+
+    if (hSingleInstanceMutex)
+    {
+        ReleaseMutex(hSingleInstanceMutex);
+        CloseHandle(hSingleInstanceMutex);
+    }
 
     return static_cast<int>(msg.wParam);
 }

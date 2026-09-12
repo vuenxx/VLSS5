@@ -27,90 +27,81 @@ void VS(uint   id  : SV_VertexID,
 )HLSL";
 
 static const char* s_psSource = R"HLSL(
-Texture2D<float4> gTex    : register(t0);
-Texture2D<float4> gFpsTex : register(t1);
-SamplerState      gSamp   : register(s0);
+Texture2D<float4> gModelTex    : register(t0);
+Texture2D<float4> gProxyTex    : register(t1);
+Texture2D<float4> gOriginalTex : register(t2);
+Texture2D<float4> gFpsTex      : register(t3);
+
+SamplerState      gPointSamp   : register(s0);
+SamplerState      gLinearSamp  : register(s1);
 
 cbuffer FpsConfig : register(b0)
 {
     float2 g_screenSize;       // (width, height)
     float2 g_fpsBoxSize;       // (180, 36)
     int    g_fpsEnabled;       // 1 = enabled, 0 = disabled
-    float  g_sharpness;        // RCAS sharpness (0.0 = off, 0.3 = default, 1.0 = strong)
-    int    g_useEdgeUpsample;  // 1 = edge-adaptive upsample, 0 = direct sample
-    float  g_pad0;
-    float2 g_srcTexelSize;     // (1.0 / workWidth, 1.0 / workHeight)
-    float2 g_pad1;
+    float  _reserved0;         // (padding — formerly sharpness, kept for struct alignment)
+    int    g_dlssnrActive;     // 1 = DLSS-NR active, 0 = passthrough
+    float  g_intensity;        // DLSS-NR intensity / detail strength (0.0 - 2.0)
+    float  g_colourStrength;   // Colour strength (0.0 - 1.0)
+    int    g_isSubNative;      // 1 = model resolution < 100% (Residual active)
+    float2 g_workTexelSize;    // 1.0 / workSize
 };
-
-float4 EdgeAdaptiveUpsample(Texture2D<float4> tex, SamplerState samp, float2 uv, float2 srcTexelSize)
-{
-    // 1. 2x2 komşuluktaki 4 texel'i örnekle (bilinear taban)
-    float4 c00 = tex.Sample(samp, uv + float2(-srcTexelSize.x,  0.0f));
-    float4 c10 = tex.Sample(samp, uv + float2( srcTexelSize.x,  0.0f));
-    float4 c01 = tex.Sample(samp, uv + float2( 0.0f, -srcTexelSize.y));
-    float4 c11 = tex.Sample(samp, uv + float2( 0.0f,  srcTexelSize.y));
-    float4 center = tex.Sample(samp, uv);
-
-    // 2. Yerel kontrast/kenar yönünü tahmin et (basit Sobel benzeri fark)
-    float2 grad = float2(
-        (c10.r + c10.g + c10.b) - (c00.r + c00.g + c00.b),
-        (c11.r + c11.g + c11.b) - (c01.r + c01.g + c01.b));
-    float edgeStrength = saturate(length(grad) * 2.0f);
-
-    // 3. Kenar güçlüyse komşu ortalamadan uzaklaş (keskinlik), zayıfsa düz bilinear'a yakın kal
-    float4 neighborAvg = (c00 + c10 + c01 + c11) * 0.25f;
-    return lerp(center, center + (center - neighborAvg) * 0.5f, edgeStrength);
-}
 
 float4 PS(float4 pos : SV_Position,
           float2 uv  : TEXCOORD0) : SV_Target
 {
-    float4 color = g_useEdgeUpsample
-        ? EdgeAdaptiveUpsample(gTex, gSamp, uv, g_srcTexelSize)
-        : gTex.Sample(gSamp, uv);
+    float4 originalSample = gOriginalTex.Sample(gPointSamp, uv);
+    float3 original = originalSample.rgb;
+    float3 result = original;
 
-    // AMD RCAS (Robust Contrast-Adaptive Sharpening)
-    if (g_sharpness > 0.001f)
+    if (g_dlssnrActive != 0)
     {
-        float2 invScreen = 1.0f / g_screenSize;
+        float3 model = gModelTex.Sample(gLinearSamp, uv).rgb;
 
-        // 5-tap cross neighborhood
-        float3 b = gTex.Sample(gSamp, uv + float2(0.0f, -invScreen.y)).rgb;
-        float3 d = gTex.Sample(gSamp, uv + float2(-invScreen.x, 0.0f)).rgb;
-        float3 e = color.rgb;
-        float3 f = gTex.Sample(gSamp, uv + float2(invScreen.x, 0.0f)).rgb;
-        float3 h = gTex.Sample(gSamp, uv + float2(0.0f, invScreen.y)).rgb;
+        if (g_isSubNative == 0)
+        {
+            // At 100% resolution: direct, natural DLSS-NR neural output
+            result = lerp(original, model, saturate(g_intensity));
+        }
+        else
+        {
+            // At sub-native resolution (50% - 99%):
+            // OptiScaler / RenoDX Luminance-Ratio Transfer:
+            // High-frequency geometry, edges, HUD, text, and micro-textures come 100%
+            // from the native full-resolution frame ('original') without blur.
+            // DLSS 5's neural denoising and lighting adjustments are transferred as a
+            // smooth luminance ratio. Eliminates phase-mismatch watercolor smearing entirely.
+            float3 proxy = gProxyTex.Sample(gLinearSamp, uv).rgb;
 
-        // Local scale normalization (prevents HDR clipping and haloing)
-        float localScale = max(
-            max(e.r, max(e.g, e.b)),
-            max(max(b.r, max(b.g, b.b)),
-                max(max(d.r, max(d.g, d.b)),
-                    max(max(f.r, max(f.g, f.b)),
-                        max(h.r, max(h.g, h.b))))));
-        localScale = max(localScale, 1.0f);
+            const float3 kLuma = float3(0.2126f, 0.7152f, 0.0722f);
+            float proxyLuma = dot(proxy, kLuma);
+            float modelLuma = dot(model, kLuma);
 
-        float3 en = e / localScale;
-        float3 bn = b / localScale;
-        float3 dn = d / localScale;
-        float3 fn = f / localScale;
-        float3 hn = h / localScale;
+            // Stabilized lighting ratio with floor to prevent near-black blowing up
+            const float kRatioFloor = 1.0f / 512.0f;
+            float rawRatio = (modelLuma + kRatioFloor) / (proxyLuma + kRatioFloor);
 
-        // Min & max of neighbors
-        float3 minRGB = min(min(bn, dn), min(fn, hn));
-        float3 maxRGB = max(max(bn, dn), max(fn, hn));
+            // Guard ratio against runaway highlights or extreme darkening
+            const float kMaxRatio = 2.0f;
+            float boundedRatio = clamp(rawRatio, 1.0f / kMaxRatio, kMaxRatio);
 
-        float2 peakC = float2(1.0f, -4.0f);
-        float3 hitMin = minRGB / max(4.0f * maxRGB, 1e-5f);
-        float3 hitMax = (peakC.xxx - maxRGB) / max(4.0f * minRGB + peakC.yyy, -1e-5f);
+            // Detail strength modulation
+            float effectiveRatio = lerp(1.0f, boundedRatio, saturate(g_intensity));
 
-        float3 lobeRGB = max(-hitMin, hitMax);
-        float lobe = max(-0.1875f, min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0f)) * g_sharpness;
+            // Transferred neural lighting on pristine native frame
+            float3 transferredLuma = original * effectiveRatio;
 
-        float rcpL = 1.0f / (4.0f * lobe + 1.0f);
-        color.rgb = (((bn + dn + fn + hn) * lobe + en) * rcpL) * localScale;
+            // Chrominance transfer: model's clean neural chroma scaled to match transferred luma
+            float targetLuma = dot(transferredLuma, kLuma);
+            float3 modelChroma = model * (targetLuma / max(modelLuma, 1e-5f));
+
+            // Blend between luminance-only transfer and model chroma
+            result = lerp(transferredLuma, modelChroma, saturate(g_colourStrength));
+        }
     }
+
+    float3 color = result;
 
     if (g_fpsEnabled != 0)
     {
@@ -123,13 +114,12 @@ float4 PS(float4 pos : SV_Position,
         if (pos.x >= left && pos.x < right && pos.y >= top && pos.y < bottom)
         {
             float2 fpsUv = float2((pos.x - left) / g_fpsBoxSize.x, (pos.y - top) / g_fpsBoxSize.y);
-            float4 fpsColor = gFpsTex.Sample(gSamp, fpsUv);
-            color.rgb = fpsColor.rgb * fpsColor.a + color.rgb * (1.0f - fpsColor.a);
+            float4 fpsColor = gFpsTex.Sample(gLinearSamp, fpsUv);
+            color = fpsColor.rgb * fpsColor.a + color * (1.0f - fpsColor.a);
         }
     }
 
-    color.a = 1.0f; // strictly opaque back buffer
-    return color;
+    return float4(saturate(color), 1.0f);
 }
 )HLSL";
 
@@ -138,14 +128,15 @@ static constexpr int kFpsHeight = 36;
 
 struct FpsCBufferData
 {
-    float screenSize[2];
-    float fpsBoxSize[2];
-    int   fpsEnabled;
-    float sharpness;
-    int   useEdgeUpsample;
-    float pad0;
-    float srcTexelSize[2];
-    float pad1[2];
+    float screenSize[2];       // offset 0 (8 bytes)
+    float fpsBoxSize[2];       // offset 8 (8 bytes) -> 16 bytes
+    int   fpsEnabled;          // offset 16 (4 bytes)
+    float _reserved0;          // offset 20 (4 bytes) — alignment padding, formerly sharpness
+    int   dlssnrActive;        // offset 24 (4 bytes)
+    float intensity;           // offset 28 (4 bytes) -> 32 bytes
+    float colourStrength;      // offset 32 (4 bytes)
+    int   isSubNative;         // offset 36 (4 bytes)
+    float workTexelSize[2];    // offset 40 (8 bytes) -> 48 bytes
 };
 
 // -----------------------------------------------------------------------
@@ -190,7 +181,6 @@ bool Renderer::Init(ID3D11Device* device, HWND overlayHwnd, int width, int heigh
     bool nrInitialized = false;
 
     const auto& initialCfg = ConfigManager::Get().Config();
-    m_sharpness = initialCfg.sharpness;
     float initScale = initialCfg.resolutionScale / 100.0f;
     if (initScale < 0.50f) initScale = 0.50f;
     if (initScale > 1.00f) initScale = 1.00f;
@@ -289,7 +279,7 @@ bool Renderer::CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int h
     desc.Scaling     = DXGI_SCALING_STRETCH;
     desc.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_DISCARD; // lowest latency
     desc.AlphaMode   = DXGI_ALPHA_MODE_IGNORE;
-    desc.Flags       = 0;
+    desc.Flags       = m_tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
 
     HRESULT hr = factory2->CreateSwapChainForHwnd(
         device, hwnd, &desc, nullptr, nullptr, &m_swapChain);
@@ -299,12 +289,33 @@ bool Renderer::CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int h
         // Fallback: blt-model swap chain (older drivers)
         desc.SwapEffect  = DXGI_SWAP_EFFECT_DISCARD;
         desc.BufferCount = 1;
+        desc.Flags       = 0;
         hr = factory2->CreateSwapChainForHwnd(
             device, hwnd, &desc, nullptr, nullptr, &m_swapChain);
     }
 
     // Prevent DXGI from intercepting Alt+Enter
     factory2->MakeWindowAssociation(hwnd, DXGI_MWA_NO_ALT_ENTER);
+
+    if (SUCCEEDED(hr))
+    {
+        // Log monitor name, vsync, and tearing support
+        wchar_t monitorName[128] = L"bilinmiyor";
+        {
+            ComPtr<IDXGIOutput> output;
+            if (SUCCEEDED(m_swapChain->GetContainingOutput(&output)))
+            {
+                DXGI_OUTPUT_DESC od = {};
+                if (SUCCEEDED(output->GetDesc(&od)))
+                    wcsncpy_s(monitorName, od.DeviceName, _TRUNCATE);
+            }
+        }
+        DLSS_Log("[Renderer] SwapChain olusturuldu: monitor='%ls' | vsync=%s | tearing=%s | %dx%d",
+            monitorName,
+            m_vsyncEnabled     ? "ACIK"           : "KAPALI",
+            m_tearingSupported ? "DESTEKLENIYOR"  : "DESTEKLENMIYOR",
+            width, height);
+    }
 
     return SUCCEEDED(hr);
 }
@@ -449,10 +460,13 @@ bool Renderer::CreateFpsResources(ID3D11Device* device)
     m_hFpsBmp = CreateDIBSection(m_hFpsDC, &bmi, DIB_RGB_COLORS, &m_pFpsBits, nullptr, 0);
     SelectObject(m_hFpsDC, m_hFpsBmp);
 
-    m_lastRenderedFps = -1;
-    m_useEdgeUpsample = false;
-    m_srcTexelSize[0] = (m_width > 0) ? (1.0f / static_cast<float>(m_width)) : 0.0f;
-    m_srcTexelSize[1] = (m_height > 0) ? (1.0f / static_cast<float>(m_height)) : 0.0f;
+    m_lastRenderedFps  = -1;
+    m_dlssnrActive     = false;
+    m_isSubNative      = false;
+    m_intensity        = 1.0f;
+    m_colourStrength   = 1.0f;
+    m_workTexelSize[0] = (m_width > 0) ? (1.0f / static_cast<float>(m_width)) : 0.0f;
+    m_workTexelSize[1] = (m_height > 0) ? (1.0f / static_cast<float>(m_height)) : 0.0f;
 
     ComPtr<ID3D11DeviceContext> ctx;
     device->GetImmediateContext(&ctx);
@@ -563,13 +577,13 @@ void Renderer::UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx)
     cb.fpsBoxSize[0]     = static_cast<float>(kFpsWidth);
     cb.fpsBoxSize[1]     = static_cast<float>(kFpsHeight);
     cb.fpsEnabled        = m_fpsEnabled ? 1 : 0;
-    cb.sharpness         = m_sharpness;
-    cb.useEdgeUpsample   = m_useEdgeUpsample ? 1 : 0;
-    cb.pad0              = 0.0f;
-    cb.srcTexelSize[0]   = m_srcTexelSize[0];
-    cb.srcTexelSize[1]   = m_srcTexelSize[1];
-    cb.pad1[0]           = 0.0f;
-    cb.pad1[1]           = 0.0f;
+    cb._reserved0        = 0.0f;
+    cb.dlssnrActive      = m_dlssnrActive ? 1 : 0;
+    cb.intensity         = m_intensity;
+    cb.colourStrength    = m_colourStrength;
+    cb.isSubNative       = m_isSubNative ? 1 : 0;
+    cb.workTexelSize[0]  = m_workTexelSize[0];
+    cb.workTexelSize[1]  = m_workTexelSize[1];
 
     ctx->UpdateSubresource(m_fpsCBuffer.Get(), 0, nullptr, &cb, 0, 0);
     m_cbufferDirty       = false;
@@ -591,9 +605,10 @@ void Renderer::Resize(ID3D11Device* device, int width, int height)
     // Detach the RTV before resize
     m_rtv.Reset();
 
+    UINT resizeFlags = m_tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
     m_swapChain->ResizeBuffers(0,
         static_cast<UINT>(width), static_cast<UINT>(height),
-        DXGI_FORMAT_UNKNOWN, 0);
+        DXGI_FORMAT_UNKNOWN, resizeFlags);
 
     CreateRTV(device);
     UpdateFpsConstantBuffer(ctx.Get());
@@ -729,11 +744,10 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     ctx->VSSetShader(m_vs.Get(), nullptr, 0);
     ctx->PSSetShader(m_ps.Get(), nullptr, 0);
 
-    // Bind DLSS output texture (t0) + FPS texture (t1)
-    ID3D11ShaderResourceView* srvs[2] = { renderSRV, m_fpsSRV.Get() };
-    ctx->PSSetShaderResources(0, 2, srvs);
-
-    bool useLinear = (usedDlssNr && m_dlssnrManager && m_dlssnrManager->GetResolutionScale() < 0.999f);
+    bool dlssnrActive = usedDlssNr;
+    bool isSubNative = (usedDlssNr && m_dlssnrManager && m_dlssnrManager->GetResolutionScale() < 0.999f);
+    float intensity = (m_dlssnrManager && usedDlssNr) ? m_dlssnrManager->GetIntensity() : 1.0f;
+    float colourStrength = 1.0f;
     int workW = (m_dlssnrManager && usedDlssNr) ? m_dlssnrManager->GetWorkWidth() : m_width;
     int workH = (m_dlssnrManager && usedDlssNr) ? m_dlssnrManager->GetWorkHeight() : m_height;
     if (workW <= 0) workW = m_width;
@@ -742,12 +756,17 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     float texelX = (workW > 0) ? (1.0f / static_cast<float>(workW)) : 0.0f;
     float texelY = (workH > 0) ? (1.0f / static_cast<float>(workH)) : 0.0f;
 
-    if (m_useEdgeUpsample != useLinear || m_srcTexelSize[0] != texelX || m_srcTexelSize[1] != texelY)
+    if (m_dlssnrActive != dlssnrActive || m_isSubNative != isSubNative ||
+        m_intensity != intensity || m_colourStrength != colourStrength ||
+        m_workTexelSize[0] != texelX || m_workTexelSize[1] != texelY)
     {
-        m_useEdgeUpsample = useLinear;
-        m_srcTexelSize[0] = texelX;
-        m_srcTexelSize[1] = texelY;
-        m_cbufferDirty = true;
+        m_dlssnrActive     = dlssnrActive;
+        m_isSubNative      = isSubNative;
+        m_intensity        = intensity;
+        m_colourStrength   = colourStrength;
+        m_workTexelSize[0] = texelX;
+        m_workTexelSize[1] = texelY;
+        m_cbufferDirty     = true;
     }
 
     if (m_cbufferDirty)
@@ -755,18 +774,41 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
         UpdateFpsConstantBuffer(ctx);
     }
 
-    ID3D11SamplerState* activeSampler = useLinear ? m_linearSampler.Get() : m_sampler.Get();
-    ctx->PSSetSamplers(0, 1, &activeSampler);
+    // Bind textures for Matched Residual Resolve:
+    // t0: Model Output (work resolution)
+    // t1: Model Input Proxy (work resolution)
+    // t2: Original Native Game Frame (full display resolution)
+    // t3: FPS Counter Texture
+    ID3D11ShaderResourceView* srvs[4];
+    if (usedDlssNr && m_d3d12Interop)
+    {
+        srvs[0] = m_d3d12Interop->GetOutputSRV();
+        srvs[1] = m_d3d12Interop->GetInputSRV();
+        srvs[2] = srv;
+        srvs[3] = m_fpsSRV.Get();
+    }
+    else
+    {
+        srvs[0] = renderSRV;
+        srvs[1] = renderSRV;
+        srvs[2] = renderSRV;
+        srvs[3] = m_fpsSRV.Get();
+    }
+    ctx->PSSetShaderResources(0, 4, srvs);
+
+    // Bind samplers: s0 = Point sampler (for native original), s1 = Linear sampler (for model/proxy)
+    ID3D11SamplerState* samplers[2] = { m_sampler.Get(), m_linearSampler.Get() };
+    ctx->PSSetSamplers(0, 2, samplers);
     ctx->PSSetConstantBuffers(0, 1, m_fpsCBuffer.GetAddressOf());
 
-    // Full-screen triangle — renders DLSS frame and draws FPS badge ON TOP (0% ghosting!)
+    // Full-screen triangle — renders Matched Residual DLSS 5 frame with RCAS and draws FPS badge ON TOP
     ctx->IASetInputLayout(nullptr);
     ctx->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ctx->Draw(3, 0);
 
     // Clear SRVs to prevent pipeline hazards
-    ID3D11ShaderResourceView* nullSRVs[2] = { nullptr, nullptr };
-    ctx->PSSetShaderResources(0, 2, nullSRVs);
+    ID3D11ShaderResourceView* nullSRVs[4] = { nullptr, nullptr, nullptr, nullptr };
+    ctx->PSSetShaderResources(0, 4, nullSRVs);
 }
 
 // -----------------------------------------------------------------------
@@ -774,9 +816,25 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
 // -----------------------------------------------------------------------
 void Renderer::Present()
 {
+    LARGE_INTEGER t0, t1, freq;
+    QueryPerformanceCounter(&t0);
+
     UINT syncInterval = m_vsyncEnabled ? 1u : 0u;
-    HRESULT hr = m_swapChain->Present(syncInterval, 0);
-    (void)hr; // DXGI_STATUS_OCCLUDED is benign
+    UINT presentFlags = (!m_vsyncEnabled && m_tearingSupported) ? DXGI_PRESENT_ALLOW_TEARING : 0u;
+    HRESULT hr = m_swapChain->Present(syncInterval, presentFlags);
+
+    QueryPerformanceCounter(&t1);
+    QueryPerformanceFrequency(&freq);
+    double presentMs = double(t1.QuadPart - t0.QuadPart) * 1000.0 / double(freq.QuadPart);
+
+    if (presentMs > 50.0)
+        DLSS_Log("[Present] UYARI: Present() %.2f ms surdu (vsync=%s, tearing=%s)",
+            presentMs,
+            m_vsyncEnabled     ? "ACIK" : "KAPALI",
+            m_tearingSupported ? "DESTEKLENIYOR" : "DESTEKLENMIYOR");
+
+    if (hr == DXGI_STATUS_OCCLUDED)
+        DLSS_Log("[Present] UYARI: DXGI_STATUS_OCCLUDED - overlay penceresi baska pencere tarafindan kapatildi");
 }
 
 // -----------------------------------------------------------------------

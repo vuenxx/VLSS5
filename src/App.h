@@ -27,6 +27,9 @@ public:
     AppState GetState() const { return m_state; }
     void RequestStop() { m_running = false; }
 
+    // Update preferred GPU (resets D3D device if in menu so next capture uses new GPU)
+    void SetPreferredGpu(const std::wstring& gpuName);
+
 private:
     // D3D11 device shared for the lifetime of the app.
     bool InitD3D();
@@ -84,4 +87,32 @@ private:
 
     std::unique_ptr<CaptureManager> m_captureManager;
     std::unique_ptr<Renderer>       m_renderer;
+
+    // ---- Per-frame pipeline timing ----
+    struct FrameTimings
+    {
+        double captureWaitMs  = 0.0;
+        double downscaleMs    = 0.0;
+        double modelEvalMs    = 0.0;
+        double presentMs      = 0.0;
+        double totalMs        = 0.0;
+    };
+
+    // Running stats for the 5-second summary log
+    double   m_sumTotalMs     = 0.0;
+    double   m_maxTotalMs     = 0.0;
+    uint64_t m_timingSamples  = 0;
+    LARGE_INTEGER m_lastPerfLogTime = {};
+
+    // Watchdog: tracks which pipeline stage is currently executing
+    std::atomic<const char*> m_currentStage{ "idle" };
+    std::atomic<bool>        m_watchdogRunning{ false };
+    HANDLE                   m_watchdogThread = nullptr;
+    LARGE_INTEGER            m_stageEnteredTime = {};
+
+    static DWORD WINAPI WatchdogThreadProc(LPVOID param);
+    void StartWatchdog();
+    void StopWatchdog();
+    void FlushPerfStats();
+    void LogSystemInfo();
 };

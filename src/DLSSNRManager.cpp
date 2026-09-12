@@ -414,9 +414,26 @@ void DLSSNRManager::Cleanup()
     m_queue  = nullptr;
     m_isEvaluating = false;
     m_lastEvalResult = 0;
+    m_consecutiveFailures = 0;
     m_firstFrame = true;
     DLSS_Log("[DLSS-NR] Cleanup completed.");
 }
+
+void DLSSNRManager::SetEnabled(bool v)
+{
+    m_enabled = v;
+    if (v)
+    {
+        m_firstFrame = true;
+        m_consecutiveFailures = 0;
+        if (m_device && m_queue)
+        {
+            DLSS_Log("[DLSS-NR] DLSS 5 enabled via SetEnabled: Re-creating feature to restore connection...");
+            CreateFeature();
+        }
+    }
+}
+
 
 
 bool DLSSNRManager::Evaluate(
@@ -551,6 +568,23 @@ bool DLSSNRManager::Evaluate(
     }
 
     cmdList->ResourceBarrier(barrierCount, barriersOut);
+
+    if (res == 1)
+    {
+        m_consecutiveFailures = 0;
+    }
+    else
+    {
+        m_consecutiveFailures++;
+        if (m_consecutiveFailures >= 10)
+        {
+            DLSS_Log("[DLSS-NR] Detected %d consecutive Evaluate failures (res=0x%08X). Triggering automatic feature rebuild...",
+                m_consecutiveFailures, res);
+            m_consecutiveFailures = 0;
+            m_needsRebuild = true;
+            m_lastConfigChangeTime = GetTickCount64() - 1000;
+        }
+    }
 
     m_lastEvalResult = res;
     m_isEvaluating = (res == 1);

@@ -53,10 +53,11 @@ private:
         ID3D11Texture2D* texture = nullptr;
         ComPtr<ID3D11ShaderResourceView> srv;
     };
-    static constexpr size_t kMaxCachedSRVs = 4;
+    static constexpr size_t kMaxCachedSRVs = 8;
     SRVCacheEntry m_srvCache[kMaxCachedSRVs];
 
     winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame m_currentFrame{ nullptr };
+    winrt::Windows::Graphics::Capture::Direct3D11CaptureFrame m_nextFrame{ nullptr };
 
     bool   m_active     = false;
     HANDLE m_frameEvent = nullptr;
@@ -75,4 +76,19 @@ private:
 
     std::atomic<bool> m_newFrame{ false };
     std::atomic<bool> m_resized { false };
+
+    // ---- WGC frame-gap health tracking (thread-safe via interlocked / only read on render thread) ----
+    LARGE_INTEGER m_lastFrameArrivalTime   = {};
+    LARGE_INTEGER m_lastGapLogTime         = {};
+    double        m_maxFrameGapMs          = 0.0;
+    double        m_sumFrameGapMs          = 0.0;
+    uint64_t      m_frameGapSamples        = 0;
+
+    // Consecutive null-frame counter (TryGetNextFrame returns nullptr → session may be dead)
+    uint32_t      m_nullFrameStreak        = 0;
+    static constexpr uint32_t kNullFrameWarnThreshold = 60; // warn after ~60 consecutive empty polls
+
+public:
+    // Called from the render thread approximately every 5 s to emit a summary and reset accumulators.
+    void FlushCaptureStats();
 };

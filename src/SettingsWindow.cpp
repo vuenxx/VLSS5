@@ -19,7 +19,6 @@ static constexpr COLORREF COLOR_TEXT_DIM   = RGB(139, 148, 158);
 #define IDC_SW_SLIDER_STRUCT  504
 #define IDC_SW_SLIDER_TONE    505
 #define IDC_SW_SLIDER_SKIN    506
-#define IDC_SW_SLIDER_SHARPNESS 512
 #define IDC_SW_SLIDER_RESSCALE 507
 #define IDC_SW_CHK_AUTOMASK   508
 #define IDC_SW_CHK_STABILIZER 511
@@ -42,8 +41,6 @@ HWND SettingsWindow::s_sliderTone        = nullptr;
 HWND SettingsWindow::s_lblToneVal        = nullptr;
 HWND SettingsWindow::s_sliderSkin        = nullptr;
 HWND SettingsWindow::s_lblSkinVal        = nullptr;
-HWND SettingsWindow::s_sliderSharpness   = nullptr;
-HWND SettingsWindow::s_lblSharpnessVal   = nullptr;
 HWND SettingsWindow::s_sliderResScale    = nullptr;
 HWND SettingsWindow::s_lblResScaleVal    = nullptr;
 HWND SettingsWindow::s_chkAutoMask       = nullptr;
@@ -97,7 +94,7 @@ void SettingsWindow::Show(HWND parent)
     if (!s_hwnd)
     {
         int w = 460;
-        int h = 715;
+        int h = 675;
         int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
         int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
@@ -226,8 +223,6 @@ void SettingsWindow::CreateControls(HWND hwnd)
     createSliderRow(L"Yüzey Detayı (Local Structure):", s_sliderStructure, s_lblStructureVal, IDC_SW_SLIDER_STRUCT, 0, 200);
     createSliderRow(L"Mikro Kontrast (Local Tone):", s_sliderTone, s_lblToneVal, IDC_SW_SLIDER_TONE, 0, 200);
     createSliderRow(L"Ten Doku Ayarı (Skin Structure):", s_sliderSkin, s_lblSkinVal, IDC_SW_SLIDER_SKIN, 0, 300);
-    createSliderRow(L"Keskinleştirme (RCAS Sharpness):", s_sliderSharpness, s_lblSharpnessVal, IDC_SW_SLIDER_SHARPNESS, 0, 100);
-    SendMessageW(s_sliderSharpness, TBM_SETTICFREQ, 10, 0);
     createSliderRow(L"Model Çözünürlüğü (Performans):", s_sliderResScale, s_lblResScaleVal, IDC_SW_SLIDER_RESSCALE, 50, 100);
     SendMessageW(s_sliderResScale, TBM_SETTICFREQ, 5, 0);
 
@@ -297,14 +292,6 @@ void SettingsWindow::UpdateLiveLabels()
         SetWindowTextW(s_lblSkinVal, buf);
     }
 
-    int sharpPos = static_cast<int>(SendMessageW(s_sliderSharpness, TBM_GETPOS, 0, 0));
-    wchar_t sharpBuf[32];
-    if (sharpPos <= 0)
-        swprintf_s(sharpBuf, L"Kapalı");
-    else
-        swprintf_s(sharpBuf, L"%%%d", sharpPos);
-    SetWindowTextW(s_lblSharpnessVal, sharpBuf);
-
     int scalePos = static_cast<int>(SendMessageW(s_sliderResScale, TBM_GETPOS, 0, 0));
     wchar_t scaleBuf[48];
     if (scalePos >= 100)
@@ -341,10 +328,6 @@ void SettingsWindow::UpdateControlValues()
     int skinPos = (cfg.skinStructure <= -0.99f) ? 0 : static_cast<int>((cfg.skinStructure + 1.0f) * 100.0f + 0.5f);
     SendMessageW(s_sliderSkin, TBM_SETPOS, TRUE, skinPos);
 
-    // Sharpness: 0.0 - 1.0 -> 0 - 100
-    int sharpPos = static_cast<int>(cfg.sharpness * 100.0f + 0.5f);
-    SendMessageW(s_sliderSharpness, TBM_SETPOS, TRUE, sharpPos);
-
     // Resolution Scale: 50 - 100
     SendMessageW(s_sliderResScale, TBM_SETPOS, TRUE, cfg.resolutionScale);
 
@@ -380,9 +363,6 @@ void SettingsWindow::OnSettingChanged()
     {
         cfg.skinStructure = -1.0f;
     }
-
-    int sharpPos = static_cast<int>(SendMessageW(s_sliderSharpness, TBM_GETPOS, 0, 0));
-    cfg.sharpness = sharpPos / 100.0f;
 
     int scalePos = static_cast<int>(SendMessageW(s_sliderResScale, TBM_GETPOS, 0, 0));
     cfg.resolutionScale = scalePos;

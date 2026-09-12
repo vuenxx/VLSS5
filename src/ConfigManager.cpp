@@ -122,16 +122,15 @@ void ConfigManager::Load()
     if (m_config.resolutionScale < 50)  m_config.resolutionScale = 50;
     if (m_config.resolutionScale > 100) m_config.resolutionScale = 100;
 
-    GetPrivateProfileStringW(sec, L"Sharpness", L"0.30", buf, _countof(buf), ini.c_str());
-    m_config.sharpness = static_cast<float>(_wtof(buf));
-    if (m_config.sharpness < 0.0f) m_config.sharpness = 0.0f;
-    if (m_config.sharpness > 1.0f) m_config.sharpness = 1.0f;
-
     m_config.temporalStabilizer = (GetPrivateProfileIntW(sec, L"TemporalStabilizer", 0, ini.c_str()) != 0);
     m_config.opticalFlow        = (GetPrivateProfileIntW(sec, L"OpticalFlow", 1, ini.c_str()) != 0);
 
     m_config.settingsVk  = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"SettingsVk", VK_INSERT, ini.c_str()));
     m_config.settingsMod = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"SettingsMod", 0, ini.c_str()));
+
+    wchar_t gpuBuf[256] = {};
+    GetPrivateProfileStringW(L"Hardware", L"SelectedGpu", L"Auto", gpuBuf, _countof(gpuBuf), ini.c_str());
+    m_config.selectedGpu = (gpuBuf[0] != L'\0') ? gpuBuf : L"Auto";
 }
 
 void ConfigManager::Save()
@@ -160,10 +159,11 @@ void ConfigManager::Save()
     writeFloat(L"VLSS5", L"SkinStructure", m_config.skinStructure);
     writeInt(L"VLSS5", L"UseAutoMask", m_config.useAutoMask ? 1 : 0);
     writeInt(L"VLSS5", L"ResolutionScale", m_config.resolutionScale);
-    writeFloat(L"VLSS5", L"Sharpness", m_config.sharpness);
     writeInt(L"VLSS5", L"TemporalStabilizer", m_config.temporalStabilizer ? 1 : 0);
     writeInt(L"VLSS5", L"OpticalFlow", m_config.opticalFlow ? 1 : 0);
 
     writeInt(L"Hotkeys", L"SettingsVk", static_cast<int>(m_config.settingsVk));
     writeInt(L"Hotkeys", L"SettingsMod", static_cast<int>(m_config.settingsMod));
+
+    writeStr(L"Hardware", L"SelectedGpu", m_config.selectedGpu.c_str());
 }

@@ -45,10 +45,6 @@ public:
     bool IsFpsEnabled() const { return m_fpsEnabled; }
     void UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx);
 
-    // Sharpness control (AMD RCAS)
-    void  SetSharpness(float s) { m_sharpness = s; m_cbufferDirty = true; }
-    float GetSharpness() const  { return m_sharpness; }
-
     // Accessors used by App.
     ID3D11Texture2D*          GetCaptureTexture() const { return m_captureTexture.Get(); }
     ID3D11ShaderResourceView* GetCaptureSRV()     const { return m_captureSRV.Get();     }
@@ -91,9 +87,11 @@ private:
     int   m_height           = 0;
     bool  m_tearingSupported = false;
     bool  m_vsyncEnabled     = false;
-    float m_sharpness        = 0.30f;
-    bool  m_useEdgeUpsample  = false;
-    float m_srcTexelSize[2]  = { 0.0f, 0.0f };
+    bool  m_dlssnrActive     = false;
+    bool  m_isSubNative      = false;
+    float m_intensity        = 1.0f;
+    float m_colourStrength   = 1.0f;
+    float m_workTexelSize[2] = { 0.0f, 0.0f };
     bool  m_cbufferDirty     = true;
 
     std::unique_ptr<DLSSManager>         m_dlssManager;

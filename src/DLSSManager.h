@@ -93,9 +93,6 @@ public:
     bool IsEnabled()   const { return m_enabled;   }
     void SetEnabled(bool enabled) { m_enabled = enabled; }
 
-    float GetSharpness() const { return m_sharpness; }
-    void  SetSharpness(float sharpness) { m_sharpness = sharpness; }
-
     int GetWidth()  const { return m_width;  }
     int GetHeight() const { return m_height; }
 
@@ -141,6 +138,5 @@ private:
     bool  m_available = false;
     bool  m_enabled   = true;
     bool  m_reset     = true;
-    float m_sharpness = 0.5f;
     uint64_t m_evaluateCount = 0;
 };

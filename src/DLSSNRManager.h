@@ -57,7 +57,7 @@ public:
     void  ApplyConfig(const struct Dlss5Config& cfg);
 
     bool  IsEnabled()           const { return m_enabled; }
-    void  SetEnabled(bool v)          { m_enabled = v; if (v) m_firstFrame = true; }
+    void  SetEnabled(bool v);
     void  ResetHistory()              { m_firstFrame = true; }
 
     float GetIntensity()        const { return m_intensity; }
@@ -122,6 +122,7 @@ private:
 
     bool  m_isEvaluating    = false;
     int   m_lastEvalResult  = 0;
+    int   m_consecutiveFailures = 0;
 
     // Device references
     ID3D12Device*       m_device = nullptr;

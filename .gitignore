@@ -19,6 +19,8 @@ ARM/
 ARM64/
 Debug/
 Release/
+ref/
+
 
 # Project intermediate build folders
 VLSS5/
