@@ -199,11 +199,33 @@ bool App::CreateOverlayWindow(HWND targetHwnd)
     // WS_EX_TOPMOST     — always above the target window.
     // Note: WS_EX_LAYERED is deliberately omitted to enable Direct Flip / Independent Flip (iFlip) / MPO.
     // Layered windows force DWM software redirection compositing, destroying tearing & causing 24-30ms Present stalls.
-    // WS_EX_TOOLWINDOW — overlay Alt+Tab / gorev cubugu listesinde gorunmez.
-    // Oyunlarin "odagi kaybettim" sezgiseli topmost pencereleri tarar; tool window
-    // olarak isaretlemek GTA V gibi baliklarin kendi imlecini geri acmasini onler.
+    // ---- Fare gecirgenligi vs. Direct Flip: temel catisma ----
+    //
+    // WS_EX_LAYERED, bir overlay'i OS SEVIYESINDE hit-test zincirinden cikaran tek
+    // mekanizmadir. WS_EX_TRANSPARENT tek basina yalnizca bir CIZIM bayragidir;
+    // fare gecirgenligi o durumda tamamen uygulamanin WM_NCHITTEST'e HTTRANSPARENT
+    // dondurmesine bagli kalir ve bu her oyunda calismaz (bkz. CS 1.6 / GoldSrc).
+    //
+    // Ayni bayrak DWM tarafinda Direct Flip / Independent Flip / MPO'yu da engeller
+    // ve Frame Generation altinda Present()'i 24-32 ms bloke eder.
+    //
+    // Ikisi ayni HWND uzerinde birlikte saglanamaz. Bu yuzden secim kullanicinin:
+    //   directFlip = false (VARSAYILAN) -> layered, fare her oyunda dogru calisir
+    //   directFlip = true               -> Direct Flip acik, FG'de yuksek FPS
+    DWORD exStyle = WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE;
+    if (m_directFlip)
+    {
+        // WS_EX_TOOLWINDOW — overlay Alt+Tab / gorev cubugu listesinde gorunmez.
+        // Oyunlarin "odagi kaybettim" sezgiseli topmost pencereleri tarar.
+        exStyle |= WS_EX_TOOLWINDOW;
+    }
+    else
+    {
+        exStyle |= WS_EX_LAYERED;
+    }
+
     m_overlayHwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
+        exStyle,
         kOverlayClass,
         L"VLSS5 Overlay",
         WS_POPUP,               // no title bar, no border
@@ -211,6 +233,14 @@ bool App::CreateOverlayWindow(HWND targetHwnd)
         nullptr, nullptr, m_hInstance, nullptr);
 
     if (!m_overlayHwnd) return false;
+
+    if (!m_directFlip)
+    {
+        // Layered mod: WS_EX_LAYERED + WS_EX_TRANSPARENT birlesimi pencereyi
+        // hit-test'ten tamamen muaf tutar. Alpha'nin 255'ten kucuk olmasi
+        // gerekiyor ki katman gercekten devreye girsin.
+        SetLayeredWindowAttributes(m_overlayHwnd, 0, 254, LWA_ALPHA);
+    }
 
     // Ekran görüntüsü (SS), Win+Shift+S, PrintScreen ve kayıt araçlarında DLSS 5 çıktısının
     // net şekilde görünmesi için WDA_NONE kullanıyoruz.
@@ -236,6 +266,12 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
 
     m_menuHwnd  = menuHwnd;
     m_targetHwnd = targetHwnd;
+
+    // Pencere stilini belirleyen mod: oturum boyunca sabit kalir.
+    m_directFlip = ConfigManager::Get().Config().directFlip;
+    DLSS_Log("[App] Overlay modu: %s",
+        m_directFlip ? "DIRECT FLIP (layered YOK, deneysel)"
+                     : "LAYERED (fare gecirgenligi OS seviyesinde)");
 
     // ---- 1. D3D11 device (reused across sessions) ----
     if (!InitD3D()) return false;
@@ -324,9 +360,12 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
     m_overlayFocused  = false;
     m_prevF8Down      = false;
 
-    // Oyun moduna giriyoruz: kendi thread imlec sayacimizi gizliye cek.
-    // (Detayli aciklama icin SetOverlayCursorVisible'a bak.)
-    SetOverlayCursorVisible(false);
+    // Yalnizca Direct Flip modunda gerekli: orada imlecin altindaki pencere BIZ
+    // oldugumuz icin oyunun ShowCursor(FALSE) cagrisi gecerli olmaz.
+    // Layered modda oyun imlecin sahibidir; sayaca dokunmak imleci yanlislikla
+    // kalici olarak gizler.
+    if (m_directFlip)
+        SetOverlayCursorVisible(false);
 
     // Initialize FPS tracking for our overlay window
     QueryPerformanceFrequency(&m_fpsFreq);
@@ -611,7 +650,8 @@ void App::CheckF8FocusToggle()
             m_overlayFocused = true;
 
             // Overlay ile etkilesim icin OS imlecini geri getir.
-            SetOverlayCursorVisible(true);
+            if (m_directFlip)
+                SetOverlayCursorVisible(true);
 
             // 1. Remove WS_EX_TRANSPARENT & WS_EX_NOACTIVATE
             LONG_PTR exStyle = GetWindowLongPtrW(m_overlayHwnd, GWL_EXSTYLE);
@@ -646,7 +686,8 @@ void App::CheckF8FocusToggle()
             m_overlayFocused = false;
 
             // Oyun moduna donuyoruz: imleci tekrar gizle.
-            SetOverlayCursorVisible(false);
+            if (m_directFlip)
+                SetOverlayCursorVisible(false);
 
             // 1. Re-apply WS_EX_TRANSPARENT & WS_EX_NOACTIVATE
             LONG_PTR exStyle = GetWindowLongPtrW(m_overlayHwnd, GWL_EXSTYLE);
@@ -1022,12 +1063,17 @@ LRESULT CALLBACK App::OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             SetCursor(LoadCursor(nullptr, IDC_ARROW));
             return TRUE;
         }
-        // Oyun modu: imleci aktif olarak kaldiriyoruz.
-        // SetOverlayCursorVisible(false) ile birlikte ikinci savunma hatti;
-        // DefWindowProc'a dusersek imlec sifirlanir ve oyunun gizledigi imlec
-        // ekranin ortasinda "ok" olarak belirir.
-        SetCursor(nullptr);
-        return TRUE;
+        // Direct Flip modu: imleci aktif olarak kaldiriyoruz. Bu mesaj bize
+        // ulastiysa oyun imlec sahipligini kaybetmis demektir; DefWindowProc'a
+        // dusersek ok imleci ekranin ortasinda belirir.
+        if (g_appInstance->m_directFlip)
+        {
+            SetCursor(nullptr);
+            return TRUE;
+        }
+        // Layered modda bu mesaj normalde bize hic gelmez; gelirse oyunun
+        // imlec kararina karismiyoruz.
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
 
     case WM_DESTROY:
         // Window was closed externally (e.g. killed via Task Manager).

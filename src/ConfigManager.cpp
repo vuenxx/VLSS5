@@ -131,6 +131,7 @@ void ConfigManager::Load()
     if (m_config.boostFactor > 2.5f) m_config.boostFactor = 2.5f;
 
     m_config.splitScreen = (GetPrivateProfileIntW(sec, L"SplitScreen", 0, ini.c_str()) != 0);
+    m_config.directFlip  = (GetPrivateProfileIntW(sec, L"DirectFlip", 0, ini.c_str()) != 0);
     GetPrivateProfileStringW(sec, L"SplitPos", L"0.5", buf, _countof(buf), ini.c_str());
     m_config.splitPos = static_cast<float>(_wtof(buf));
     if (m_config.splitPos < 0.0f) m_config.splitPos = 0.0f;
@@ -174,6 +175,7 @@ void ConfigManager::Save()
     writeInt(L"VLSS5", L"OpticalFlow", m_config.opticalFlow ? 1 : 0);
     writeFloat(L"VLSS5", L"BoostFactor", m_config.boostFactor);
     writeInt(L"VLSS5", L"SplitScreen", m_config.splitScreen ? 1 : 0);
+    writeInt(L"VLSS5", L"DirectFlip",  m_config.directFlip  ? 1 : 0);
     writeFloat(L"VLSS5", L"SplitPos", m_config.splitPos);
 
     writeInt(L"Hotkeys", L"SettingsVk", static_cast<int>(m_config.settingsVk));

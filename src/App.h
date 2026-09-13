@@ -87,6 +87,9 @@ private:
     bool          m_fgMarkerActive = false;
     // Oyun modunda OS imlecinin gizli tutulmasi icin thread imlec sayaci durumu.
     bool          m_cursorVisible  = true;
+    // Oturum basinda config'den okunur. true ise overlay WS_EX_LAYERED tasimaz
+    // (Direct Flip acik, fare gecirgenligi yalnizca HTTRANSPARENT'a bagli).
+    bool          m_directFlip     = false;
     bool          m_prevF7Down    = false;
 
     RECT m_lastTargetRect = {};

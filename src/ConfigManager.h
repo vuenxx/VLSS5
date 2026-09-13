@@ -15,6 +15,14 @@ struct Dlss5Config
     bool  opticalFlow        = true; // Optik akış hareket vektörleri (GPU tabanlı gerçek zamanlı hareket takibi)
     float boostFactor        = 1.0f; // 1.0 - 2.5 (Nöral Etki Yoğunluğu / Extrapolation Boost)
     bool  splitScreen        = false;// Bölünmüş Ekran (Karşılaştırma Modu)
+
+    // Direct Flip (Deneysel): overlay penceresinden WS_EX_LAYERED kaldırılır.
+    // AÇIK  -> Frame Generation altında Present() stall'ı kalkar (24ms -> ~0ms),
+    //          ancak pencere OS hit-test zincirine girer; fare geçirgenliği
+    //          yalnızca HTTRANSPARENT'a bağlı kalır ve bazı oyunlarda bozulur.
+    // KAPALI -> Klasik layered overlay. Fare/imleç davranışı her oyunda doğru.
+    // Varsayılan KAPALI: doğruluk, deneysel hızdan önce gelir.
+    bool  directFlip         = false;
     float splitPos           = 0.5f; // 0.0 - 1.0 (Bölünme Çizgisi Konumu, varsayılan %50)
 
     // Settings window toggle hotkey (Default: INSERT)
