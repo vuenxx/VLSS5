@@ -239,7 +239,10 @@ bool App::CreateOverlayWindow(HWND targetHwnd)
         // Layered mod: WS_EX_LAYERED + WS_EX_TRANSPARENT birlesimi pencereyi
         // hit-test'ten tamamen muaf tutar. Alpha'nin 255'ten kucuk olmasi
         // gerekiyor ki katman gercekten devreye girsin.
-        SetLayeredWindowAttributes(m_overlayHwnd, 0, 254, LWA_ALPHA);
+        // Alpha 255 = tam opak. Overlay zaten tum kareyi kapladigi icin seffaflik
+        // gerekmiyor; 255 vermek DWM'in piksel basina alpha harmanlamasini atlamasini
+        // saglar ve kompozisyon maliyetini dusurur.
+        SetLayeredWindowAttributes(m_overlayHwnd, 0, 255, LWA_ALPHA);
     }
 
     // Ekran görüntüsü (SS), Win+Shift+S, PrintScreen ve kayıt araçlarında DLSS 5 çıktısının
@@ -478,6 +481,12 @@ void App::Run()
             ID3D11ShaderResourceView* srv = m_captureManager->AcquireCurrentFrameSRV(m_device.Get());
             if (srv)
             {
+                // Kare uretimine BASLAMADAN once sunum kuyrugunda yer acilmasini bekle.
+                // Bu bekleme olmadan Present() icinde 24-32 ms bloke oluyorduk; simdi
+                // backpressure pipeline'i serilestirmek yerine burada planli olarak
+                // sogurluyor ve zaten atilacak kareler icin GPU harcanmiyor.
+                if (m_renderer) m_renderer->WaitForPresentReady();
+
                 Render(srv);
                 m_captureManager->ReleaseCurrentFrame();
             }

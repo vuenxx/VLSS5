@@ -310,14 +310,46 @@ bool Renderer::CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int h
     desc.Format      = DXGI_FORMAT_B8G8R8A8_UNORM;
     desc.SampleDesc  = { 1, 0 };
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    desc.BufferCount = 4; // Quad-buffering FLIP_DISCARD: eliminates backpressure stalls when DWM composes concurrently
+    desc.BufferCount = 3; // Triple-buffered FLIP_DISCARD: waitable object ile ideal derinlik
     desc.Scaling     = DXGI_SCALING_NONE; // DXGI_SCALING_NONE is required for Direct Flip / Independent Flip / MPO
     desc.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_DISCARD; // lowest latency
     desc.AlphaMode   = DXGI_ALPHA_MODE_IGNORE;
-    desc.Flags       = m_tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+
+    // ---- Waitable swap chain: Present() stall'inin kalici cozumu ----
+    //
+    // syncInterval=0 ile sinirsiz Present ederken DWM kuyrugu kompozisyon hizinda
+    // bosaltir. Kuyruk dolunca Present() bir arabellek serbest kalana kadar
+    // BLOKE OLUR -- olculen 24-32 ms'lik takilma tam olarak budur. Yani sorun
+    // DWM'in yavas olmasi degil, bizim tuketilemeyecek hizda kare basmamiz.
+    //
+    // FRAME_LATENCY_WAITABLE_OBJECT bu backpressure'i Present() icindeki sert
+    // blokaj yerine, kare uretimine BASLAMADAN once beklenebilen bir cekirdek
+    // nesnesine cevirir. Sonuc:
+    //   - Present() aninda geri doner, pipeline serilesmez
+    //   - Zaten atilacak kareler icin GPU harcanmaz
+    //   - Sunum temposu kompozisyon hizina kilitlenir -> stutter biter
+    //   - Gecikme (latency) artmaz, aksine sinirlanir
+    //
+    // WS_EX_LAYERED ile tam uyumludur; bu yuzden fare gecirgenliginden odun
+    // vermeden her oyunda calisir.
+    const UINT kTearingFlag  = m_tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
+    const UINT kWaitableFlag = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+
+    desc.Flags       = kTearingFlag | kWaitableFlag;
+    m_swapChainFlags = desc.Flags;
 
     HRESULT hr = factory2->CreateSwapChainForHwnd(
         device, hwnd, &desc, nullptr, nullptr, &m_swapChain);
+
+    if (FAILED(hr))
+    {
+        // Waitable desteklenmiyorsa (eski surucu / blt-model) onsuz dene.
+        DLSS_Log("[Renderer] Waitable swap chain olusturulamadi (hr=0x%08X), waitable'siz deneniyor", hr);
+        desc.Flags       = kTearingFlag;
+        m_swapChainFlags = desc.Flags;
+        hr = factory2->CreateSwapChainForHwnd(
+            device, hwnd, &desc, nullptr, nullptr, &m_swapChain);
+    }
 
     if (FAILED(hr))
     {
@@ -326,8 +358,24 @@ bool Renderer::CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int h
         desc.BufferCount = 1;
         desc.Scaling     = DXGI_SCALING_STRETCH;
         desc.Flags       = 0;
+        m_swapChainFlags = 0;
         hr = factory2->CreateSwapChainForHwnd(
             device, hwnd, &desc, nullptr, nullptr, &m_swapChain);
+    }
+
+    // Waitable nesnesini al ve kuyruk derinligini 1 kareye sabitle.
+    // NOT: waitable swap chain kullanilirken gecerli olan, IDXGIDevice1 uzerindeki
+    // degil IDXGISwapChain2 uzerindeki maksimum kare gecikmesidir.
+    if (SUCCEEDED(hr) && (m_swapChainFlags & kWaitableFlag))
+    {
+        ComPtr<IDXGISwapChain2> swapChain2;
+        if (SUCCEEDED(m_swapChain.As(&swapChain2)))
+        {
+            swapChain2->SetMaximumFrameLatency(1);
+            m_frameLatencyWaitable = swapChain2->GetFrameLatencyWaitableObject();
+        }
+        if (!m_frameLatencyWaitable)
+            DLSS_Log("[Renderer] UYARI: frame latency waitable nesnesi alinamadi");
     }
 
     // Prevent DXGI from intercepting Alt+Enter
@@ -346,11 +394,13 @@ bool Renderer::CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int h
                     wcsncpy_s(monitorName, od.DeviceName, _TRUNCATE);
             }
         }
-        DLSS_Log("[Renderer] SwapChain olusturuldu: monitor='%ls' | vsync=%s | tearing=%s | scaling=%s | %dx%d",
+        DLSS_Log("[Renderer] SwapChain olusturuldu: monitor='%ls' | vsync=%s | tearing=%s | scaling=%s | waitable=%s | buffers=%u | %dx%d",
             monitorName,
             m_vsyncEnabled     ? "ACIK"           : "KAPALI",
             m_tearingSupported ? "DESTEKLENIYOR"  : "DESTEKLENMIYOR",
             (desc.Scaling == DXGI_SCALING_NONE) ? "NONE (DirectFlip UYGUN)" : "STRETCH",
+            m_frameLatencyWaitable ? "ACIK" : "YOK",
+            desc.BufferCount,
             width, height);
     }
 
@@ -647,7 +697,9 @@ void Renderer::Resize(ID3D11Device* device, int width, int height)
     // Detach the RTV before resize
     m_rtv.Reset();
 
-    UINT resizeFlags = m_tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+    // ResizeBuffers, swap chain olusturulurken kullanilan bayraklarin AYNISINI
+    // almak zorundadir; waitable bayragini dusurmek nesneyi gecersiz kilar.
+    UINT resizeFlags = m_swapChainFlags;
     m_swapChain->ResizeBuffers(0,
         static_cast<UINT>(width), static_cast<UINT>(height),
         DXGI_FORMAT_UNKNOWN, resizeFlags);
@@ -878,6 +930,20 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
 }
 
 // -----------------------------------------------------------------------
+// WaitForPresentReady — kare uretimine baslamadan once sunum kuyruguna yer acilmasini bekler
+// -----------------------------------------------------------------------
+void Renderer::WaitForPresentReady()
+{
+    if (!m_frameLatencyWaitable) return;
+
+    // 100 ms ust sinir: DWM beklenmedik sekilde durursa dongu kilitlenmesin.
+    // Zaman asimi olursa kareyi yine de uretir ve Present'e gideriz.
+    DWORD wr = WaitForSingleObjectEx(m_frameLatencyWaitable, 100, TRUE);
+    if (wr == WAIT_TIMEOUT)
+        DLSS_Log("[Present] UYARI: frame latency bekleme 100 ms zaman asimina ugradi");
+}
+
+// -----------------------------------------------------------------------
 // Present
 // -----------------------------------------------------------------------
 void Renderer::Present()
@@ -908,6 +974,13 @@ void Renderer::Present()
 // -----------------------------------------------------------------------
 void Renderer::Cleanup()
 {
+    if (m_frameLatencyWaitable)
+    {
+        CloseHandle(m_frameLatencyWaitable);
+        m_frameLatencyWaitable = nullptr;
+    }
+    m_swapChainFlags = 0;
+
     if (m_dlssnrManager)
     {
         m_dlssnrManager->Cleanup();
