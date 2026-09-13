@@ -274,7 +274,7 @@ bool Renderer::CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int h
 {
     ComPtr<IDXGIDevice1> dxgiDevice;
     device->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
-    dxgiDevice->SetMaximumFrameLatency(1); // reduce buffering latency
+    dxgiDevice->SetMaximumFrameLatency(2); // allow queue headroom so DWM composition never stalls Present()
 
     ComPtr<IDXGIAdapter> adapter;
     dxgiDevice->GetAdapter(&adapter);
@@ -297,11 +297,11 @@ bool Renderer::CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int h
         }
     }
 
-    // Ultra-low latency: ensure DXGI device queues at most 1 frame ahead
+    // Ensure DXGI device queues up to 2 frames ahead (prevents DWM backpressure stall)
     ComPtr<IDXGIDevice1> dxgiDevice1;
     if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice1))))
     {
-        dxgiDevice1->SetMaximumFrameLatency(1);
+        dxgiDevice1->SetMaximumFrameLatency(2);
     }
 
     DXGI_SWAP_CHAIN_DESC1 desc = {};
@@ -310,8 +310,8 @@ bool Renderer::CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int h
     desc.Format      = DXGI_FORMAT_B8G8R8A8_UNORM;
     desc.SampleDesc  = { 1, 0 };
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    desc.BufferCount = 2;
-    desc.Scaling     = DXGI_SCALING_STRETCH;
+    desc.BufferCount = 4; // Quad-buffering FLIP_DISCARD: eliminates backpressure stalls when DWM composes concurrently
+    desc.Scaling     = DXGI_SCALING_NONE; // DXGI_SCALING_NONE is required for Direct Flip / Independent Flip / MPO
     desc.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_DISCARD; // lowest latency
     desc.AlphaMode   = DXGI_ALPHA_MODE_IGNORE;
     desc.Flags       = m_tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
@@ -324,6 +324,7 @@ bool Renderer::CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int h
         // Fallback: blt-model swap chain (older drivers)
         desc.SwapEffect  = DXGI_SWAP_EFFECT_DISCARD;
         desc.BufferCount = 1;
+        desc.Scaling     = DXGI_SCALING_STRETCH;
         desc.Flags       = 0;
         hr = factory2->CreateSwapChainForHwnd(
             device, hwnd, &desc, nullptr, nullptr, &m_swapChain);
@@ -345,10 +346,11 @@ bool Renderer::CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int h
                     wcsncpy_s(monitorName, od.DeviceName, _TRUNCATE);
             }
         }
-        DLSS_Log("[Renderer] SwapChain olusturuldu: monitor='%ls' | vsync=%s | tearing=%s | %dx%d",
+        DLSS_Log("[Renderer] SwapChain olusturuldu: monitor='%ls' | vsync=%s | tearing=%s | scaling=%s | %dx%d",
             monitorName,
             m_vsyncEnabled     ? "ACIK"           : "KAPALI",
             m_tearingSupported ? "DESTEKLENIYOR"  : "DESTEKLENMIYOR",
+            (desc.Scaling == DXGI_SCALING_NONE) ? "NONE (DirectFlip UYGUN)" : "STRETCH",
             width, height);
     }
 
@@ -676,6 +678,9 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
 
     ID3D11ShaderResourceView* renderSRV = srv;
 
+    m_lastMvMs = 0.0;
+    m_lastEvalMs = 0.0;
+
     // 1. DLSS 5 Neural Rendering (Feature 18) via D3D12 Interop
     bool usedDlssNr = false;
     if (m_dlssnrManager && m_dlssnrManager->IsEnabled() && m_d3d12Interop)
@@ -705,7 +710,13 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
             MotionVectorManager* mvMgr = (m_dlssnrManager->IsOpticalFlow() && m_motionVectorManager) ? m_motionVectorManager.get() : nullptr;
             if (m_d3d12Interop->BeginFrame(inputTex.Get(), srv, mvMgr))
             {
+                m_lastMvMs = m_d3d12Interop->GetLastMvMs();
                 ID3D12Resource* mvD12 = mvMgr ? m_d3d12Interop->GetMotionD12() : nullptr;
+
+                LARGE_INTEGER tEval0, tEval1, qpf;
+                QueryPerformanceFrequency(&qpf);
+                QueryPerformanceCounter(&tEval0);
+
                 if (m_dlssnrManager->Evaluate(
                     m_d3d12Interop->GetCommandList(),
                     m_d3d12Interop->GetInputD12(),
@@ -722,6 +733,10 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
                 {
                     m_d3d12Interop->GetCommandList()->Close();
                 }
+
+                QueryPerformanceCounter(&tEval1);
+                if (qpf.QuadPart > 0)
+                    m_lastEvalMs = static_cast<double>(tEval1.QuadPart - tEval0.QuadPart) * 1000.0 / static_cast<double>(qpf.QuadPart);
             }
         }
     }
@@ -729,7 +744,13 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     // 2. Fallback to MotionVectorManager & Feature 1 DLSS if DLSS-NR was not used
     if (!usedDlssNr && m_motionVectorManager)
     {
+        LARGE_INTEGER tMv0, tMv1, qpf;
+        QueryPerformanceFrequency(&qpf);
+        QueryPerformanceCounter(&tMv0);
         m_motionVectorManager->ProcessFrame(ctx, srv);
+        QueryPerformanceCounter(&tMv1);
+        if (qpf.QuadPart > 0)
+            m_lastMvMs = static_cast<double>(tMv1.QuadPart - tMv0.QuadPart) * 1000.0 / static_cast<double>(qpf.QuadPart);
 
         // Evaluate DLSS Feature 1
         if (m_dlssManager && m_dlssManager->IsEnabled() && m_dlssManager->IsAvailable())
@@ -739,6 +760,8 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
             ComPtr<ID3D11Texture2D> inputTex;
             if (SUCCEEDED(res.As(&inputTex)) && inputTex)
             {
+                LARGE_INTEGER tEval0, tEval1;
+                QueryPerformanceCounter(&tEval0);
                 ID3D11ShaderResourceView* dlssOutput = m_dlssManager->Evaluate(
                     ctx,
                     srv,
@@ -746,6 +769,9 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
                     m_motionVectorManager->GetMotionVectorsTexture(),
                     m_motionVectorManager->GetDepthTexture(),
                     m_motionVectorManager->GetUiMaskTexture());
+                QueryPerformanceCounter(&tEval1);
+                if (qpf.QuadPart > 0)
+                    m_lastEvalMs = static_cast<double>(tEval1.QuadPart - tEval0.QuadPart) * 1000.0 / static_cast<double>(qpf.QuadPart);
 
                 if (dlssOutput)
                     renderSRV = dlssOutput;
@@ -867,7 +893,7 @@ void Renderer::Present()
     QueryPerformanceFrequency(&freq);
     double presentMs = double(t1.QuadPart - t0.QuadPart) * 1000.0 / double(freq.QuadPart);
 
-    if (presentMs > 50.0)
+    if (presentMs > 15.0)
         DLSS_Log("[Present] UYARI: Present() %.2f ms surdu (vsync=%s, tearing=%s)",
             presentMs,
             m_vsyncEnabled     ? "ACIK" : "KAPALI",

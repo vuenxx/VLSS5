@@ -664,16 +664,16 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // Header Subtitle
         SetTextColor(hdc, COLOR_TEXT_MUTED);
         SelectObject(hdc, g_fontSubtitle);
-        const wchar_t subTitle[] = L"Youtube: @vuenxxmx";
+        const wchar_t subTitle[] = L"";
         TextOutW(hdc, 74, 38, subTitle, static_cast<int>(wcslen(subTitle)));
 
         // Keyboard Tips in Header (Right-side Pill Container)
-        RECT rcTips = { client.right - 340, 18, client.right - 20, 48 };
+        RECT rcTips = { client.right - 440, 18, client.right - 20, 48 };
         DrawModernPanel(hdc, rcTips, RGB(14, 18, 25), COLOR_BORDER, 6);
 
         SetTextColor(hdc, RGB(165, 175, 190));
         SelectObject(hdc, g_fontSmall);
-        const wchar_t tips[] = L"[F8] Odak  |  [F9] FPS  |  [F10] VLSS5  |  [Alt+S] Başlat";
+        const wchar_t tips[] = L"[F7] FG İşaretçi  |  [F8] Odak  |  [F9] FPS  |  [F10] VLSS5  |  [Alt+S] Başlat";
         DrawTextW(hdc, tips, -1, &rcTips, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         // 3. Card 1 Panel (Hedef Uygulama Seçimi)

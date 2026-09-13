@@ -84,6 +84,8 @@ private:
     bool          m_prevF9Down    = false;
     bool          m_dlssEnabled   = true;
     bool          m_prevF10Down   = false;
+    bool          m_fgMarkerActive = false;
+    bool          m_prevF7Down    = false;
 
     RECT m_lastTargetRect = {};
 
@@ -98,16 +100,32 @@ private:
     {
         double captureWaitMs  = 0.0;
         double downscaleMs    = 0.0;
-        double modelEvalMs    = 0.0;
+        double mvMs           = 0.0;
+        double evalMs         = 0.0;
         double presentMs      = 0.0;
         double totalMs        = 0.0;
     };
 
-    // Running stats for the 5-second summary log
+    // Running stats for the 5-second summary log (MV, Eval, Total)
+    static constexpr int kJitterWindow = 120;
+    double   m_mvHistory[kJitterWindow]    = {};
+    double   m_evalHistory[kJitterWindow]  = {};
+    double   m_totalHistory[kJitterWindow] = {};
+    int      m_perfHistoryIdx              = 0;
+
+    double   m_sumMvMs        = 0.0;
+    double   m_maxMvMs        = 0.0;
+    double   m_sumEvalMs      = 0.0;
+    double   m_maxEvalMs      = 0.0;
     double   m_sumTotalMs     = 0.0;
     double   m_maxTotalMs     = 0.0;
     uint64_t m_timingSamples  = 0;
     LARGE_INTEGER m_lastPerfLogTime = {};
+
+    // Rolling median of last 60 frames for dynamic stutter event detection
+    static constexpr int kMedianWindow = 60;
+    double   m_medianHistory[kMedianWindow] = {};
+    int      m_medianHistoryIdx             = 0;
 
     // Watchdog: tracks which pipeline stage is currently executing
     std::atomic<const char*> m_currentStage{ "idle" };
@@ -120,4 +138,5 @@ private:
     void StopWatchdog();
     void FlushPerfStats();
     void LogSystemInfo();
+    void LogDwmStatus();
 };

@@ -2,6 +2,8 @@
 #include "SettingsWindow.h"
 #include "ConfigManager.h"
 #include "resource.h"
+#include <algorithm>
+#include <cmath>
 
 // Global pointer so the static OverlayWndProc can reach the App.
 static App* g_appInstance = nullptr;
@@ -25,8 +27,18 @@ App::App(HINSTANCE hInstance) : m_hInstance(hInstance)
     wc.lpszClassName = kOverlayClass;
     wc.hIcon         = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_MAIN_ICON));
     wc.hIconSm       = LoadIconW(hInstance, MAKEINTRESOURCEW(IDI_MAIN_ICON));
-    wc.hCursor       = LoadCursor(nullptr, IDC_ARROW);
+    // hCursor MUTLAKA nullptr olmali. Aksi halde imlec overlay uzerindeyken
+    // DefWindowProc(WM_SETCURSOR) sinif imlecini (ok) zorla gosterir ve oyunun
+    // ShowCursor(FALSE)/SetCursor(NULL) ile gizledigi imleci ezer.
+    // WS_EX_LAYERED kaldirildigi icin pencere artik OS seviyesinde hit-test'ten
+    // muaf degil; imlec sahipligini bu yuzden elle birakmak zorundayiz.
+    wc.hCursor       = nullptr;
     RegisterClassExW(&wc);
+
+    // Render dongusu mesaj pompasini gecikirse Windows "ghost window" olusturur.
+    // Ghost pencere WS_EX_TRANSPARENT/HTTRANSPARENT tasimaz -> imleci ve tiklamalari
+    // yutar. Bu davranisi tamamen kapatiyoruz.
+    DisableProcessWindowsGhosting();
 }
 
 App::~App()
@@ -183,11 +195,15 @@ bool App::CreateOverlayWindow(HWND targetHwnd)
     int h = r.bottom - r.top;
 
     // WS_EX_TRANSPARENT — mouse events pass through to the target app.
-    // WS_EX_LAYERED     — REQUIRED by Windows for WS_EX_TRANSPARENT hit-test passthrough.
     // WS_EX_NOACTIVATE  — overlay never steals keyboard focus.
     // WS_EX_TOPMOST     — always above the target window.
+    // Note: WS_EX_LAYERED is deliberately omitted to enable Direct Flip / Independent Flip (iFlip) / MPO.
+    // Layered windows force DWM software redirection compositing, destroying tearing & causing 24-30ms Present stalls.
+    // WS_EX_TOOLWINDOW — overlay Alt+Tab / gorev cubugu listesinde gorunmez.
+    // Oyunlarin "odagi kaybettim" sezgiseli topmost pencereleri tarar; tool window
+    // olarak isaretlemek GTA V gibi baliklarin kendi imlecini geri acmasini onler.
     m_overlayHwnd = CreateWindowExW(
-        WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
+        WS_EX_TOPMOST | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW,
         kOverlayClass,
         L"VLSS5 Overlay",
         WS_POPUP,               // no title bar, no border
@@ -195,11 +211,6 @@ bool App::CreateOverlayWindow(HWND targetHwnd)
         nullptr, nullptr, m_hInstance, nullptr);
 
     if (!m_overlayHwnd) return false;
-
-    // Alpha = 254 → visually indistinguishable from 255 (fully opaque to the eye),
-    // but prevents Windows DWM from classifying the underlying game window as completely occluded.
-    // This allows the game to keep its Direct Flip / Reflex / Frame Generation scheduling active and unthrottled.
-    SetLayeredWindowAttributes(m_overlayHwnd, 0, 254, LWA_ALPHA);
 
     // Ekran görüntüsü (SS), Win+Shift+S, PrintScreen ve kayıt araçlarında DLSS 5 çıktısının
     // net şekilde görünmesi için WDA_NONE kullanıyoruz.
@@ -322,6 +333,22 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
 
     // Log system state (process priority, power throttling, battery) at session start
     LogSystemInfo();
+
+    // Log target window DWM composition mode at session start
+    LogDwmStatus();
+
+    // Reset timing history and FG test marker
+    m_fgMarkerActive   = false;
+    m_prevF7Down       = false;
+    m_perfHistoryIdx   = 0;
+    m_medianHistoryIdx = 0;
+    m_sumMvMs          = 0.0;
+    m_maxMvMs          = 0.0;
+    m_sumEvalMs        = 0.0;
+    m_maxEvalMs        = 0.0;
+    m_sumTotalMs       = 0.0;
+    m_maxTotalMs       = 0.0;
+    m_timingSamples    = 0;
 
     // Start watchdog thread (500 ms polling, 2 s hang threshold)
     StartWatchdog();
@@ -690,6 +717,16 @@ void App::Update()
     CheckF8FocusToggle();
     if (!m_running) return;
 
+    // Check F7 for manual FG test marker (Item 5)
+    const bool f7Down = (GetAsyncKeyState(VK_F7) & 0x8000) != 0;
+    if (f7Down && !m_prevF7Down)
+    {
+        m_fgMarkerActive = !m_fgMarkerActive;
+        DLSS_Log("[Marker] Kullanici isareti: %s (bu noktadan sonrasini '%s' olarak etiketleyin)",
+            m_fgMarkerActive ? "BASLADI" : "BITTI", m_fgMarkerActive ? "FG_ACIK" : "FG_KAPALI");
+    }
+    m_prevF7Down = f7Down;
+
     // Check F9 to toggle FPS counter display (on/off)
     const bool f9Down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
     if (f9Down && !m_prevF9Down)
@@ -793,19 +830,53 @@ void App::Render(ID3D11ShaderResourceView* srv)
     double renderMs  = double(t1.QuadPart - t0.QuadPart) * 1000.0 / double(perfFreq.QuadPart);
     double presentMs = double(t2.QuadPart - t1.QuadPart) * 1000.0 / double(perfFreq.QuadPart);
     double totalMs   = double(t2.QuadPart - frameStart.QuadPart) * 1000.0 / double(perfFreq.QuadPart);
+    double mvMs      = m_renderer ? m_renderer->GetLastMvMs() : 0.0;
+    double evalMs    = m_renderer ? m_renderer->GetLastEvalMs() : 0.0;
+    double lastCaptureGapMs = m_captureManager ? m_captureManager->GetLastFrameGapMs() : 0.0;
 
-    // Accumulate for 5-second summary
+    FrameTimings timings;
+    timings.mvMs      = mvMs;
+    timings.evalMs    = evalMs;
+    timings.presentMs = presentMs;
+    timings.totalMs   = totalMs;
+
+    // Accumulate for 5-second summary (MV, Eval, Total)
+    m_sumMvMs += mvMs;
+    if (mvMs > m_maxMvMs) m_maxMvMs = mvMs;
+    m_mvHistory[m_perfHistoryIdx % kJitterWindow] = mvMs;
+
+    m_sumEvalMs += evalMs;
+    if (evalMs > m_maxEvalMs) m_maxEvalMs = evalMs;
+    m_evalHistory[m_perfHistoryIdx % kJitterWindow] = evalMs;
+
     m_sumTotalMs += totalMs;
     if (totalMs > m_maxTotalMs) m_maxTotalMs = totalMs;
+    m_totalHistory[m_perfHistoryIdx % kJitterWindow] = totalMs;
+
+    m_perfHistoryIdx++;
     m_timingSamples++;
 
-    // Slow-frame threshold: >3× running average
-    if (m_timingSamples > 5)
+    // Rolling median-based stutter event detection (Item 3: last 60 frames)
+    m_medianHistory[m_medianHistoryIdx % kMedianWindow] = totalMs;
+    m_medianHistoryIdx++;
+
+    int medianCount = std::min(kMedianWindow, m_medianHistoryIdx);
+    if (medianCount >= 10)
     {
-        double avgMs = m_sumTotalMs / static_cast<double>(m_timingSamples);
-        if (totalMs > avgMs * 3.0)
-            DLSS_Log("[Perf] YAVAS KARE: toplam=%.2f ms (ort=%.2f ms) | render=%.2f ms | present=%.2f ms",
-                totalMs, avgMs, renderMs, presentMs);
+        double temp[kMedianWindow];
+        for (int i = 0; i < medianCount; ++i)
+            temp[i] = m_medianHistory[i];
+
+        std::nth_element(temp, temp + medianCount / 2, temp + medianCount);
+        double recentMedianMs = temp[medianCount / 2];
+
+        if (recentMedianMs > 0.1 && timings.totalMs > recentMedianMs * 2.5) // medyanın 2.5 katını geçen kare = stutter event
+        {
+            DLSS_Log("[Perf] STUTTER: kare=%.1fms (son-medyan=%.1fms, %.1fx) "
+                     "capture_gap=%.1fms MV=%.1fms Eval=%.1fms Present=%.1fms",
+                     timings.totalMs, recentMedianMs, timings.totalMs / recentMedianMs,
+                     lastCaptureGapMs, timings.mvMs, timings.evalMs, timings.presentMs);
+        }
     }
 
     // 5-second perf summary
@@ -896,7 +967,10 @@ LRESULT CALLBACK App::OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             SetCursor(LoadCursor(nullptr, IDC_ARROW));
             return TRUE;
         }
-        return DefWindowProcW(hwnd, msg, wParam, lParam);
+        // Oyun modu: TRUE dondurup imleci HIC degistirmiyoruz.
+        // DefWindowProc'a dusersek imlec sifirlanir ve oyunun gizledigi imlec
+        // ekranin ortasinda "ok" olarak belirir (ClipCursor yuzunden de sabit kalir).
+        return TRUE;
 
     case WM_DESTROY:
         // Window was closed externally (e.g. killed via Task Manager).
@@ -1039,11 +1113,77 @@ void App::FlushPerfStats()
     }
     m_lastPerfLogTime = now;
 
-    double avgMs = m_sumTotalMs / static_cast<double>(m_timingSamples);
-    DLSS_Log("[Perf] ozet: %llu kare | ort toplam: %.2f ms | maks toplam: %.2f ms",
-        m_timingSamples, avgMs, m_maxTotalMs);
+    double mvMean = m_sumMvMs / static_cast<double>(m_timingSamples);
+    double evalMean = m_sumEvalMs / static_cast<double>(m_timingSamples);
+    double totalMean = m_sumTotalMs / static_cast<double>(m_timingSamples);
 
-    m_sumTotalMs    = 0.0;
-    m_maxTotalMs    = 0.0;
-    m_timingSamples = 0;
+    int windowCount = std::min(kJitterWindow, m_perfHistoryIdx);
+    double mvVar = 0.0, evalVar = 0.0, totalVar = 0.0;
+    if (windowCount > 0)
+    {
+        for (int i = 0; i < windowCount; ++i)
+        {
+            double dMv = m_mvHistory[i] - mvMean;
+            mvVar += dMv * dMv;
+
+            double dEval = m_evalHistory[i] - evalMean;
+            evalVar += dEval * dEval;
+
+            double dTotal = m_totalHistory[i] - totalMean;
+            totalVar += dTotal * dTotal;
+        }
+        mvVar /= windowCount;
+        evalVar /= windowCount;
+        totalVar /= windowCount;
+    }
+    double mvStddev    = std::sqrt(mvVar);
+    double evalStddev  = std::sqrt(evalVar);
+    double totalStddev = std::sqrt(totalVar);
+
+    DLSS_Log("[Perf] ozet(5sn): "
+             "MV(ort/stddev/maks)=%.1f/%.1f/%.1f "
+             "Eval(ort/stddev/maks)=%.1f/%.1f/%.1f "
+             "Toplam(ort/stddev/maks)=%.1f/%.1f/%.1f",
+             mvMean, mvStddev, m_maxMvMs,
+             evalMean, evalStddev, m_maxEvalMs,
+             totalMean, totalStddev, m_maxTotalMs);
+
+    // Also log DWM composition status periodically (every 5 seconds)
+    LogDwmStatus();
+
+    m_sumMvMs        = 0.0;
+    m_maxMvMs        = 0.0;
+    m_sumEvalMs      = 0.0;
+    m_maxEvalMs      = 0.0;
+    m_sumTotalMs     = 0.0;
+    m_maxTotalMs     = 0.0;
+    m_timingSamples  = 0;
+    m_perfHistoryIdx = 0;
+}
+
+// ==========================================================================
+// LogDwmStatus — DWM composition mode detection
+// ==========================================================================
+
+void App::LogDwmStatus()
+{
+    if (!m_targetHwnd || !IsWindow(m_targetHwnd)) return;
+
+    // Hedef pencere için:
+    BOOL isCloaked = FALSE;
+    DwmGetWindowAttribute(m_targetHwnd, DWMWA_CLOAKED, &isCloaked, sizeof(isCloaked));
+
+    DWORD exStyle = GetWindowLongW(m_targetHwnd, GWL_EXSTYLE);
+    bool hasTopmostOrLayered = (exStyle & WS_EX_TOPMOST) || (exStyle & WS_EX_LAYERED);
+
+    // DWM composition genel olarak açık mı (Win8+'ta hep açık ama yine de logla, gelecekte faydalı):
+    BOOL dwmEnabled = FALSE;
+    DwmIsCompositionEnabled(&dwmEnabled);
+
+    DWORD overlayEx = m_overlayHwnd ? GetWindowLongW(m_overlayHwnd, GWL_EXSTYLE) : 0;
+    bool overlayLayered = (overlayEx & WS_EX_LAYERED) != 0;
+
+    DLSS_Log("[DWM] Composition: Target(cloaked=%d, exStyle=0x%08X, topOrLay=%d) | Overlay(exStyle=0x%08X, layered=%d [DirectFlip=%s])",
+        isCloaked, exStyle, hasTopmostOrLayered ? 1 : 0,
+        overlayEx, overlayLayered ? 1 : 0, overlayLayered ? "ENGELENDI" : "UYGUN");
 }
