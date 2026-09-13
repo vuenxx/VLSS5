@@ -324,6 +324,10 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
     m_overlayFocused  = false;
     m_prevF8Down      = false;
 
+    // Oyun moduna giriyoruz: kendi thread imlec sayacimizi gizliye cek.
+    // (Detayli aciklama icin SetOverlayCursorVisible'a bak.)
+    SetOverlayCursorVisible(false);
+
     // Initialize FPS tracking for our overlay window
     QueryPerformanceFrequency(&m_fpsFreq);
     QueryPerformanceCounter(&m_fpsLastTime);
@@ -548,6 +552,47 @@ void App::CheckStopKey()
 }
 
 // ==========================================================================
+// SetOverlayCursorVisible — OS imlecinin gorunurlugunu deterministik ayarlar
+// ==========================================================================
+//
+// Windows'ta imlec gorunurlugu, imlecin ALTINDAKI pencerenin sahibi olan thread'in
+// giris kuyrugundaki ShowCursor sayacina gore belirlenir.
+//
+// WS_EX_LAYERED tasindigi donemde overlay penceresi hit-test'ten OS seviyesinde
+// muaf oldugu icin imlecin altindaki pencere daima OYUNDU; oyunun ShowCursor(FALSE)
+// cagrisi gecerliydi ve imlec kayboluyordu.
+//
+// Direct Flip icin layered kaldirildiktan sonra imlecin altindaki pencere ARTIK
+// BIZIZ. WM_NCHITTEST'ten HTTRANSPARENT donmek tiklamalari oyuna gecirir, ancak
+// imlec sayacini degistirmez: kendi kuyrugumuzun sayaci 0 (gorunur) oldugu icin
+// ok imleci cizilmeye devam eder. GoldSrc (CS 1.6) her karede SetCursorPos ile
+// imleci merkeze geri isinladigi icin bu ok ekranin tam ortasinda cakili kalir.
+//
+// Cozum: oyun modunda KENDI thread sayacimizi da negatife cekiyoruz.
+// Boylece hangi pencere altta olursa olsun imlec cizilmez.
+void App::SetOverlayCursorVisible(bool visible)
+{
+    if (visible == m_cursorVisible) return;
+
+    // Guvenlik siniri: ShowCursor beklenmedik bir sekilde yakinsamazsa sonsuz
+    // donguye girmeyelim.
+    int guard = 64;
+
+    if (visible)
+    {
+        // Sayaci 0'a kadar yukselt (birden fazla gizleme birikmis olabilir).
+        while (ShowCursor(TRUE) < 0 && --guard > 0) {}
+    }
+    else
+    {
+        // Sayaci -1'e kadar dusur.
+        while (ShowCursor(FALSE) >= 0 && --guard > 0) {}
+    }
+
+    m_cursorVisible = visible;
+}
+
+// ==========================================================================
 // CheckF8FocusToggle — F8 toggles focus between Overlay and Target App
 // ==========================================================================
 
@@ -564,6 +609,9 @@ void App::CheckF8FocusToggle()
         {
             // === FOCUS TO OVERLAY (uygulamayı boşver, overlaya dön) ===
             m_overlayFocused = true;
+
+            // Overlay ile etkilesim icin OS imlecini geri getir.
+            SetOverlayCursorVisible(true);
 
             // 1. Remove WS_EX_TRANSPARENT & WS_EX_NOACTIVATE
             LONG_PTR exStyle = GetWindowLongPtrW(m_overlayHwnd, GWL_EXSTYLE);
@@ -596,6 +644,9 @@ void App::CheckF8FocusToggle()
         {
             // === FOCUS BACK TO TARGET APP (uygulamaya tekrar odaklan) ===
             m_overlayFocused = false;
+
+            // Oyun moduna donuyoruz: imleci tekrar gizle.
+            SetOverlayCursorVisible(false);
 
             // 1. Re-apply WS_EX_TRANSPARENT & WS_EX_NOACTIVATE
             LONG_PTR exStyle = GetWindowLongPtrW(m_overlayHwnd, GWL_EXSTYLE);
@@ -929,6 +980,10 @@ void App::StopOverlay()
         m_overlayHwnd = nullptr;
     }
 
+    // Oturum bitti: thread imlec sayacini normale dondur.
+    // Bu cagri atlanirsa VLSS5 menusu uzerinde imlec gorunmez kalir.
+    SetOverlayCursorVisible(true);
+
     m_targetHwnd = nullptr;
     m_overlayFocused = false;
     m_prevF8Down     = false;
@@ -967,9 +1022,11 @@ LRESULT CALLBACK App::OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             SetCursor(LoadCursor(nullptr, IDC_ARROW));
             return TRUE;
         }
-        // Oyun modu: TRUE dondurup imleci HIC degistirmiyoruz.
+        // Oyun modu: imleci aktif olarak kaldiriyoruz.
+        // SetOverlayCursorVisible(false) ile birlikte ikinci savunma hatti;
         // DefWindowProc'a dusersek imlec sifirlanir ve oyunun gizledigi imlec
-        // ekranin ortasinda "ok" olarak belirir (ClipCursor yuzunden de sabit kalir).
+        // ekranin ortasinda "ok" olarak belirir.
+        SetCursor(nullptr);
         return TRUE;
 
     case WM_DESTROY:

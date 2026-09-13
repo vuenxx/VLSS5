@@ -85,6 +85,8 @@ private:
     bool          m_dlssEnabled   = true;
     bool          m_prevF10Down   = false;
     bool          m_fgMarkerActive = false;
+    // Oyun modunda OS imlecinin gizli tutulmasi icin thread imlec sayaci durumu.
+    bool          m_cursorVisible  = true;
     bool          m_prevF7Down    = false;
 
     RECT m_lastTargetRect = {};
@@ -139,4 +141,5 @@ private:
     void FlushPerfStats();
     void LogSystemInfo();
     void LogDwmStatus();
+    void SetOverlayCursorVisible(bool visible);
 };
