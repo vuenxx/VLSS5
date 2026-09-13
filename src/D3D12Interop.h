@@ -31,11 +31,12 @@ public:
     ID3D12GraphicsCommandList*  GetCommandList()  const { return m_cmdList.Get();     }
 
     ID3D12Resource*             GetInputD12()     const { return m_sharedInD12.Get();  }
-    ID3D12Resource*             GetOutputD12()    const { return m_nativeOutD12.Get(); }
+    ID3D12Resource*             GetOutputD12()    const { return m_useDirectSharedOut ? m_sharedOutD12.Get() : m_nativeOutD12.Get(); }
     ID3D12Resource*             GetMotionD12()    const { return m_sharedMvD12.Get();  }
 
     ID3D11Texture2D*            GetInputD11()     const { return m_sharedInD11.Get();  }
     ID3D11ShaderResourceView*   GetInputSRV()     const { return m_sharedInSRV.Get();  }
+    ID3D11ShaderResourceView*   GetRawInputSRV()  const { return m_sharedInSRV.Get();  }
     ID3D11Texture2D*            GetOutputD11()    const { return m_sharedOutD11.Get(); }
     ID3D11ShaderResourceView*   GetOutputSRV()    const { return m_sharedOutSRV.Get(); }
     ID3D11Texture2D*            GetMotionD11()    const { return m_sharedMvD11.Get();  }
@@ -46,6 +47,11 @@ public:
     int GetHeight()     const { return m_height; }
     int GetWorkWidth()  const { return m_workWidth;  }
     int GetWorkHeight() const { return m_workHeight; }
+
+    void SetExplicitFlush(bool enable) { m_enableExplicitFlush = enable; }
+    bool IsExplicitFlushEnabled() const { return m_enableExplicitFlush; }
+
+    double GetLastMvMs() const { return m_lastMvMs; }
 
     void WaitForGpu();
     void LogDiagnosticPixels(uint64_t frameCount);
@@ -112,4 +118,7 @@ private:
     ComPtr<ID3D11Texture2D> m_diagStagingOut;
 
     UINT64 m_frameIndex = 0;
+    double m_lastMvMs   = 0.0;
+    bool   m_useDirectSharedOut  = false;
+    bool   m_enableExplicitFlush = false;
 };

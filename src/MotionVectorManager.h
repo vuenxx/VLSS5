@@ -1,5 +1,10 @@
 #pragma once
 #include "Common.h"
+#include <d3d11.h>
+#include <d3dcompiler.h>
+#include <wrl/client.h>
+#include <memory>
+#include "NvOFManager.h"
 
 // ---------------------------------------------------------------------------
 // MotionVectorManager
@@ -35,6 +40,8 @@ public:
 
     void SetUiMaskEnabled(bool enabled) { m_uiMaskEnabled = enabled; }
     bool IsUiMaskEnabled() const { return m_uiMaskEnabled; }
+
+    bool IsHardwareNvOFActive() const { return m_useHardwareNvOF; }
 
     int GetWidth()  const { return m_width;  }
     int GetHeight() const { return m_height; }
@@ -74,9 +81,15 @@ private:
     ComPtr<ID3D11Texture2D>           m_depthTexture;
     ComPtr<ID3D11ShaderResourceView>  m_depthSRV;
 
-    ComPtr<ID3D11Texture2D>           m_stagingMv;
+    static constexpr int              kProbeRingSize = 3;
+    ComPtr<ID3D11Texture2D>           m_stagingMvRing[kProbeRingSize];
+    int                               m_probeRingIndex = 0;
+    int                               m_probeFramesPending = 0;
 
     ComPtr<ID3D11ComputeShader>       m_opticalFlowCS;
     ComPtr<ID3D11Buffer>              m_constantBuffer;
     ComPtr<ID3D11SamplerState>        m_linearSampler;
+
+    std::unique_ptr<NvOFManager>      m_nvof;
+    bool                              m_useHardwareNvOF = false;
 };

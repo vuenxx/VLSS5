@@ -125,6 +125,17 @@ void ConfigManager::Load()
     m_config.temporalStabilizer = (GetPrivateProfileIntW(sec, L"TemporalStabilizer", 0, ini.c_str()) != 0);
     m_config.opticalFlow        = (GetPrivateProfileIntW(sec, L"OpticalFlow", 1, ini.c_str()) != 0);
 
+    GetPrivateProfileStringW(sec, L"BoostFactor", L"1.0", buf, _countof(buf), ini.c_str());
+    m_config.boostFactor = static_cast<float>(_wtof(buf));
+    if (m_config.boostFactor < 1.0f) m_config.boostFactor = 1.0f;
+    if (m_config.boostFactor > 2.5f) m_config.boostFactor = 2.5f;
+
+    m_config.splitScreen = (GetPrivateProfileIntW(sec, L"SplitScreen", 0, ini.c_str()) != 0);
+    GetPrivateProfileStringW(sec, L"SplitPos", L"0.5", buf, _countof(buf), ini.c_str());
+    m_config.splitPos = static_cast<float>(_wtof(buf));
+    if (m_config.splitPos < 0.0f) m_config.splitPos = 0.0f;
+    if (m_config.splitPos > 1.0f) m_config.splitPos = 1.0f;
+
     m_config.settingsVk  = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"SettingsVk", VK_INSERT, ini.c_str()));
     m_config.settingsMod = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"SettingsMod", 0, ini.c_str()));
 
@@ -161,6 +172,9 @@ void ConfigManager::Save()
     writeInt(L"VLSS5", L"ResolutionScale", m_config.resolutionScale);
     writeInt(L"VLSS5", L"TemporalStabilizer", m_config.temporalStabilizer ? 1 : 0);
     writeInt(L"VLSS5", L"OpticalFlow", m_config.opticalFlow ? 1 : 0);
+    writeFloat(L"VLSS5", L"BoostFactor", m_config.boostFactor);
+    writeInt(L"VLSS5", L"SplitScreen", m_config.splitScreen ? 1 : 0);
+    writeFloat(L"VLSS5", L"SplitPos", m_config.splitPos);
 
     writeInt(L"Hotkeys", L"SettingsVk", static_cast<int>(m_config.settingsVk));
     writeInt(L"Hotkeys", L"SettingsMod", static_cast<int>(m_config.settingsMod));

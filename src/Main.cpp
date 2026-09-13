@@ -7,10 +7,12 @@
 #include "resource.h"
 #include <shlwapi.h>
 #include <commctrl.h>
+#include <uxtheme.h>
 #include <algorithm>
 #include <cwctype>
 #pragma comment(lib, "shlwapi.lib")
 #pragma comment(lib, "comctl32.lib")
+#pragma comment(lib, "uxtheme.lib")
 
 // ---------------------------------------------------------------------------
 // Control IDs
@@ -31,17 +33,18 @@
 #define IDT_HOTKEY_TIMER      301   // Fallback hotkey poller (50ms)
 
 // ---------------------------------------------------------------------------
-// Modern Neon Green Theme Palette
+// Modern Theme Palette (Matches Mockup 1:1)
 // ---------------------------------------------------------------------------
-static const COLORREF COLOR_BG          = RGB(12, 16, 23);     // Deep midnight charcoal
+static const COLORREF COLOR_BG          = RGB(11, 15, 20);     // Deep midnight charcoal
 static const COLORREF COLOR_CARD_BG     = RGB(22, 28, 38);     // Elevated dark surface
-static const COLORREF COLOR_BORDER      = RGB(36, 46, 62);     // Subtle surface border
-static const COLORREF COLOR_NEON_GREEN  = RGB(0, 255, 60);     // Electric neon green
-static const COLORREF COLOR_NEON_HOVER  = RGB(60, 255, 110);   // Lighter neon hover
-static const COLORREF COLOR_NEON_DARK   = RGB(0, 190, 45);     // Pressed neon green
-static const COLORREF COLOR_TEXT_MAIN   = RGB(240, 246, 252);  // Crisp white
+static const COLORREF COLOR_BORDER      = RGB(38, 48, 65);     // Subtle surface border
+static const COLORREF COLOR_LIME_ACCENT = RGB(162, 238, 56);   // Vibrant lime/neon green matching mockup
+static const COLORREF COLOR_LIME_HOVER  = RGB(180, 248, 75);   // Lighter lime hover
+static const COLORREF COLOR_LIME_DARK   = RGB(138, 208, 42);   // Pressed lime green
+static const COLORREF COLOR_DARK_TEXT   = RGB(12, 18, 10);     // Dark charcoal text on lime
+static const COLORREF COLOR_NEON_GREEN  = RGB(0, 240, 55);     // Electric neon green
+static const COLORREF COLOR_TEXT_MAIN   = RGB(242, 247, 252);  // Crisp white
 static const COLORREF COLOR_TEXT_MUTED  = RGB(139, 148, 158);  // Slate secondary text
-static const COLORREF COLOR_LIST_SEL    = RGB(16, 45, 20);     // Electric green selection tint
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -507,107 +510,103 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(f), TRUE);
         };
 
-        // ---- Window List Section ----
-        HWND lblList = CreateWindowW(L"STATIC", L"HEDEF UYGULAMA SEÇİMİ",
-            WS_CHILD | WS_VISIBLE, 28, 76, 300, 20,
-            hwnd, nullptr, nullptr, nullptr);
-        SF(lblList, g_fontBold);
-
-        // Owner-drawn ListBox with dark background & neon highlights
+        // ---- Window List Section (Card 1: Hedef Uygulama Seçimi) ----
+        // Left Column: ListBox for target windows
         g_listBox = CreateWindowExW(0, L"LISTBOX", nullptr,
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
-            28, 100, 534, 160,
+            34, 112, 362, 178,
             hwnd, reinterpret_cast<HMENU>(IDC_WINDOWLIST), nullptr, nullptr);
         SF(g_listBox, g_fontNormal);
-        SendMessageW(g_listBox, LB_SETITEMHEIGHT, 0, 30);
+        SetWindowTheme(g_listBox, L"DarkMode_Explorer", nullptr);
+        SendMessageW(g_listBox, LB_SETITEMHEIGHT, 0, 36);
 
-        // ---- Refresh Button ----
-        g_btnRefresh = CreateWindowW(L"BUTTON", L"Yenile",
+        // Right Column (Inside Card 1)
+        // Refresh Button
+        g_btnRefresh = CreateWindowW(L"BUTTON", L"Yenile    ↻",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            28, 272, 80, 34,
+            412, 112, 158, 34,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_REFRESH), nullptr, nullptr);
         SF(g_btnRefresh, g_fontBold);
 
-        // ---- VSync Switch Checkbox ----
-        g_chkVSync = CreateWindowW(L"BUTTON", L" VSync",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            118, 277, 85, 24,
+        // VSync Checkbox
+        g_chkVSync = CreateWindowW(L"BUTTON", L"VSync",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            412, 158, 158, 26,
             hwnd, reinterpret_cast<HMENU>(IDC_CHK_VSYNC), nullptr, nullptr);
-        SF(g_chkVSync, g_fontNormal);
-        Button_SetCheck(g_chkVSync, g_vsyncEnabled ? BST_CHECKED : BST_UNCHECKED);
+        SF(g_chkVSync, g_fontBold);
 
-        // ---- FPS Overlay Switch Checkbox ----
-        g_chkFps = CreateWindowW(L"BUTTON", L" FPS Göstergesi",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            210, 277, 130, 24,
+        // FPS Overlay Checkbox
+        g_chkFps = CreateWindowW(L"BUTTON", L"FPS Göstergesi",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            412, 194, 158, 26,
             hwnd, reinterpret_cast<HMENU>(IDC_CHK_FPS), nullptr, nullptr);
-        SF(g_chkFps, g_fontNormal);
-        Button_SetCheck(g_chkFps, g_fpsEnabled ? BST_CHECKED : BST_UNCHECKED);
+        SF(g_chkFps, g_fontBold);
 
-        // ---- VLSS5 Switch Checkbox ----
-        g_chkDlss = CreateWindowW(L"BUTTON", L" VLSS5 (Nöral)",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-            350, 277, 210, 24,
+        // VLSS5 Checkbox
+        g_chkDlss = CreateWindowW(L"BUTTON", L"VLSS5 (Nöral)",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            412, 230, 158, 26,
             hwnd, reinterpret_cast<HMENU>(IDC_CHK_DLSS), nullptr, nullptr);
-        SF(g_chkDlss, g_fontNormal);
-        Button_SetCheck(g_chkDlss, g_dlssEnabled ? BST_CHECKED : BST_UNCHECKED);
+        SF(g_chkDlss, g_fontBold);
 
-        // ---- GPU Selection (Inside Card) ----
+        // ---- Card 2: GPU & Kısayol Paneli ----
+        // Row 1: GPU Selection
         g_lblGpu = CreateWindowW(L"STATIC", L"Grafik Kartı (GPU):",
-            WS_CHILD | WS_VISIBLE, 32, 332, 132, 22,
+            WS_CHILD | WS_VISIBLE, 32, 328, 130, 20,
             hwnd, nullptr, nullptr, nullptr);
-        SF(g_lblGpu, g_fontNormal);
+        SF(g_lblGpu, g_fontBold);
 
         g_comboGpu = CreateWindowExW(0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
-            166, 328, 360, 200,
+            168, 324, 370, 200,
             hwnd, reinterpret_cast<HMENU>(IDC_COMBO_GPU), nullptr, nullptr);
         SF(g_comboGpu, g_fontNormal);
+        SetWindowTheme(g_comboGpu, L"DarkMode_Explorer", nullptr);
 
         g_btnGpuHelp = CreateWindowW(L"BUTTON", L"?",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            532, 327, 26, 26,
+            544, 323, 26, 26,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_GPU_HELP), nullptr, nullptr);
         SF(g_btnGpuHelp, g_fontBold);
 
         g_tipGpuHelp = CreateButtonTooltip(hwnd, g_btnGpuHelp,
             L"DLSS5 kullanmak için RTX bir kart gereklidir. AMD kartlarda çalışmaz!");
 
-        // ---- Keybind Panel Labels & VLSS5 Settings Button (Inside Card) ----
+        // Row 2: Overlay Shortcut & VLSS5 Settings
         g_lblKeybindTitle = CreateWindowW(L"STATIC", L"Overlay Kısayolu:",
-            WS_CHILD | WS_VISIBLE, 32, 372, 132, 22,
+            WS_CHILD | WS_VISIBLE, 32, 368, 130, 20,
             hwnd, nullptr, nullptr, nullptr);
-        SF(g_lblKeybindTitle, g_fontNormal);
+        SF(g_lblKeybindTitle, g_fontBold);
 
         g_lblKeybind = CreateWindowW(L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_CENTER,
-            166, 368, 105, 30,
+            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
+            168, 364, 96, 30,
             hwnd, reinterpret_cast<HMENU>(IDC_LBL_KEYBIND), nullptr, nullptr);
         SF(g_lblKeybind, g_fontBold);
         UpdateKeybindLabel();
 
-        g_btnKeybind = CreateWindowW(L"BUTTON", L"Değiştir",
+        g_btnKeybind = CreateWindowW(L"BUTTON", L"⌨ Değiştir",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            276, 368, 78, 30,
+            272, 364, 92, 30,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_KEYBIND), nullptr, nullptr);
         SF(g_btnKeybind, g_fontNormal);
 
         g_btnDlssSettings = CreateWindowW(L"BUTTON", L"⚙ VLSS5 Ayarları",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            360, 368, 200, 30,
+            372, 364, 198, 30,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_DLSS_SETTINGS), nullptr, nullptr);
         SF(g_btnDlssSettings, g_fontBold);
 
-        // ---- Start Button (Big Neon Action Button) ----
-        g_btnStart = CreateWindowW(L"BUTTON", L"BAŞLAT  ►",
+        // ---- Start Button (Big Action Button) ----
+        g_btnStart = CreateWindowW(L"BUTTON", L"BAŞLAT  ➔",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            28, 424, 534, 46,
+            20, 420, 566, 48,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_START), nullptr, nullptr);
         SF(g_btnStart, g_fontTitle);
 
         // ---- Status bar ----
         g_lblStatus = CreateWindowW(L"STATIC", L"Hedef uygulamayı seçin veya istediğiniz penceredeyken ALT+S basın.",
-            WS_CHILD | WS_VISIBLE, 28, 482, 534, 20,
+            WS_CHILD | WS_VISIBLE | SS_CENTER, 20, 478, 566, 20,
             hwnd, reinterpret_cast<HMENU>(IDC_LBL_STATUS), nullptr, nullptr);
         SF(g_lblStatus, g_fontSmall);
 
@@ -636,41 +635,59 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         RECT headerRect = { 0, 0, client.right, 66 };
         FillRect(hdc, &headerRect, g_brCard);
 
-        // Header bottom accent line (Neon Green)
-        HPEN hPenNeon = CreatePen(PS_SOLID, 2, COLOR_NEON_GREEN);
-        HGDIOBJ oldPen = SelectObject(hdc, hPenNeon);
+        // Header bottom accent line (Glowing Lime Line)
+        HPEN hPenGlow = CreatePen(PS_SOLID, 3, RGB(0, 90, 25));
+        HGDIOBJ oldPen = SelectObject(hdc, hPenGlow);
+        MoveToEx(hdc, 0, 65, nullptr);
+        LineTo(hdc, client.right, 65);
+
+        HPEN hPenNeon = CreatePen(PS_SOLID, 1, COLOR_LIME_ACCENT);
+        SelectObject(hdc, hPenNeon);
         MoveToEx(hdc, 0, 65, nullptr);
         LineTo(hdc, client.right, 65);
         SelectObject(hdc, oldPen);
         DeleteObject(hPenNeon);
+        DeleteObject(hPenGlow);
 
-        // Header Emblem / Logo (Neon Green V5)
+        // Header Emblem / Logo (42x42)
         if (g_hLogoHeader)
         {
-            DrawIconEx(hdc, 20, 10, g_hLogoHeader, 46, 46, 0, nullptr, DI_NORMAL);
+            DrawIconEx(hdc, 20, 12, g_hLogoHeader, 42, 42, 0, nullptr, DI_NORMAL);
         }
 
-        // Header Title (Neon Green)
+        // Header Title (Bold White)
         SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, COLOR_NEON_GREEN);
+        SetTextColor(hdc, RGB(255, 255, 255));
         SelectObject(hdc, g_fontTitle);
-        TextOutW(hdc, 76, 14, L"VLSS5", 5);
+        TextOutW(hdc, 74, 12, L"VLSS5", 5);
 
         // Header Subtitle
         SetTextColor(hdc, COLOR_TEXT_MUTED);
         SelectObject(hdc, g_fontSubtitle);
-        const wchar_t subTitle[] = L"Yüksek Performanslı Nöral Oyun Overlay Sistemi";
-        TextOutW(hdc, 76, 40, subTitle, static_cast<int>(wcslen(subTitle)));
+        const wchar_t subTitle[] = L"Youtube: @vuenxxmx";
+        TextOutW(hdc, 74, 38, subTitle, static_cast<int>(wcslen(subTitle)));
 
-        // Keyboard Tips in Header
-        SetTextColor(hdc, COLOR_TEXT_MUTED);
+        // Keyboard Tips in Header (Right-side Pill Container)
+        RECT rcTips = { client.right - 340, 18, client.right - 20, 48 };
+        DrawModernPanel(hdc, rcTips, RGB(14, 18, 25), COLOR_BORDER, 6);
+
+        SetTextColor(hdc, RGB(165, 175, 190));
         SelectObject(hdc, g_fontSmall);
         const wchar_t tips[] = L"[F8] Odak  |  [F9] FPS  |  [F10] VLSS5  |  [Alt+S] Başlat";
-        TextOutW(hdc, 280, 24, tips, static_cast<int>(wcslen(tips)));
+        DrawTextW(hdc, tips, -1, &rcTips, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
-        // 3. Card Panel behind GPU & Keybind rows
-        RECT cardOptions = { 20, 318, 570, 410 };
-        DrawModernPanel(hdc, cardOptions, COLOR_CARD_BG, COLOR_BORDER, 8);
+        // 3. Card 1 Panel (Hedef Uygulama Seçimi)
+        RECT card1 = { 20, 76, client.right - 20, 304 };
+        DrawModernPanel(hdc, card1, COLOR_CARD_BG, COLOR_BORDER, 10);
+
+        // Card 1 Title
+        SetTextColor(hdc, RGB(225, 232, 242));
+        SelectObject(hdc, g_fontBold);
+        TextOutW(hdc, 34, 88, L"HEDEF UYGULAMA SEÇİMİ", 21);
+
+        // 4. Card 2 Panel (GPU & Kısayol)
+        RECT card2 = { 20, 314, client.right - 20, 410 };
+        DrawModernPanel(hdc, card2, COLOR_CARD_BG, COLOR_BORDER, 10);
 
         EndPaint(hwnd, &ps);
         break;
@@ -681,71 +698,227 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
         if (!dis) break;
 
-        // Custom draw the Window ListBox
+        // 1. Custom draw the Window ListBox (Items with App Icons & Lime Pill Selection)
         if (dis->CtlID == IDC_WINDOWLIST)
         {
             if (dis->itemID == static_cast<UINT>(-1)) break;
 
             bool isSelected = (dis->itemState & ODS_SELECTED);
-            COLORREF itemBg = isSelected ? COLOR_LIST_SEL : COLOR_CARD_BG;
-            COLORREF textColor = isSelected ? COLOR_NEON_GREEN : COLOR_TEXT_MAIN;
 
-            HBRUSH brItem = CreateSolidBrush(itemBg);
-            FillRect(dis->hDC, &dis->rcItem, brItem);
-            DeleteObject(brItem);
+            RECT rc = dis->rcItem;
+            int itemW = rc.right - rc.left;
+            int itemH = rc.bottom - rc.top;
+
+            HDC memDC = CreateCompatibleDC(dis->hDC);
+            HBITMAP memBmp = CreateCompatibleBitmap(dis->hDC, itemW, itemH);
+            HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
+
+            // Fill background with card background
+            RECT rcLocal = { 0, 0, itemW, itemH };
+            FillRect(memDC, &rcLocal, g_brCard);
 
             if (isSelected)
             {
-                RECT ind = dis->rcItem;
-                ind.right = ind.left + 4;
-                HBRUSH brNeon = CreateSolidBrush(COLOR_NEON_GREEN);
-                FillRect(dis->hDC, &ind, brNeon);
-                DeleteObject(brNeon);
+                // Rounded lime green pill matching mockup
+                RECT rcPill = { 2, 2, itemW - 2, itemH - 2 };
+                HPEN hPenPill = CreatePen(PS_SOLID, 1, COLOR_LIME_ACCENT);
+                HBRUSH hBrPill = CreateSolidBrush(COLOR_LIME_ACCENT);
+                HGDIOBJ oldPen = SelectObject(memDC, hPenPill);
+                HGDIOBJ oldBr  = SelectObject(memDC, hBrPill);
+
+                RoundRect(memDC, rcPill.left, rcPill.top, rcPill.right, rcPill.bottom, 8, 8);
+
+                SelectObject(memDC, oldBr);
+                SelectObject(memDC, oldPen);
+                DeleteObject(hBrPill);
+                DeleteObject(hPenPill);
             }
 
-            wchar_t text[512] = {};
-            SendMessageW(dis->hwndItem, LB_GETTEXT, dis->itemID, reinterpret_cast<LPARAM>(text));
+            // Get item icon and title
+            HICON hIcon = nullptr;
+            std::wstring title;
+            if (dis->itemID < g_windows.size())
+            {
+                hIcon = g_windows[dis->itemID].icon;
+                title = g_windows[dis->itemID].title;
+            }
+            else
+            {
+                wchar_t buf[512] = {};
+                SendMessageW(dis->hwndItem, LB_GETTEXT, dis->itemID, reinterpret_cast<LPARAM>(buf));
+                title = buf;
+            }
 
-            SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, textColor);
-            SelectObject(dis->hDC, g_fontNormal);
+            // Draw application icon (20x20)
+            int iconSize = 20;
+            int iconX = 8;
+            int iconY = (itemH - iconSize) / 2;
+            if (hIcon)
+            {
+                DrawIconEx(memDC, iconX, iconY, hIcon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
+            }
+            else
+            {
+                HICON defIcon = LoadIconW(nullptr, IDI_APPLICATION);
+                if (defIcon)
+                    DrawIconEx(memDC, iconX, iconY, defIcon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
+            }
 
-            RECT textRc = dis->rcItem;
-            textRc.left += isSelected ? 12 : 8;
-            DrawTextW(dis->hDC, text, -1, &textRc, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+            // Draw window title text
+            SetBkMode(memDC, TRANSPARENT);
+            SetTextColor(memDC, isSelected ? COLOR_DARK_TEXT : COLOR_TEXT_MAIN);
+            SelectObject(memDC, isSelected ? g_fontBold : g_fontNormal);
 
-            HPEN hPenLine = CreatePen(PS_SOLID, 1, RGB(26, 34, 46));
-            HGDIOBJ oldPen = SelectObject(dis->hDC, hPenLine);
-            MoveToEx(dis->hDC, dis->rcItem.left, dis->rcItem.bottom - 1, nullptr);
-            LineTo(dis->hDC, dis->rcItem.right, dis->rcItem.bottom - 1);
-            SelectObject(dis->hDC, oldPen);
-            DeleteObject(hPenLine);
+            RECT rcText = { iconX + iconSize + 8, 0, itemW - 8, itemH };
+            DrawTextW(memDC, title.c_str(), -1, &rcText,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+
+            BitBlt(dis->hDC, rc.left, rc.top, itemW, itemH, memDC, 0, 0, SRCCOPY);
+
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
 
             return TRUE;
         }
 
-        // Custom draw Start Button (Neon Glow)
+        // 2. Custom draw Checkboxes (VSync, FPS, DLSS 5) with modern square + checkmark
+        if (dis->CtlID == IDC_CHK_VSYNC || dis->CtlID == IDC_CHK_FPS || dis->CtlID == IDC_CHK_DLSS)
+        {
+            bool isChecked = false;
+            const wchar_t* label = L"";
+            if (dis->CtlID == IDC_CHK_VSYNC)      { isChecked = g_vsyncEnabled; label = L"VSync"; }
+            else if (dis->CtlID == IDC_CHK_FPS)   { isChecked = g_fpsEnabled;   label = L"FPS Göstergesi"; }
+            else if (dis->CtlID == IDC_CHK_DLSS)  { isChecked = g_dlssEnabled;  label = L"VLSS5 (Nöral)"; }
+
+            RECT rc = dis->rcItem;
+            int itemW = rc.right - rc.left;
+            int itemH = rc.bottom - rc.top;
+
+            HDC memDC = CreateCompatibleDC(dis->hDC);
+            HBITMAP memBmp = CreateCompatibleBitmap(dis->hDC, itemW, itemH);
+            HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
+
+            RECT rcLocal = { 0, 0, itemW, itemH };
+            FillRect(memDC, &rcLocal, g_brCard);
+
+            // Checkbox square (18x18)
+            int boxSize = 18;
+            int boxX = 2;
+            int boxY = (itemH - boxSize) / 2;
+            RECT rcBox = { boxX, boxY, boxX + boxSize, boxY + boxSize };
+
+            if (isChecked)
+            {
+                // Dark box with crisp white checkmark matching mockup
+                HPEN hPenBox = CreatePen(PS_SOLID, 1, RGB(70, 85, 110));
+                HBRUSH hBrBox = CreateSolidBrush(RGB(28, 36, 48));
+                HGDIOBJ oldPen = SelectObject(memDC, hPenBox);
+                HGDIOBJ oldBr  = SelectObject(memDC, hBrBox);
+
+                RoundRect(memDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
+
+                // Draw white checkmark ✓
+                HPEN hPenCheck = CreatePen(PS_SOLID, 2, RGB(245, 250, 255));
+                SelectObject(memDC, hPenCheck);
+
+                MoveToEx(memDC, boxX + 4, boxY + 9, nullptr);
+                LineTo(memDC, boxX + 7, boxY + 13);
+                LineTo(memDC, boxX + 14, boxY + 5);
+
+                SelectObject(memDC, oldBr);
+                SelectObject(memDC, oldPen);
+                DeleteObject(hPenCheck);
+                DeleteObject(hBrBox);
+                DeleteObject(hPenBox);
+            }
+            else
+            {
+                // Unchecked: dark box with subtle border
+                HPEN hPenBox = CreatePen(PS_SOLID, 1, RGB(55, 68, 88));
+                HBRUSH hBrBox = CreateSolidBrush(RGB(20, 26, 36));
+                HGDIOBJ oldPen = SelectObject(memDC, hPenBox);
+                HGDIOBJ oldBr  = SelectObject(memDC, hBrBox);
+
+                RoundRect(memDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
+
+                SelectObject(memDC, oldBr);
+                SelectObject(memDC, oldPen);
+                DeleteObject(hBrBox);
+                DeleteObject(hPenBox);
+            }
+
+            // Draw label
+            SetBkMode(memDC, TRANSPARENT);
+            SetTextColor(memDC, COLOR_TEXT_MAIN);
+            SelectObject(memDC, g_fontBold);
+
+            RECT rcText = { boxX + boxSize + 10, 0, itemW, itemH };
+            DrawTextW(memDC, label, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+
+            BitBlt(dis->hDC, rc.left, rc.top, itemW, itemH, memDC, 0, 0, SRCCOPY);
+
+            SelectObject(memDC, oldBmp);
+            DeleteObject(memBmp);
+            DeleteDC(memDC);
+
+            return TRUE;
+        }
+
+        // 3. Custom draw Start Button (Big Lime Action Button: BAŞLAT ➔)
         if (dis->CtlID == IDC_BTN_START)
         {
             bool isPressed = (dis->itemState & ODS_SELECTED);
-            COLORREF btnBg = isPressed ? COLOR_NEON_DARK : COLOR_NEON_GREEN;
+            COLORREF btnBg = isPressed ? COLOR_LIME_DARK : COLOR_LIME_ACCENT;
 
-            DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBg, 8);
+            DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBg, 10);
 
             SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, RGB(10, 16, 20));
+            SetTextColor(dis->hDC, COLOR_DARK_TEXT);
             SelectObject(dis->hDC, g_fontTitle);
 
-            DrawTextW(dis->hDC, L"BAŞLAT  ►", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(dis->hDC, L"BAŞLAT  ➔", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             return TRUE;
         }
 
-        // Custom draw Secondary Buttons
-        if (dis->CtlID == IDC_BTN_REFRESH || dis->CtlID == IDC_BTN_KEYBIND || dis->CtlID == IDC_BTN_DLSS_SETTINGS)
+        // 4. Custom draw VLSS5 Settings Button (Vibrant Lime Green in Card 2)
+        if (dis->CtlID == IDC_BTN_DLSS_SETTINGS)
         {
             bool isPressed = (dis->itemState & ODS_SELECTED);
-            COLORREF btnBg = isPressed ? RGB(32, 42, 58) : COLOR_CARD_BG;
-            COLORREF btnBorder = (dis->CtlID == IDC_BTN_DLSS_SETTINGS || isPressed) ? COLOR_NEON_GREEN : COLOR_BORDER;
+            COLORREF btnBg = isPressed ? COLOR_LIME_DARK : COLOR_LIME_ACCENT;
+
+            DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBg, 6);
+
+            SetBkMode(dis->hDC, TRANSPARENT);
+            SetTextColor(dis->hDC, COLOR_DARK_TEXT);
+            SelectObject(dis->hDC, g_fontBold);
+
+            DrawTextW(dis->hDC, L"⚙ VLSS5 Ayarları", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            return TRUE;
+        }
+
+        // 5. Custom draw Shortcut Pill Badge (Alt+S)
+        if (dis->CtlID == IDC_LBL_KEYBIND)
+        {
+            DrawModernPanel(dis->hDC, dis->rcItem, RGB(14, 18, 25), RGB(45, 58, 78), 6);
+
+            wchar_t keyText[64] = {};
+            GetWindowTextW(dis->hwndItem, keyText, _countof(keyText));
+
+            SetBkMode(dis->hDC, TRANSPARENT);
+            SetTextColor(dis->hDC, COLOR_TEXT_MAIN);
+            SelectObject(dis->hDC, g_fontBold);
+
+            DrawTextW(dis->hDC, keyText, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            return TRUE;
+        }
+
+        // 6. Custom draw Secondary Buttons (Yenile, Değiştir)
+        if (dis->CtlID == IDC_BTN_REFRESH || dis->CtlID == IDC_BTN_KEYBIND)
+        {
+            bool isPressed = (dis->itemState & ODS_SELECTED);
+            COLORREF btnBg = isPressed ? RGB(36, 46, 62) : RGB(26, 34, 46);
+            COLORREF btnBorder = isPressed ? COLOR_LIME_ACCENT : RGB(48, 62, 82);
 
             DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBorder, 6);
 
@@ -753,22 +926,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             GetWindowTextW(dis->hwndItem, btnText, _countof(btnText));
 
             SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, dis->CtlID == IDC_BTN_DLSS_SETTINGS ? COLOR_NEON_GREEN : COLOR_TEXT_MAIN);
+            SetTextColor(dis->hDC, COLOR_TEXT_MAIN);
             SelectObject(dis->hDC, g_fontBold);
 
             DrawTextW(dis->hDC, btnText, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             return TRUE;
         }
 
-        // Custom draw GPU Help '?' Button
+        // 7. Custom draw GPU Help '?' Button
         if (dis->CtlID == IDC_BTN_GPU_HELP)
         {
             bool isPressed = (dis->itemState & ODS_SELECTED);
-            COLORREF btnBg = isPressed ? RGB(32, 42, 58) : COLOR_CARD_BG;
-            COLORREF btnBorder = isPressed ? COLOR_NEON_GREEN : COLOR_BORDER;
-            COLORREF textColor = isPressed ? COLOR_NEON_GREEN : COLOR_TEXT_MUTED;
+            COLORREF btnBg = isPressed ? RGB(36, 46, 62) : RGB(26, 34, 46);
+            COLORREF btnBorder = isPressed ? COLOR_LIME_ACCENT : RGB(48, 62, 82);
+            COLORREF textColor = isPressed ? COLOR_LIME_ACCENT : COLOR_TEXT_MUTED;
 
-            DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBorder, 13);
+            DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBorder, 6);
 
             SetBkMode(dis->hDC, TRANSPARENT);
             SetTextColor(dis->hDC, textColor);
@@ -787,38 +960,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         SetBkMode(hdc, TRANSPARENT);
 
-        if (ctlHwnd == g_lblKeybind)
-        {
-            SetTextColor(hdc, COLOR_NEON_GREEN);
-            return reinterpret_cast<LRESULT>(g_brCard);
-        }
-
-        if (ctlHwnd == g_lblGpu || ctlHwnd == g_lblKeybindTitle)
-        {
-            SetTextColor(hdc, COLOR_TEXT_MAIN);
-            return reinterpret_cast<LRESULT>(g_brCard);
-        }
-
         if (ctlHwnd == g_lblStatus)
         {
-            SetTextColor(hdc, COLOR_NEON_GREEN);
-            return reinterpret_cast<LRESULT>(g_brBg);
-        }
-
-        if (ctlHwnd == g_chkVSync || ctlHwnd == g_chkFps || ctlHwnd == g_chkDlss)
-        {
-            SetTextColor(hdc, COLOR_TEXT_MAIN);
+            SetTextColor(hdc, COLOR_TEXT_MUTED);
             return reinterpret_cast<LRESULT>(g_brBg);
         }
 
         SetTextColor(hdc, COLOR_TEXT_MAIN);
-        return reinterpret_cast<LRESULT>(g_brBg);
+        return reinterpret_cast<LRESULT>(g_brCard);
     }
 
     case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLOREDIT:
     {
         HDC hdc = reinterpret_cast<HDC>(wParam);
-        SetBkMode(hdc, TRANSPARENT);
+        SetBkMode(hdc, OPAQUE);
+        SetBkColor(hdc, COLOR_CARD_BG);
         SetTextColor(hdc, COLOR_TEXT_MAIN);
         return reinterpret_cast<LRESULT>(g_brCard);
     }
@@ -828,9 +985,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         int ctlId = LOWORD(wParam);
 
         // VSync checkbox toggle
-        if (ctlId == IDC_CHK_VSYNC && HIWORD(wParam) == BN_CLICKED)
+        if (ctlId == IDC_CHK_VSYNC)
         {
-            g_vsyncEnabled = (Button_GetCheck(g_chkVSync) == BST_CHECKED);
+            g_vsyncEnabled = !g_vsyncEnabled;
+            InvalidateRect(g_chkVSync, nullptr, TRUE);
             if (g_vsyncEnabled)
                 SetStatus(L"VSync etkin: Kareler monitör yenileme hızına kilitlenecek.");
             else
@@ -839,16 +997,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         // FPS checkbox toggle
-        if (ctlId == IDC_CHK_FPS && HIWORD(wParam) == BN_CLICKED)
+        if (ctlId == IDC_CHK_FPS)
         {
-            g_fpsEnabled = (Button_GetCheck(g_chkFps) == BST_CHECKED);
+            g_fpsEnabled = !g_fpsEnabled;
+            InvalidateRect(g_chkFps, nullptr, TRUE);
             break;
         }
 
         // DLSS 5 checkbox toggle
-        if (ctlId == IDC_CHK_DLSS && HIWORD(wParam) == BN_CLICKED)
+        if (ctlId == IDC_CHK_DLSS)
         {
-            g_dlssEnabled = (Button_GetCheck(g_chkDlss) == BST_CHECKED);
+            g_dlssEnabled = !g_dlssEnabled;
+            InvalidateRect(g_chkDlss, nullptr, TRUE);
             if (g_dlssEnabled)
                 SetStatus(L"VLSS5 etkin: Nöral iyileştirme devrede.");
             else
@@ -1158,7 +1318,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
         L"VLSS5 — Yüksek Performanslı Oyun Overlay",
         (WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX)),
         CW_USEDEFAULT, CW_USEDEFAULT,
-        606, 565,
+        622, 555,
         nullptr, nullptr, hInstance, nullptr);
 
     if (!hwnd)
@@ -1166,6 +1326,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
         MessageBoxW(nullptr, L"Pencere oluşturulamadı.", L"VLSS5", MB_ICONERROR);
         return -1;
     }
+
+    // Windows 11 / Modern Dark Title Bar & Rounded Corners
+    BOOL darkMode = TRUE;
+    DwmSetWindowAttribute(hwnd, 20 /*DWMWA_USE_IMMERSIVE_DARK_MODE*/, &darkMode, sizeof(darkMode));
+    DWORD cornerPref = 2; // DWMWCP_ROUND
+    DwmSetWindowAttribute(hwnd, 33 /*DWMWA_WINDOW_CORNER_PREFERENCE*/, &cornerPref, sizeof(cornerPref));
 
     if (hMainIcon)
         SendMessageW(hwnd, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(hMainIcon));

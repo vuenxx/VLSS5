@@ -13,6 +13,9 @@ struct Dlss5Config
     int   resolutionScale = 100;    // 50 - 100 (% Model Çözünürlüğü / Performans Modu)
     bool  temporalStabilizer = false;// Gölge & hareket sabitleyici (Zorunlu reset bayrağı)
     bool  opticalFlow        = true; // Optik akış hareket vektörleri (GPU tabanlı gerçek zamanlı hareket takibi)
+    float boostFactor        = 1.0f; // 1.0 - 2.5 (Nöral Etki Yoğunluğu / Extrapolation Boost)
+    bool  splitScreen        = false;// Bölünmüş Ekran (Karşılaştırma Modu)
+    float splitPos           = 0.5f; // 0.0 - 1.0 (Bölünme Çizgisi Konumu, varsayılan %50)
 
     // Settings window toggle hotkey (Default: INSERT)
     UINT  settingsVk     = VK_INSERT;

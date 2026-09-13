@@ -20,106 +20,179 @@ cbuffer Config : register(b0)
     float2 g_padding;
 };
 
-[numthreads(16, 16, 1)]
-void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
+// 3x3 Block Matching Mean Squared Error (MSE) helper
+// Evaluates a 3x3 neighborhood to avoid aperture problem and single-pixel sensor noise.
+float ComputeMeanBlockSSD3x3(int2 curPos, int2 prevPos, int2 maxCoord)
 {
-    int2 pos = int2(dispatchThreadId.xy);
-    if (pos.x >= (int)g_screenSize.x || pos.y >= (int)g_screenSize.y)
-        return;
-
-    float3 curCenter  = g_CurrentFrame[pos].rgb;
-    float3 prevCenter = g_PrevFrame[pos].rgb;
-
-    // Fast static check: if pixel barely changed between frames, motion is strictly 0.
-    // Modern games have sub-pixel jitter / shadow dithering / AO noise of ~2-4 color levels.
-    float3 centerDiff = curCenter - prevCenter;
-    float centerErr = dot(centerDiff, centerDiff);
-    if (centerErr < 0.0003f)
-    {
-        g_MotionVectors[pos] = float2(0.0f, 0.0f);
-        if (g_uiMaskEnabled != 0) g_ReactiveMask[pos] = 1.0f;
-        return;
-    }
-
-    // Deep shadow check: in flat, dark shadow regions (< 0.04 luminance), visual tracking is
-    // ill-posed (aperture problem). Any subtle temporal noise in shadows causes random false vectors.
-    float maxLum = max(curCenter.r, max(curCenter.g, curCenter.b));
-    if (maxLum < 0.04f && centerErr < 0.003f)
-    {
-        g_MotionVectors[pos] = float2(0.0f, 0.0f);
-        if (g_uiMaskEnabled != 0) g_ReactiveMask[pos] = 1.0f;
-        return;
-    }
-
-    // 1. Hierarchical Block Search for Optical Flow Motion Vectors
-    // Search window: [-12, 12] in pixels
-    // Require candidate to beat centerErr by at least 20% and pay distance penalty to prevent jumping.
-    int2 bestOffset = int2(0, 0);
-    float minError  = centerErr * 0.80f;
-
-    // Coarse search: stride 3 (-12 to 12)
+    float total = 0.0f;
     [unroll]
-    for (int dy = -12; dy <= 12; dy += 3)
-    {
-        for (int dx = -12; dx <= 12; dx += 3)
-        {
-            if (dx == 0 && dy == 0) continue;
-            int2 samplePos = clamp(pos + int2(dx, dy), int2(0, 0), int2((int)g_screenSize.x - 1, (int)g_screenSize.y - 1));
-            float3 prevSample = g_PrevFrame[samplePos].rgb;
-            float3 diff = curCenter - prevSample;
-            float err = dot(diff, diff) + 0.00012f * (float)(abs(dx) + abs(dy));
-            if (err < minError)
-            {
-                minError   = err;
-                bestOffset = int2(dx, dy);
-            }
-        }
-    }
-
-    // Fine refinement: around best offset with stride 1
-    if (bestOffset.x != 0 || bestOffset.y != 0)
+    for (int ky = -1; ky <= 1; ++ky)
     {
         [unroll]
-        for (int fdy = -2; fdy <= 2; ++fdy)
+        for (int kx = -1; kx <= 1; ++kx)
         {
-            for (int fdx = -2; fdx <= 2; ++fdx)
+            int2 cp = clamp(curPos  + int2(kx, ky), int2(0, 0), maxCoord);
+            int2 pp = clamp(prevPos + int2(kx, ky), int2(0, 0), maxCoord);
+            float3 d = g_CurrentFrame[cp].rgb - g_PrevFrame[pp].rgb;
+            total += dot(d, d);
+        }
+    }
+    return total * 0.111111f; // Mean error per pixel in 3x3 block
+}
+
+// Groupshared memory for 8x8 block motion vector and error
+groupshared int2  s_blockMV;
+groupshared float s_blockErr;
+
+[numthreads(8, 8, 1)]
+void CSMain(
+    uint3 gtid : SV_GroupThreadID,
+    uint3 gid  : SV_GroupID,
+    uint3 dtid : SV_DispatchThreadID)
+{
+    int2 pos = int2(dtid.xy);
+    int2 maxCoord = int2((int)g_screenSize.x - 1, (int)g_screenSize.y - 1);
+
+    // 1. Only thread (0,0) of this 8x8 block performs the hierarchical full search
+    // for the center of the 8x8 block.
+    if (gtid.x == 0 && gtid.y == 0)
+    {
+        int2 blockCenter = clamp(int2(gid.xy * 8 + int2(4, 4)), int2(0, 0), maxCoord);
+        float3 curCenter  = g_CurrentFrame[blockCenter].rgb;
+        float3 prevCenter = g_PrevFrame[blockCenter].rgb;
+        float3 centerDiff = curCenter - prevCenter;
+        float centerErr = dot(centerDiff, centerDiff);
+
+        if (centerErr < 0.0003f)
+        {
+            s_blockMV  = int2(0, 0);
+            s_blockErr = centerErr;
+        }
+        else
+        {
+            float centerBlockMSE = ComputeMeanBlockSSD3x3(blockCenter, blockCenter, maxCoord);
+            if (centerBlockMSE < 0.00035f)
             {
-                if (fdx == 0 && fdy == 0) continue;
-                int2 candidate = bestOffset + int2(fdx, fdy);
-                int2 samplePos = clamp(pos + candidate, int2(0, 0), int2((int)g_screenSize.x - 1, (int)g_screenSize.y - 1));
-                float3 prevSample = g_PrevFrame[samplePos].rgb;
-                float3 diff = curCenter - prevSample;
-                float err = dot(diff, diff) + 0.00012f * (float)(abs(candidate.x) + abs(candidate.y));
-                if (err < minError)
+                s_blockMV  = int2(0, 0);
+                s_blockErr = centerBlockMSE;
+            }
+            else
+            {
+                int2 bestOffset = int2(0, 0);
+                float minError  = centerBlockMSE * 0.80f;
+
+                // Coarse search: stride 3 (-12 to 12) with fast single-pixel pre-filter
+                [unroll]
+                for (int dy = -12; dy <= 12; dy += 3)
                 {
-                    minError   = err;
-                    bestOffset = candidate;
+                    for (int dx = -12; dx <= 12; dx += 3)
+                    {
+                        if (dx == 0 && dy == 0) continue;
+                        int2 samplePos = clamp(blockCenter + int2(dx, dy), int2(0, 0), maxCoord);
+                        float3 quickDiff = curCenter - g_PrevFrame[samplePos].rgb;
+                        float quickErr = dot(quickDiff, quickDiff);
+
+                        if (quickErr < minError * 1.6f + 0.001f)
+                        {
+                            float err = ComputeMeanBlockSSD3x3(blockCenter, samplePos, maxCoord) + 0.00012f * (float)(abs(dx) + abs(dy));
+                            if (err < minError)
+                            {
+                                minError   = err;
+                                bestOffset = int2(dx, dy);
+                            }
+                        }
+                    }
                 }
+
+                // Fine refinement: around best offset with stride 1
+                if (bestOffset.x != 0 || bestOffset.y != 0)
+                {
+                    [unroll]
+                    for (int fdy = -2; fdy <= 2; ++fdy)
+                    {
+                        for (int fdx = -2; fdx <= 2; ++fdx)
+                        {
+                            if (fdx == 0 && fdy == 0) continue;
+                            int2 candidate = bestOffset + int2(fdx, fdy);
+                            int2 samplePos = clamp(blockCenter + candidate, int2(0, 0), maxCoord);
+                            float err = ComputeMeanBlockSSD3x3(blockCenter, samplePos, maxCoord) + 0.00012f * (float)(abs(candidate.x) + abs(candidate.y));
+                            if (err < minError)
+                            {
+                                minError   = err;
+                                bestOffset = candidate;
+                            }
+                        }
+                    }
+                }
+
+                s_blockMV  = bestOffset;
+                s_blockErr = minError;
             }
         }
     }
 
-    // Motion vector in pixels (points from current pixel to previous pixel position)
-    float2 mv = float2(bestOffset);
+    // Synchronize all 64 threads in this 8x8 block
+    GroupMemoryBarrierWithGroupSync();
 
-    // 2. Dynamic UI / Disocclusion Reactive Mask
+    if (pos.x > maxCoord.x || pos.y > maxCoord.y)
+        return;
+
+    // 2. Per-pixel check: Static UI / HUD elements or untouched pixels
+    float3 curPixel  = g_CurrentFrame[pos].rgb;
+    float3 prevPixel = g_PrevFrame[pos].rgb;
+    float3 pixelDiff = curPixel - prevPixel;
+    float pixelCenterErr = dot(pixelDiff, pixelDiff);
+
+    if (pixelCenterErr < 0.0003f)
+    {
+        g_MotionVectors[pos] = float2(0.0f, 0.0f);
+        if (g_uiMaskEnabled != 0) g_ReactiveMask[pos] = 1.0f;
+        return;
+    }
+
+    // 3. Ultra-fast local refinement: Each of the 64 threads tests ±1px around s_blockMV (9 samples)
+    int2 baseMV = s_blockMV;
+    int2 bestPixelMV = baseMV;
+    float minPixelErr = 999.0f;
+
+    [unroll]
+    for (int ry = -1; ry <= 1; ++ry)
+    {
+        [unroll]
+        for (int rx = -1; rx <= 1; ++rx)
+        {
+            int2 cand = baseMV + int2(rx, ry);
+            int2 sPos = clamp(pos + cand, int2(0, 0), maxCoord);
+            float3 d = curPixel - g_PrevFrame[sPos].rgb;
+            float err = dot(d, d) + 0.00012f * (float)(abs(cand.x) + abs(cand.y));
+            if (err < minPixelErr)
+            {
+                minPixelErr  = err;
+                bestPixelMV  = cand;
+            }
+        }
+    }
+
+    // 4. Dynamic UI / Disocclusion Reactive Mask
     float mask = 0.0f;
+    float2 finalMV = float2(bestPixelMV);
+
     if (g_uiMaskEnabled != 0)
     {
-        float diffSamePos = length(centerDiff);
-        float mvLength    = length(mv);
+        float diffSamePos = length(pixelDiff);
+        float mvLength    = length(finalMV);
 
         // If pixel is static UI or no motion detected
         if (diffSamePos < g_uiMaskThreshold || mvLength < 0.25f)
         {
-            mask = 1.0f;
-            mv   = float2(0.0f, 0.0f);
+            mask    = 1.0f;
+            finalMV = float2(0.0f, 0.0f);
         }
-        else if (minError > 0.35f)
+        else if (minPixelErr > 0.35f)
         {
-            // Disoccluded area / cutscene: no good match found in previous frame
-            mask = 1.0f;
-            mv   = float2(0.0f, 0.0f);
+            // Disoccluded area / cutscene: no good match found
+            mask    = 1.0f;
+            finalMV = float2(0.0f, 0.0f);
         }
         else
         {
@@ -127,14 +200,11 @@ void CSMain(uint3 dispatchThreadId : SV_DispatchThreadID)
         }
     }
 
-    g_MotionVectors[pos] = mv;
+    g_MotionVectors[pos] = finalMV;
     g_ReactiveMask[pos]  = mask;
 }
 )HLSL";
 
-// ---------------------------------------------------------------------------
-// Init
-// ---------------------------------------------------------------------------
 bool MotionVectorManager::Init(ID3D11Device* device, int width, int height)
 {
     m_width  = width;
@@ -152,6 +222,21 @@ bool MotionVectorManager::Init(ID3D11Device* device, int width, int height)
     sd.MaxLOD   = D3D11_FLOAT32_MAX;
     device->CreateSamplerState(&sd, &m_linearSampler);
 
+    // Initialize Hardware NVIDIA Optical Flow (NVOF) engine
+    m_nvof = std::make_unique<NvOFManager>();
+    ComPtr<ID3D11DeviceContext> immCtx;
+    device->GetImmediateContext(&immCtx);
+    if (m_nvof->Init(device, immCtx.Get(), width, height))
+    {
+        m_useHardwareNvOF = true;
+        DLSS_Log("[OpticalFlow] Hardware NVIDIA Optical Flow (NVOF) active! GridSize=4 (~0.5ms), Zero SM load.");
+    }
+    else
+    {
+        m_useHardwareNvOF = false;
+        DLSS_Log("[OpticalFlow] Hardware NVOF unavailable or failed; using 8x8 groupshared compute shader fallback.");
+    }
+
     return true;
 }
 
@@ -166,6 +251,13 @@ void MotionVectorManager::Resize(ID3D11Device* device, int width, int height)
     m_firstFrame = true;
 
     CreateResources(device, width, height);
+
+    if (m_nvof && m_useHardwareNvOF)
+    {
+        ComPtr<ID3D11DeviceContext> immCtx;
+        device->GetImmediateContext(&immCtx);
+        m_nvof->Resize(device, immCtx.Get(), width, height);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -187,7 +279,10 @@ void MotionVectorManager::CleanupTextures()
     m_depthSRV.Reset();
     m_depthTexture.Reset();
 
-    m_stagingMv.Reset();
+    for (int i = 0; i < kProbeRingSize; ++i)
+        m_stagingMvRing[i].Reset();
+    m_probeRingIndex = 0;
+    m_probeFramesPending = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -196,6 +291,13 @@ void MotionVectorManager::CleanupTextures()
 void MotionVectorManager::Cleanup()
 {
     CleanupTextures();
+
+    if (m_nvof)
+    {
+        m_nvof->Cleanup();
+        m_nvof.reset();
+    }
+    m_useHardwareNvOF = false;
 
     m_opticalFlowCS.Reset();
     m_constantBuffer.Reset();
@@ -267,7 +369,7 @@ bool MotionVectorManager::CreateResources(ID3D11Device* device, int width, int h
     hr = device->CreateShaderResourceView(m_depthTexture.Get(), nullptr, &m_depthSRV);
     if (FAILED(hr)) return false;
 
-    // 5. Staging texture (16x16 R16G16_FLOAT) for periodic diagnostic probing
+    // 5. Staging texture ring (16x16 R16G16_FLOAT) for stall-free periodic diagnostic probing
     D3D11_TEXTURE2D_DESC tdStaging = {};
     tdStaging.Width          = 16;
     tdStaging.Height         = 16;
@@ -278,7 +380,14 @@ bool MotionVectorManager::CreateResources(ID3D11Device* device, int width, int h
     tdStaging.Usage          = D3D11_USAGE_STAGING;
     tdStaging.BindFlags      = 0;
     tdStaging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    device->CreateTexture2D(&tdStaging, nullptr, &m_stagingMv);
+
+    for (int i = 0; i < kProbeRingSize; ++i)
+    {
+        hr = device->CreateTexture2D(&tdStaging, nullptr, &m_stagingMvRing[i]);
+        if (FAILED(hr)) return false;
+    }
+    m_probeRingIndex = 0;
+    m_probeFramesPending = 0;
 
     // 6. Constant buffer for Compute Shader (create if not already existing)
     if (!m_constantBuffer)
@@ -356,11 +465,13 @@ static inline float HalfToFloat(uint16_t h)
 // ---------------------------------------------------------------------------
 void MotionVectorManager::ProbeMotionVectors(ID3D11DeviceContext* ctx, ID3D11Texture2D* mvTex)
 {
-    if (!ctx || !mvTex || !m_stagingMv) return;
+    if (!ctx || !mvTex || !m_stagingMvRing[0]) return;
 
     static uint32_t s_probeCounter = 0;
     s_probeCounter++;
-    if (s_probeCounter <= 5 || (s_probeCounter % 300 == 0))
+
+    bool shouldProbe = (s_probeCounter <= 5 || (s_probeCounter % 300 == 0));
+    if (shouldProbe)
     {
         int cx = std::max(0, m_width / 2 - 8);
         int cy = std::max(0, m_height / 2 - 8);
@@ -372,40 +483,51 @@ void MotionVectorManager::ProbeMotionVectors(ID3D11DeviceContext* ctx, ID3D11Tex
         box.bottom = static_cast<UINT>(cy + 16);
         box.back   = 1;
 
-        ctx->CopySubresourceRegion(m_stagingMv.Get(), 0, 0, 0, 0, mvTex, 0, &box);
+        // Asynchronous copy to current slot in ring buffer
+        int writeSlot = m_probeRingIndex;
+        ctx->CopySubresourceRegion(m_stagingMvRing[writeSlot].Get(), 0, 0, 0, 0, mvTex, 0, &box);
 
-        D3D11_MAPPED_SUBRESOURCE mapped = {};
-        if (SUCCEEDED(ctx->Map(m_stagingMv.Get(), 0, D3D11_MAP_READ, 0, &mapped)))
+        m_probeRingIndex = (m_probeRingIndex + 1) % kProbeRingSize;
+        m_probeFramesPending++;
+
+        // Only read from the ring buffer if enough frames have elapsed so GPU has finished execution,
+        // completely eliminating CPU-GPU pipeline flush stalls.
+        if (m_probeFramesPending >= kProbeRingSize)
         {
-            const uint16_t* pData = reinterpret_cast<const uint16_t*>(mapped.pData);
-            UINT pitchElements = mapped.RowPitch / sizeof(uint16_t);
-
-            float sumMag = 0.0f;
-            float maxMag = 0.0f;
-            int nonZeroCount = 0;
-            float centerDx = 0.0f, centerDy = 0.0f;
-
-            for (int y = 0; y < 16; ++y)
+            int readSlot = m_probeRingIndex; // Oldest slot in the ring (kProbeRingSize frames old)
+            D3D11_MAPPED_SUBRESOURCE mapped = {};
+            if (SUCCEEDED(ctx->Map(m_stagingMvRing[readSlot].Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped)))
             {
-                for (int x = 0; x < 16; ++x)
-                {
-                    uint16_t hx = pData[y * pitchElements + x * 2 + 0];
-                    uint16_t hy = pData[y * pitchElements + x * 2 + 1];
-                    float dx = HalfToFloat(hx);
-                    float dy = HalfToFloat(hy);
-                    float mag = std::sqrt(dx * dx + dy * dy);
-                    if (mag > 0.01f) nonZeroCount++;
-                    sumMag += mag;
-                    if (mag > maxMag) maxMag = mag;
-                    if (x == 8 && y == 8) { centerDx = dx; centerDy = dy; }
-                }
-            }
-            ctx->Unmap(m_stagingMv.Get(), 0);
+                const uint16_t* pData = reinterpret_cast<const uint16_t*>(mapped.pData);
+                UINT pitchElements = mapped.RowPitch / sizeof(uint16_t);
 
-            float meanMag = sumMag / 256.0f;
-            float nonZeroPct = (nonZeroCount * 100.0f) / 256.0f;
-            DLSS_Log("[OpticalFlow] Probe #%u (%dx%d): mean |mv|=%.2f px, max=%.2f px, nonZero=%.1f%%, center=(%.1f, %.1f) px",
-                s_probeCounter, m_width, m_height, meanMag, maxMag, nonZeroPct, centerDx, centerDy);
+                float sumMag = 0.0f;
+                float maxMag = 0.0f;
+                int nonZeroCount = 0;
+                float centerDx = 0.0f, centerDy = 0.0f;
+
+                for (int y = 0; y < 16; ++y)
+                {
+                    for (int x = 0; x < 16; ++x)
+                    {
+                        uint16_t hx = pData[y * pitchElements + x * 2 + 0];
+                        uint16_t hy = pData[y * pitchElements + x * 2 + 1];
+                        float dx = HalfToFloat(hx);
+                        float dy = HalfToFloat(hy);
+                        float mag = std::sqrt(dx * dx + dy * dy);
+                        if (mag > 0.01f) nonZeroCount++;
+                        sumMag += mag;
+                        if (mag > maxMag) maxMag = mag;
+                        if (x == 8 && y == 8) { centerDx = dx; centerDy = dy; }
+                    }
+                }
+                ctx->Unmap(m_stagingMvRing[readSlot].Get(), 0);
+
+                float meanMag = sumMag / 256.0f;
+                float nonZeroPct = (nonZeroCount * 100.0f) / 256.0f;
+                DLSS_Log("[OpticalFlow] Probe #%u (%dx%d): mean |mv|=%.2f px, max=%.2f px, nonZero=%.1f%%, center=(%.1f, %.1f) px",
+                    s_probeCounter, m_width, m_height, meanMag, maxMag, nonZeroPct, centerDx, centerDy);
+            }
         }
     }
 }
@@ -447,40 +569,51 @@ bool MotionVectorManager::ProcessFrame(
         return true;
     }
 
-    // Update constant buffer
-    ComputeCB cb = {};
-    cb.screenSize[0]     = static_cast<float>(m_width);
-    cb.screenSize[1]     = static_cast<float>(m_height);
-    cb.invScreenSize[0]  = 1.0f / cb.screenSize[0];
-    cb.invScreenSize[1]  = 1.0f / cb.screenSize[1];
-    cb.uiMaskEnabled     = m_uiMaskEnabled ? 1 : 0;
-    cb.uiMaskThreshold   = m_uiMaskThreshold;
+    // If hardware NVIDIA Optical Flow is active, execute on dedicated silicon with ZERO SM utilization
+    bool nvofExecuted = false;
+    if (m_useHardwareNvOF && m_nvof)
+    {
+        nvofExecuted = m_nvof->ProcessFrame(ctx, currentTexture.Get(), m_prevFrameTexture.Get(), activeMvUAV, targetMvTex);
+    }
 
-    ctx->UpdateSubresource(m_constantBuffer.Get(), 0, nullptr, &cb, 0, 0);
+    // Fallback: If hardware NVOF is not available or failed on this frame, use 8x8 groupshared compute shader
+    if (!nvofExecuted)
+    {
+        // Update constant buffer
+        ComputeCB cb = {};
+        cb.screenSize[0]     = static_cast<float>(m_width);
+        cb.screenSize[1]     = static_cast<float>(m_height);
+        cb.invScreenSize[0]  = 1.0f / cb.screenSize[0];
+        cb.invScreenSize[1]  = 1.0f / cb.screenSize[1];
+        cb.uiMaskEnabled     = m_uiMaskEnabled ? 1 : 0;
+        cb.uiMaskThreshold   = m_uiMaskThreshold;
 
-    // Bind resources to compute shader
-    ctx->CSSetShader(m_opticalFlowCS.Get(), nullptr, 0);
-    ctx->CSSetConstantBuffers(0, 1, m_constantBuffer.GetAddressOf());
-    ctx->CSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
+        ctx->UpdateSubresource(m_constantBuffer.Get(), 0, nullptr, &cb, 0, 0);
 
-    ID3D11ShaderResourceView* srvs[2] = { currentFrameSRV, m_prevFrameSRV.Get() };
-    ctx->CSSetShaderResources(0, 2, srvs);
+        // Bind resources to compute shader
+        ctx->CSSetShader(m_opticalFlowCS.Get(), nullptr, 0);
+        ctx->CSSetConstantBuffers(0, 1, m_constantBuffer.GetAddressOf());
+        ctx->CSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
 
-    ID3D11UnorderedAccessView* uavs[2] = { activeMvUAV, m_maskUAV.Get() };
-    UINT initCounts[2] = { 0, 0 };
-    ctx->CSSetUnorderedAccessViews(0, 2, uavs, initCounts);
+        ID3D11ShaderResourceView* srvs[2] = { currentFrameSRV, m_prevFrameSRV.Get() };
+        ctx->CSSetShaderResources(0, 2, srvs);
 
-    // Dispatch compute shader (16x16 thread blocks)
-    UINT groupsX = (static_cast<UINT>(m_width)  + 15) / 16;
-    UINT groupsY = (static_cast<UINT>(m_height) + 15) / 16;
-    ctx->Dispatch(groupsX, groupsY, 1);
+        ID3D11UnorderedAccessView* uavs[2] = { activeMvUAV, m_maskUAV.Get() };
+        UINT initCounts[2] = { 0, 0 };
+        ctx->CSSetUnorderedAccessViews(0, 2, uavs, initCounts);
 
-    // Unbind UAVs and SRVs to avoid hazard in downstream rendering
-    ID3D11UnorderedAccessView* nullUAVs[2] = { nullptr, nullptr };
-    ctx->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
+        // Dispatch compute shader (8x8 thread blocks)
+        UINT groupsX = (static_cast<UINT>(m_width)  + 7) / 8;
+        UINT groupsY = (static_cast<UINT>(m_height) + 7) / 8;
+        ctx->Dispatch(groupsX, groupsY, 1);
 
-    ID3D11ShaderResourceView* nullSRVs[2] = { nullptr, nullptr };
-    ctx->CSSetShaderResources(0, 2, nullSRVs);
+        // Unbind UAVs and SRVs to avoid hazard in downstream rendering
+        ID3D11UnorderedAccessView* nullUAVs[2] = { nullptr, nullptr };
+        ctx->CSSetUnorderedAccessViews(0, 2, nullUAVs, nullptr);
+
+        ID3D11ShaderResourceView* nullSRVs[2] = { nullptr, nullptr };
+        ctx->CSSetShaderResources(0, 2, nullSRVs);
+    }
 
     // Periodic diagnostic probe of motion vectors
     ID3D11Texture2D* activeMvTex = targetMvTex ? targetMvTex : m_mvTexture.Get();

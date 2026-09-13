@@ -333,7 +333,7 @@ bool DLSSNRManager::CreateFeature()
     HANDLE hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
     m_queue->Signal(fence.Get(), 1);
     fence->SetEventOnCompletion(1, hEvent);
-    WaitForSingleObject(hEvent, INFINITE);
+    WaitForSingleObject(hEvent, 2000);
     CloseHandle(hEvent);
 
     int lastInit = m_pLastInit ? *m_pLastInit : 0;
@@ -451,9 +451,9 @@ bool DLSSNRManager::Evaluate(
     if (m_needsRebuild)
     {
         ULONGLONG now = GetTickCount64();
-        if (now - m_lastConfigChangeTime >= 70)
+        if (now - m_lastConfigChangeTime >= 400)
         {
-            DLSS_Log("[DLSS-NR] Rebuilding Feature 18: Scale=%.0f%% (Work=%dx%d), Preset=%d, Style=%d, Intense=%.2f, Struct=%.2f, Tone=%.2f, Skin=%.2f, AutoMask=%d",
+            DLSS_Log("[DLSS-NR] Rebuilding Feature 18 (debounced): Scale=%.0f%% (Work=%dx%d), Preset=%d, Style=%d, Intense=%.2f, Struct=%.2f, Tone=%.2f, Skin=%.2f, AutoMask=%d",
                 m_resolutionScale * 100.0f, m_workWidth, m_workHeight, m_preset, m_style, m_intensity, m_localStructure, m_localTone, m_skinStructure, m_useAutoMask);
             CreateGuideTextures(m_workWidth, m_workHeight);
             CreateFeature();
@@ -633,16 +633,5 @@ void DLSSNRManager::ApplyConfig(const Dlss5Config& cfg)
 
     m_needsRebuild   = true;
     m_lastConfigChangeTime = GetTickCount64();
-
-    // If overlay is idle / not evaluating right now, rebuild immediately
-    if (!m_isEvaluating && m_device && m_queue && m_params)
-    {
-        DLSS_Log("[DLSS-NR] Immediate idle rebuild: Scale=%.0f%% (%dx%d), Preset=%d, Style=%d, Intense=%.2f",
-            m_resolutionScale * 100.0f, m_workWidth, m_workHeight, m_preset, m_style, m_intensity);
-        CreateGuideTextures(m_workWidth, m_workHeight);
-        CreateFeature();
-        m_firstFrame = true;
-        m_needsRebuild = false;
-    }
 }
 

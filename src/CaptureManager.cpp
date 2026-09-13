@@ -77,9 +77,13 @@ bool CaptureManager::Start(HWND targetHwnd, ID3D11Device* device)
                 double gapMs = static_cast<double>(now.QuadPart - m_lastFrameArrivalTime.QuadPart)
                                * 1000.0 / static_cast<double>(freq.QuadPart);
 
+                m_lastFrameGapMs = gapMs;
                 if (gapMs > m_maxFrameGapMs) m_maxFrameGapMs = gapMs;
                 m_sumFrameGapMs += gapMs;
                 m_frameGapSamples++;
+
+                m_gapHistory[m_gapHistoryIdx % kJitterWindow] = gapMs;
+                m_gapHistoryIdx++;
 
                 // Threshold: >200 ms means WGC may have been paused (window minimised/occluded)
                 if (gapMs > 200.0)
@@ -212,16 +216,28 @@ ID3D11ShaderResourceView* CaptureManager::AcquireCurrentFrameSRV(ID3D11Device* d
     auto peekFrame = m_framePool.TryGetNextFrame();
     if (peekFrame)
     {
-        // If there is severe backlog (3+ frames accumulated, e.g. after lag spike or stall),
-        // drain older frames to keep latency low, but preserve sequential cadence when backlog is small (120-240 FPS / Frame Gen).
-        while (auto newerFrame = m_framePool.TryGetNextFrame())
+        // Balanced frame pacing:
+        // If 3 or more frames accumulated (e.g. after a loading hitch),
+        // discard the oldest frame while preserving sequential cadence for DLSS temporal stability.
+        auto thirdFrame = m_framePool.TryGetNextFrame();
+        if (thirdFrame)
         {
             frame.Close();
             frame = peekFrame;
-            peekFrame = newerFrame;
+            m_nextFrame = thirdFrame;
+
+            // Drain any extreme backlog (4+ frames)
+            while (auto extra = m_framePool.TryGetNextFrame())
+            {
+                m_nextFrame.Close();
+                m_nextFrame = extra;
+            }
+        }
+        else
+        {
+            m_nextFrame = peekFrame;
         }
 
-        m_nextFrame = peekFrame;
         // Keep m_newFrame = true so the render loop immediately consumes the next queued frame without sleeping
         m_newFrame.store(true, std::memory_order_release);
     }
@@ -418,13 +434,28 @@ void CaptureManager::FlushCaptureStats()
 
     if (m_frameGapSamples > 0)
     {
-        double avgGapMs = m_sumFrameGapMs / static_cast<double>(m_frameGapSamples);
-        DLSS_Log("[Capture] ozet: %llu WGC karesi | ort bosluk: %.2f ms | maks bosluk: %.2f ms",
-            m_frameGapSamples, avgGapMs, m_maxFrameGapMs);
+        double mean = m_sumFrameGapMs / static_cast<double>(m_frameGapSamples);
+        int windowCount = std::min(kJitterWindow, m_gapHistoryIdx);
+        double variance = 0.0;
+        if (windowCount > 0)
+        {
+            for (int i = 0; i < windowCount; ++i)
+            {
+                double diff = m_gapHistory[i] - mean;
+                variance += diff * diff;
+            }
+            variance /= windowCount;
+        }
+        double stddev = std::sqrt(variance);
+
+        DLSS_Log("[Capture] ozet(5sn): ort_gap=%.1fms stddev=%.1fms maks=%.1fms "
+                 "(stddev/ort orani yuksekse = duzensiz gelis, DWM/FG pacing supheli)",
+                 mean, stddev, m_maxFrameGapMs);
 
         // Reset accumulators for the next window
         m_maxFrameGapMs   = 0.0;
         m_sumFrameGapMs   = 0.0;
         m_frameGapSamples = 0;
+        m_gapHistoryIdx   = 0;
     }
 }

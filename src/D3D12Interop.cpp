@@ -279,7 +279,8 @@ bool D3D12Interop::CreateSharedTextures(int workWidth, int workHeight)
         return false;
     }
 
-    // 2. Shared Output Texture (Read by D3D11 swap chain, receives copied frame from D3D12)
+    // 2. Shared Output Texture (Direct Zero-Copy UAV or fallback)
+    m_useDirectSharedOut = false;
     D3D11_TEXTURE2D_DESC tdOut = {};
     tdOut.Width     = workWidth;
     tdOut.Height    = workHeight;
@@ -288,14 +289,26 @@ bool D3D12Interop::CreateSharedTextures(int workWidth, int workHeight)
     tdOut.Format    = DXGI_FORMAT_B8G8R8A8_UNORM;
     tdOut.SampleDesc.Count = 1;
     tdOut.Usage     = D3D11_USAGE_DEFAULT;
-    tdOut.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    // Attempt Direct Zero-Copy: Include D3D11_BIND_UNORDERED_ACCESS so D3D12 can directly evaluate Feature 18 into it
+    tdOut.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
     tdOut.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
 
     hr = m_d3d11Dev->CreateTexture2D(&tdOut, nullptr, &m_sharedOutD11);
-    if (FAILED(hr))
+    if (SUCCEEDED(hr))
     {
-        DLSS_Log("[D3D12Interop] ERROR: Failed to create m_sharedOutD11: 0x%08X", hr);
-        return false;
+        m_useDirectSharedOut = true;
+    }
+    else
+    {
+        // Fallback for drivers/adapters that don't support UAV on shared B8G8R8A8
+        DLSS_Log("[D3D12Interop] Note: Direct shared UAV output texture unsupported (0x%08X), using native copy fallback.", hr);
+        tdOut.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        hr = m_d3d11Dev->CreateTexture2D(&tdOut, nullptr, &m_sharedOutD11);
+        if (FAILED(hr))
+        {
+            DLSS_Log("[D3D12Interop] ERROR: Failed to create m_sharedOutD11: 0x%08X", hr);
+            return false;
+        }
     }
 
     hr = m_d3d11Dev->CreateShaderResourceView(m_sharedOutD11.Get(), nullptr, &m_sharedOutSRV);
@@ -321,29 +334,36 @@ bool D3D12Interop::CreateSharedTextures(int workWidth, int workHeight)
         return false;
     }
 
-    // 3. Native D3D12 Output Texture with FULL UAV support (for DLSS-NR neural evaluation)
-    D3D12_HEAP_PROPERTIES hp = {};
-    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
-
-    D3D12_RESOURCE_DESC rd = {};
-    rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
-    rd.Width            = workWidth;
-    rd.Height           = workHeight;
-    rd.DepthOrArraySize = 1;
-    rd.MipLevels        = 1;
-    rd.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
-    rd.SampleDesc.Count = 1;
-    rd.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
-    rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
-
-    hr = m_d3d12Device->CreateCommittedResource(
-        &hp, D3D12_HEAP_FLAG_NONE, &rd,
-        D3D12_RESOURCE_STATE_COMMON, nullptr,
-        IID_PPV_ARGS(&m_nativeOutD12));
-    if (FAILED(hr))
+    if (m_useDirectSharedOut)
     {
-        DLSS_Log("[D3D12Interop] ERROR: Failed to create m_nativeOutD12: 0x%08X", hr);
-        return false;
+        DLSS_Log("[D3D12Interop] Zero-Copy Output Texture active (redundant D3D12 copy eliminated)!");
+    }
+    else
+    {
+        // Fallback: Native D3D12 Output Texture with FULL UAV support (for DLSS-NR neural evaluation)
+        D3D12_HEAP_PROPERTIES hp = {};
+        hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+        D3D12_RESOURCE_DESC rd = {};
+        rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        rd.Width            = workWidth;
+        rd.Height           = workHeight;
+        rd.DepthOrArraySize = 1;
+        rd.MipLevels        = 1;
+        rd.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+        rd.SampleDesc.Count = 1;
+        rd.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+        rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+        hr = m_d3d12Device->CreateCommittedResource(
+            &hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(&m_nativeOutD12));
+        if (FAILED(hr))
+        {
+            DLSS_Log("[D3D12Interop] ERROR: Failed to create m_nativeOutD12 fallback: 0x%08X", hr);
+            return false;
+        }
     }
 
     // 4. Shared Motion Vectors Texture (R16G16_FLOAT) for Optical Flow
@@ -562,9 +582,16 @@ bool D3D12Interop::BeginFrame(
     }
 
     // 2. Optical Flow: Compute real-time Motion Vectors at model work resolution
+    m_lastMvMs = 0.0;
     if (mvMgr && m_sharedInSRV && m_sharedMvUAV)
     {
+        LARGE_INTEGER tMv0, tMv1, qpf;
+        QueryPerformanceFrequency(&qpf);
+        QueryPerformanceCounter(&tMv0);
         mvMgr->ProcessFrame(m_d3d11Ctx.Get(), m_sharedInSRV.Get(), m_sharedInD11.Get(), m_sharedMvUAV.Get(), m_sharedMvD11.Get());
+        QueryPerformanceCounter(&tMv1);
+        if (qpf.QuadPart > 0)
+            m_lastMvMs = static_cast<double>(tMv1.QuadPart - tMv0.QuadPart) * 1000.0 / static_cast<double>(qpf.QuadPart);
     }
 
     if (m_frameIndex <= 3 || (m_frameIndex % 300 == 0))
@@ -576,8 +603,11 @@ bool D3D12Interop::BeginFrame(
     // 3. Signal D3D11 Fence that copy/downscale AND optical flow are submitted to GPU
     m_d3d11Ctx4->Signal(m_fenceInD11.Get(), m_frameIndex);
 
-    // CRITICAL FIX: Flush D3D11 immediate context!
-    m_d3d11Ctx->Flush();
+    // Conditional Flush: Modern WDDM 2.0+ drivers automatically submit GPU fence signals without CPU stall.
+    if (m_enableExplicitFlush)
+    {
+        m_d3d11Ctx->Flush();
+    }
 
     // 4. Queue D3D12 CommandQueue wait for D3D11 fence
     m_cmdQueue->Wait(m_fenceInD12.Get(), m_frameIndex);
@@ -644,42 +674,51 @@ bool D3D12Interop::BeginFrame(
 
 bool D3D12Interop::EndFrame()
 {
-    if (!m_cmdList || !m_cmdQueue || !m_d3d11Ctx4 || !m_nativeOutD12 || !m_sharedOutD12) return false;
+    if (!m_cmdList || !m_cmdQueue || !m_d3d11Ctx4 || !m_sharedOutD12) return false;
 
-    // 1. Transition nativeOutD12 (COMMON -> COPY_SOURCE) and sharedOutD12 (COMMON -> COPY_DEST)
-    D3D12_RESOURCE_BARRIER bCopy[2] = {};
-    bCopy[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    bCopy[0].Transition.pResource   = m_nativeOutD12.Get();
-    bCopy[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-    bCopy[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    bCopy[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    // In fallback mode (when shared UAV texture is unsupported), perform hardware copy
+    if (!m_useDirectSharedOut)
+    {
+        if (!m_nativeOutD12) return false;
 
-    bCopy[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    bCopy[1].Transition.pResource   = m_sharedOutD12.Get();
-    bCopy[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
-    bCopy[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
-    bCopy[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        // 1. Transition nativeOutD12 (COMMON -> COPY_SOURCE) and sharedOutD12 (COMMON -> COPY_DEST)
+        D3D12_RESOURCE_BARRIER bCopy[2] = {};
+        bCopy[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        bCopy[0].Transition.pResource   = m_nativeOutD12.Get();
+        bCopy[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        bCopy[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        bCopy[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 
-    m_cmdList->ResourceBarrier(2, bCopy);
+        bCopy[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        bCopy[1].Transition.pResource   = m_sharedOutD12.Get();
+        bCopy[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        bCopy[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+        bCopy[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 
-    // 2. Hardware copy DLSS-NR output into D3D11 shared texture
-    m_cmdList->CopyResource(m_sharedOutD12.Get(), m_nativeOutD12.Get());
+        m_cmdList->ResourceBarrier(2, bCopy);
 
-    // 3. Transition both back to COMMON state
-    D3D12_RESOURCE_BARRIER bRestore[2] = {};
-    bRestore[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    bRestore[0].Transition.pResource   = m_nativeOutD12.Get();
-    bRestore[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
-    bRestore[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
-    bRestore[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        // 2. Hardware copy DLSS-NR output into D3D11 shared texture
+        m_cmdList->CopyResource(m_sharedOutD12.Get(), m_nativeOutD12.Get());
 
-    bRestore[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
-    bRestore[1].Transition.pResource   = m_sharedOutD12.Get();
-    bRestore[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
-    bRestore[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
-    bRestore[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        // 3. Transition both back to COMMON state
+        D3D12_RESOURCE_BARRIER bRestore[2] = {};
+        bRestore[0].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        bRestore[0].Transition.pResource   = m_nativeOutD12.Get();
+        bRestore[0].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        bRestore[0].Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
+        bRestore[0].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
 
-    m_cmdList->ResourceBarrier(2, bRestore);
+        bRestore[1].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        bRestore[1].Transition.pResource   = m_sharedOutD12.Get();
+        bRestore[1].Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_DEST;
+        bRestore[1].Transition.StateAfter  = D3D12_RESOURCE_STATE_COMMON;
+        bRestore[1].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+
+        m_cmdList->ResourceBarrier(2, bRestore);
+    }
+    // In Direct Zero-Copy mode (m_useDirectSharedOut == true):
+    // DLSS-NR writes directly into m_sharedOutD12 (UAV). Transitions are already handled
+    // within DLSSNRManager::Evaluate (to COMMON). No copy, no additional barriers!
 
     // 4. Close command list and execute on D3D12 GPU queue
     m_cmdList->Close();

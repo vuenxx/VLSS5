@@ -131,6 +131,7 @@
     <ClCompile Include="src\SettingsWindow.cpp" />
     <ClCompile Include="src\InputForwarder.cpp" />
     <ClCompile Include="src\WindowEnumerator.cpp" />
+    <ClCompile Include="src\NvOFManager.cpp" />
   </ItemGroup>
 
   <!-- ======================================================= -->
@@ -149,6 +150,9 @@
     <ClInclude Include="src\SettingsWindow.h" />
     <ClInclude Include="src\InputForwarder.h" />
     <ClInclude Include="src\WindowEnumerator.h" />
+    <ClInclude Include="src\NvOFManager.h" />
+    <ClInclude Include="src\nvOpticalFlowCommon.h" />
+    <ClInclude Include="src\nvOpticalFlowD3D11.h" />
     <ClInclude Include="src\resource.h" />
   </ItemGroup>
 

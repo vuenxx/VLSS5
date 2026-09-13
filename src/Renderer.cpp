@@ -40,12 +40,15 @@ cbuffer FpsConfig : register(b0)
     float2 g_screenSize;       // (width, height)
     float2 g_fpsBoxSize;       // (180, 36)
     int    g_fpsEnabled;       // 1 = enabled, 0 = disabled
-    float  _reserved0;         // (padding — formerly sharpness, kept for struct alignment)
+    float  g_boostFactor;      // 1.0 = normal, >1.0 = linear extrapolation boost
     int    g_dlssnrActive;     // 1 = DLSS-NR active, 0 = passthrough
     float  g_intensity;        // DLSS-NR intensity / detail strength (0.0 - 2.0)
     float  g_colourStrength;   // Colour strength (0.0 - 1.0)
     int    g_isSubNative;      // 1 = model resolution < 100% (Residual active)
     float2 g_workTexelSize;    // 1.0 / workSize
+    int    g_splitEnabled;     // 1 = split screen enabled, 0 = disabled
+    float  g_splitPos;         // 0.0 to 1.0 (screen x fraction)
+    float2 g_padding;          // 16-byte alignment
 };
 
 float4 PS(float4 pos : SV_Position,
@@ -58,11 +61,15 @@ float4 PS(float4 pos : SV_Position,
     if (g_dlssnrActive != 0)
     {
         float3 model = gModelTex.Sample(gLinearSamp, uv).rgb;
+        float3 raw = gProxyTex.Sample(gLinearSamp, uv).rgb;
+
+        // Boost linear extrapolation: saturate(raw + boost * (model - raw))
+        float3 boostedModel = saturate(raw + (model - raw) * g_boostFactor);
 
         if (g_isSubNative == 0)
         {
-            // At 100% resolution: direct, natural DLSS-NR neural output
-            result = lerp(original, model, saturate(g_intensity));
+            // At 100% resolution: direct, natural DLSS-NR neural output with boost
+            result = lerp(original, boostedModel, saturate(g_intensity));
         }
         else
         {
@@ -72,11 +79,11 @@ float4 PS(float4 pos : SV_Position,
             // from the native full-resolution frame ('original') without blur.
             // DLSS 5's neural denoising and lighting adjustments are transferred as a
             // smooth luminance ratio. Eliminates phase-mismatch watercolor smearing entirely.
-            float3 proxy = gProxyTex.Sample(gLinearSamp, uv).rgb;
+            float3 proxy = raw;
 
             const float3 kLuma = float3(0.2126f, 0.7152f, 0.0722f);
             float proxyLuma = dot(proxy, kLuma);
-            float modelLuma = dot(model, kLuma);
+            float modelLuma = dot(boostedModel, kLuma);
 
             // Stabilized lighting ratio with floor to prevent near-black blowing up
             const float kRatioFloor = 1.0f / 512.0f;
@@ -94,14 +101,39 @@ float4 PS(float4 pos : SV_Position,
 
             // Chrominance transfer: model's clean neural chroma scaled to match transferred luma
             float targetLuma = dot(transferredLuma, kLuma);
-            float3 modelChroma = model * (targetLuma / max(modelLuma, 1e-5f));
+            float3 modelChroma = boostedModel * (targetLuma / max(modelLuma, 1e-5f));
 
             // Blend between luminance-only transfer and model chroma
             result = lerp(transferredLuma, modelChroma, saturate(g_colourStrength));
         }
     }
 
-    float3 color = result;
+    float3 color;
+    if (g_splitEnabled != 0)
+    {
+        float splitCoord = g_splitPos * g_screenSize.x;
+        float dist = pos.x - splitCoord;
+
+        // 2-pixel wide crisp accent divider line at the boundary
+        if (abs(dist) <= 1.0f)
+        {
+            color = float3(1.0f, 1.0f, 1.0f);
+        }
+        else if (dist < 0.0f)
+        {
+            // Sol taraf: Ham görüntü (hiçbir filtre veya DLSS uygulanmamış orijinal kare)
+            color = original;
+        }
+        else
+        {
+            // Sağ taraf: DLSS 5 çıktısı
+            color = result;
+        }
+    }
+    else
+    {
+        color = result;
+    }
 
     if (g_fpsEnabled != 0)
     {
@@ -131,12 +163,15 @@ struct FpsCBufferData
     float screenSize[2];       // offset 0 (8 bytes)
     float fpsBoxSize[2];       // offset 8 (8 bytes) -> 16 bytes
     int   fpsEnabled;          // offset 16 (4 bytes)
-    float _reserved0;          // offset 20 (4 bytes) — alignment padding, formerly sharpness
+    float boostFactor;         // offset 20 (4 bytes)
     int   dlssnrActive;        // offset 24 (4 bytes)
     float intensity;           // offset 28 (4 bytes) -> 32 bytes
     float colourStrength;      // offset 32 (4 bytes)
     int   isSubNative;         // offset 36 (4 bytes)
     float workTexelSize[2];    // offset 40 (8 bytes) -> 48 bytes
+    int   splitEnabled;        // offset 48 (4 bytes)
+    float splitPos;            // offset 52 (4 bytes)
+    float padding[2];          // offset 56 (8 bytes) -> 64 bytes
 };
 
 // -----------------------------------------------------------------------
@@ -465,6 +500,9 @@ bool Renderer::CreateFpsResources(ID3D11Device* device)
     m_isSubNative      = false;
     m_intensity        = 1.0f;
     m_colourStrength   = 1.0f;
+    const auto& initialCfg = ConfigManager::Get().Config();
+    m_splitEnabled     = initialCfg.splitScreen;
+    m_splitPos         = initialCfg.splitPos;
     m_workTexelSize[0] = (m_width > 0) ? (1.0f / static_cast<float>(m_width)) : 0.0f;
     m_workTexelSize[1] = (m_height > 0) ? (1.0f / static_cast<float>(m_height)) : 0.0f;
 
@@ -577,13 +615,15 @@ void Renderer::UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx)
     cb.fpsBoxSize[0]     = static_cast<float>(kFpsWidth);
     cb.fpsBoxSize[1]     = static_cast<float>(kFpsHeight);
     cb.fpsEnabled        = m_fpsEnabled ? 1 : 0;
-    cb._reserved0        = 0.0f;
+    cb.boostFactor       = m_boostFactor;
     cb.dlssnrActive      = m_dlssnrActive ? 1 : 0;
     cb.intensity         = m_intensity;
     cb.colourStrength    = m_colourStrength;
     cb.isSubNative       = m_isSubNative ? 1 : 0;
     cb.workTexelSize[0]  = m_workTexelSize[0];
     cb.workTexelSize[1]  = m_workTexelSize[1];
+    cb.splitEnabled      = m_splitEnabled ? 1 : 0;
+    cb.splitPos          = m_splitPos;
 
     ctx->UpdateSubresource(m_fpsCBuffer.Get(), 0, nullptr, &cb, 0, 0);
     m_cbufferDirty       = false;
@@ -783,7 +823,7 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     if (usedDlssNr && m_d3d12Interop)
     {
         srvs[0] = m_d3d12Interop->GetOutputSRV();
-        srvs[1] = m_d3d12Interop->GetInputSRV();
+        srvs[1] = m_d3d12Interop->GetRawInputSRV();
         srvs[2] = srv;
         srvs[3] = m_fpsSRV.Get();
     }

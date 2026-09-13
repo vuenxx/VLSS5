@@ -42,8 +42,9 @@ using Microsoft::WRL::ComPtr;
 
 struct WindowInfo
 {
-    HWND         hwnd;
+    HWND         hwnd = nullptr;
     std::wstring title;
+    HICON        icon = nullptr;
 };
 
 // Thin HRESULT guard — throws on failure (debug-friendly).

@@ -25,6 +25,7 @@ public:
 
     int  GetWidth()              const { return m_width;  }
     int  GetHeight()             const { return m_height; }
+    double GetLastFrameGapMs()   const { return m_lastFrameGapMs; }
 
     // Zero-Copy Pipeline:
     // Acquires the freshest frame's SRV directly without intermediate CopyResource.
@@ -80,9 +81,15 @@ private:
     // ---- WGC frame-gap health tracking (thread-safe via interlocked / only read on render thread) ----
     LARGE_INTEGER m_lastFrameArrivalTime   = {};
     LARGE_INTEGER m_lastGapLogTime         = {};
+    double        m_lastFrameGapMs         = 0.0;
     double        m_maxFrameGapMs          = 0.0;
     double        m_sumFrameGapMs          = 0.0;
     uint64_t      m_frameGapSamples        = 0;
+
+    // Rolling window for frame-gap jitter (variance / stddev)
+    static constexpr int kJitterWindow = 120;
+    double        m_gapHistory[kJitterWindow] = {};
+    int           m_gapHistoryIdx          = 0;
 
     // Consecutive null-frame counter (TryGetNextFrame returns nullptr → session may be dead)
     uint32_t      m_nullFrameStreak        = 0;

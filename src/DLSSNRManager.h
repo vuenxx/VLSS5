@@ -60,23 +60,25 @@ public:
     void  SetEnabled(bool v);
     void  ResetHistory()              { m_firstFrame = true; }
 
+    void  MarkConfigChanged()         { m_needsRebuild = true; m_lastConfigChangeTime = GetTickCount64(); }
+
     float GetIntensity()        const { return m_intensity; }
-    void  SetIntensity(float v)       { m_intensity = v;    }
+    void  SetIntensity(float v)       { if (m_intensity != v) { m_intensity = v; MarkConfigChanged(); } }
 
     int   GetPreset()           const { return m_preset; }
-    void  SetPreset(int v)            { m_preset = v; m_needsRebuild = true; }
+    void  SetPreset(int v)            { if (m_preset != v) { m_preset = v; MarkConfigChanged(); } }
 
     int   GetStyle()            const { return m_style; }
-    void  SetStyle(int v)             { m_style = v; m_needsRebuild = true; }
+    void  SetStyle(int v)             { if (m_style != v) { m_style = v; MarkConfigChanged(); } }
 
     float GetLocalStructure()   const { return m_localStructure; }
-    void  SetLocalStructure(float v)  { m_localStructure = v;    }
+    void  SetLocalStructure(float v)  { if (m_localStructure != v) { m_localStructure = v; MarkConfigChanged(); } }
 
     float GetLocalTone()        const { return m_localTone; }
-    void  SetLocalTone(float v)       { m_localTone = v;    }
+    void  SetLocalTone(float v)       { if (m_localTone != v) { m_localTone = v; MarkConfigChanged(); } }
 
     float GetSkinStructure()    const { return m_skinStructure; }
-    void  SetSkinStructure(float v)   { m_skinStructure = v;    }
+    void  SetSkinStructure(float v)   { if (m_skinStructure != v) { m_skinStructure = v; MarkConfigChanged(); } }
 
     float GetResolutionScale()  const { return m_resolutionScale; }
     int   GetWorkWidth()        const { return m_workWidth;  }

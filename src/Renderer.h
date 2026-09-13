@@ -45,11 +45,28 @@ public:
     bool IsFpsEnabled() const { return m_fpsEnabled; }
     void UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx);
 
+    void  SetBoostFactor(float v) { if (fabs(m_boostFactor - v) > 0.001f) { m_boostFactor = v; m_cbufferDirty = true; } }
+    float GetBoostFactor() const  { return m_boostFactor; }
+
+    void  SetSplitScreen(bool enabled, float pos)
+    {
+        if (m_splitEnabled != enabled || fabs(m_splitPos - pos) > 0.001f)
+        {
+            m_splitEnabled = enabled;
+            m_splitPos     = pos;
+            m_cbufferDirty = true;
+        }
+    }
+    bool  IsSplitScreenEnabled() const { return m_splitEnabled; }
+    float GetSplitPos() const          { return m_splitPos; }
+
     // Accessors used by App.
     ID3D11Texture2D*          GetCaptureTexture() const { return m_captureTexture.Get(); }
     ID3D11ShaderResourceView* GetCaptureSRV()     const { return m_captureSRV.Get();     }
     int                       GetWidth()          const { return m_width;  }
     int                       GetHeight()         const { return m_height; }
+    double                    GetLastMvMs()       const { return m_lastMvMs;   }
+    double                    GetLastEvalMs()     const { return m_lastEvalMs; }
 
     DLSSManager*              GetDLSSManager()         { return m_dlssManager.get();         }
     DLSSNRManager*            GetDLSSNRManager()       { return m_dlssnrManager.get();       }
@@ -90,9 +107,14 @@ private:
     bool  m_dlssnrActive     = false;
     bool  m_isSubNative      = false;
     float m_intensity        = 1.0f;
+    float m_boostFactor      = 1.0f;
+    bool  m_splitEnabled     = false;
+    float m_splitPos         = 0.5f;
     float m_colourStrength   = 1.0f;
     float m_workTexelSize[2] = { 0.0f, 0.0f };
     bool  m_cbufferDirty     = true;
+    double m_lastMvMs        = 0.0;
+    double m_lastEvalMs      = 0.0;
 
     std::unique_ptr<DLSSManager>         m_dlssManager;
     std::unique_ptr<DLSSNRManager>       m_dlssnrManager;

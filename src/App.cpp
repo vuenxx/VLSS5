@@ -261,6 +261,11 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
 
     m_renderer->SetVSyncEnabled(vsync);
     m_renderer->SetFpsEnabled(fps);
+
+    const auto& initialCfg = ConfigManager::Get().Config();
+    m_renderer->SetBoostFactor(initialCfg.boostFactor);
+    m_renderer->SetSplitScreen(initialCfg.splitScreen, initialCfg.splitPos);
+
     if (m_renderer->GetDLSSManager())
     {
         m_renderer->GetDLSSManager()->SetEnabled(dlss);
@@ -273,6 +278,8 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
     SettingsWindow::SetOnConfigChanged([this](const Dlss5Config& cfg) {
         if (m_renderer)
         {
+            m_renderer->SetBoostFactor(cfg.boostFactor);
+            m_renderer->SetSplitScreen(cfg.splitScreen, cfg.splitPos);
             if (m_renderer->GetDLSSNRManager())
             {
                 m_renderer->GetDLSSNRManager()->ApplyConfig(cfg);
@@ -319,8 +326,10 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
     // Start watchdog thread (500 ms polling, 2 s hang threshold)
     StartWatchdog();
 
-    m_state   = AppState::Capturing;
-    m_running = true;
+    m_state            = AppState::Capturing;
+    m_running          = true;
+    m_overlayHidden    = false;
+    m_sessionStartTime = GetTickCount64();
     return true;
 }
 
@@ -377,7 +386,23 @@ void App::Run()
         Update();
         if (!m_running) break;
 
-        // 4. Zero-Copy: If a new frame is ready from the game, acquire direct SRV and render immediately!
+        // 4. If overlay is hidden (Alt+Tab / minimized / target not focused),
+        // drain any pending captured frame and throttle loop to save GPU/CPU.
+        if (m_overlayHidden)
+        {
+            if (m_captureManager && m_captureManager->IsNewFrameAvailable())
+            {
+                ID3D11ShaderResourceView* srv = m_captureManager->AcquireCurrentFrameSRV(m_device.Get());
+                if (srv)
+                {
+                    m_captureManager->ReleaseCurrentFrame();
+                }
+            }
+            Sleep(25);
+            continue;
+        }
+
+        // 5. Zero-Copy: If a new frame is ready from the game, acquire direct SRV and render immediately!
         if (m_captureManager && m_captureManager->IsNewFrameAvailable())
         {
             ID3D11ShaderResourceView* srv = m_captureManager->AcquireCurrentFrameSRV(m_device.Get());
@@ -420,7 +445,7 @@ void App::Run()
 
 void App::UpdateOverlayPosition()
 {
-    if (!m_targetHwnd || !m_overlayHwnd) return;
+    if (!m_targetHwnd || !m_overlayHwnd || m_overlayHidden) return;
 
     // Fast check: GetWindowRect is instantaneous (< 0.0001 ms, local Win32 call, no IPC)
     RECT winRect = {};
@@ -580,6 +605,71 @@ void App::CheckF8FocusToggle()
 }
 
 // ==========================================================================
+// CheckFocusAndMinimize — Auto-Hide overlay when target window loses focus
+// ==========================================================================
+
+void App::CheckFocusAndMinimize()
+{
+    if (!m_targetHwnd || !m_overlayHwnd) return;
+
+    // 1. Is target window minimized or closed/invisible?
+    bool isMinimized = (IsIconic(m_targetHwnd) != 0) || (!IsWindowVisible(m_targetHwnd));
+
+    // 2. Determine foreground window and process
+    HWND fg = GetForegroundWindow();
+
+    DWORD targetPid = 0;
+    GetWindowThreadProcessId(m_targetHwnd, &targetPid);
+    DWORD fgPid = 0;
+    GetWindowThreadProcessId(fg, &fgPid);
+
+    // Target is considered focused if:
+    // - Foreground is the target window itself
+    // - Foreground belongs to the same process as target (e.g. child/modal dialog)
+    // - Foreground is our overlay window (e.g. F8 focus mode)
+    // - Foreground is our settings window (INSERT hotkey)
+    // - Grace period of 500ms at session launch while Windows switches focus
+    bool isTargetFocused = (fg == m_targetHwnd ||
+                            fg == m_overlayHwnd ||
+                            (targetPid != 0 && fgPid == targetPid) ||
+                            (SettingsWindow::IsOpen() && fg == SettingsWindow::GetHwnd()) ||
+                            (GetTickCount64() - m_sessionStartTime < 500));
+
+    bool shouldShow = isTargetFocused && !isMinimized;
+
+    if (!shouldShow)
+    {
+        if (!m_overlayHidden)
+        {
+            ShowWindow(m_overlayHwnd, SW_HIDE);
+            m_overlayHidden = true;
+            DLSS_Log("[App] Target lost focus / minimized (fg=%p, iconic=%d) -> Overlay hidden", fg, isMinimized ? 1 : 0);
+        }
+    }
+    else
+    {
+        if (m_overlayHidden)
+        {
+            // Restore overlay visibility without stealing keyboard focus
+            ShowWindow(m_overlayHwnd, m_overlayFocused ? SW_SHOW : SW_SHOWNOACTIVATE);
+            SetWindowPos(m_overlayHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            m_overlayHidden = false;
+            DLSS_Log("[App] Target regained focus -> Overlay restored");
+
+            // Reset temporal history so DLSS doesn't try to interpolate across the focus-loss gap
+            if (m_renderer && m_renderer->GetDLSSNRManager())
+            {
+                m_renderer->GetDLSSNRManager()->ResetHistory();
+            }
+
+            // Force immediate position update on restore
+            UpdateOverlayPosition();
+        }
+    }
+}
+
+// ==========================================================================
 // Update
 // ==========================================================================
 
@@ -588,6 +678,13 @@ void App::Update()
     // Check stop keybind first (Alt+S)
     CheckStopKey();
     if (!m_running) return;
+
+    // Check target window focus & minimize state (Auto-Hide on Alt+Tab / Minimize)
+    CheckFocusAndMinimize();
+    if (!m_running) return;
+
+    // If overlay is hidden because target lost focus, skip remaining interactive hotkeys & positioning
+    if (m_overlayHidden) return;
 
     // Check F8 focus toggle key (Overlay vs Target App)
     CheckF8FocusToggle();
@@ -764,6 +861,7 @@ void App::StopOverlay()
     m_targetHwnd = nullptr;
     m_overlayFocused = false;
     m_prevF8Down     = false;
+    m_overlayHidden  = false;
 }
 
 // ==========================================================================

@@ -53,6 +53,9 @@ private:
     // Toggle between Overlay focus and Target App focus via F8 key.
     void CheckF8FocusToggle();
 
+    // Auto-Hide overlay when target window loses focus or minimizes (Alt+Tab handling).
+    void CheckFocusAndMinimize();
+
     // Tear down the overlay session and restore state.
     void StopOverlay();
 
@@ -64,11 +67,13 @@ private:
     HWND      m_targetHwnd  = nullptr;
     HWND      m_menuHwnd    = nullptr;
 
-    AppState m_state   = AppState::Menu;
-    bool     m_running = false;
-    bool     m_prevStopKeyDown = false;
-    bool     m_overlayFocused  = false; // F8 toggle: false = focus on target app, true = focus on overlay
-    bool     m_prevF8Down      = false;
+    AppState  m_state            = AppState::Menu;
+    bool      m_running          = false;
+    bool      m_prevStopKeyDown  = false;
+    bool      m_overlayFocused   = false; // F8 toggle: false = focus on target app, true = focus on overlay
+    bool      m_prevF8Down       = false;
+    bool      m_overlayHidden    = false; // Auto-Hide: true when target is minimized or not focused
+    ULONGLONG m_sessionStartTime = 0;
 
     // FPS tracking (measures overlay window's actual render FPS)
     LARGE_INTEGER m_fpsFreq       = {};
