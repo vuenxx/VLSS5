@@ -17,19 +17,27 @@ public:
     ~Renderer() { Cleanup(); }
 
     // Create swap chain for the overlay HWND and compile the two shaders.
-    bool Init(ID3D11Device* device, HWND overlayHwnd, int width, int height);
+    // width/height  : PIPELINE cozunurlugu (yakalanan kare boyutu). DLSS / MV /
+    //                  optik akis yigini bu cozunurlukte calisir.
+    // outWidth/Height: CIKIS cozunurlugu (swap chain + viewport + HUD). 0 verilirse
+    //                  pipeline cozunurlugune esitlenir.
+    // Ikisi farkli oldugunda son gecis (full-screen ucgen) DLSS ciktisini lineer
+    // ornekleyerek cikis cozunurlugune gerer -- "Tam Ekran Yap" modu budur.
+    bool Init(ID3D11Device* device, HWND overlayHwnd, int width, int height,
+              int outWidth = 0, int outHeight = 0);
 
-    // Resize swap chain buffers when the captured window changes size.
-    void Resize(ID3D11Device* device, int width, int height);
+    // Recreate resources sized to the D3D11 device (e.g. on window resize).
+    void Resize(ID3D11Device* device, int width, int height,
+                int outWidth = 0, int outHeight = 0);
 
     // Create (or recreate) the D3D11 texture that receives WGC frames.
     // The texture format matches WGC output: DXGI_FORMAT_B8G8R8A8_UNORM.
     bool CreateCaptureTexture(ID3D11Device* device, int width, int height);
 
-    // Draw the capture texture as a full-screen triangle.
+    // Render the final full-screen triangle using the DLSS-NR model outputs and original textures.
     void RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* srv);
 
-    // Present the back buffer.
+    // Presents the swapchain.
     void Present();
 
     // VSync controls
@@ -40,7 +48,7 @@ public:
     void Cleanup();
 
     // FPS counter controls & updates
-    void UpdateFps(ID3D11DeviceContext* ctx, int fps, bool forceRedraw = false);
+    void UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, bool showWarning, const double* gapHistory, int gapHistoryIdx, bool forceRedraw = false, const std::wstring& calibMessage = L"");
     void SetFpsEnabled(bool enabled) { m_fpsEnabled = enabled; }
     bool IsFpsEnabled() const { return m_fpsEnabled; }
     void UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx);
@@ -76,6 +84,7 @@ public:
 private:
     bool CompileShaders(ID3D11Device* device);
     bool CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int height);
+    void ApplyOutputSize(int outWidth, int outHeight);
     bool CreateRTV(ID3D11Device* device);
     bool CreateFpsResources(ID3D11Device* device);
 
@@ -95,13 +104,25 @@ private:
     HDC                              m_hFpsDC          = nullptr;
     HBITMAP                          m_hFpsBmp         = nullptr;
     void*                            m_pFpsBits        = nullptr;
-    bool                             m_fpsEnabled      = true;
-    int                              m_lastRenderedFps = -1;
-    bool                             m_lastRenderedDlss = false;
-    bool                             m_lastRenderedDlssNr = false;
 
-    int   m_width            = 0;
+    // Warning display resources
+    ComPtr<ID3D11Texture2D>          m_warningTexture;
+    ComPtr<ID3D11ShaderResourceView> m_warningSRV;
+    HDC                              m_hWarningDC      = nullptr;
+    HBITMAP                          m_hWarningBmp     = nullptr;
+    void*                            m_pWarningBits    = nullptr;
+
+    bool                             m_fpsEnabled          = true;
+    int                              m_lastRenderedFps     = -1;
+    bool                             m_lastRenderedWarning = false;
+    bool                             m_lastRenderedDlss    = false;
+    bool                             m_lastRenderedDlssNr  = false;
+    std::wstring                     m_lastRenderedCalibMessage = L"";
+
+    int   m_width            = 0;   // pipeline (yakalama) cozunurlugu
     int   m_height           = 0;
+    int   m_outWidth         = 0;   // cikis (swap chain / viewport / HUD) cozunurlugu
+    int   m_outHeight        = 0;
     bool  m_tearingSupported = false;
     bool  m_vsyncEnabled     = false;
     bool  m_dlssnrActive     = false;

@@ -131,6 +131,11 @@ void ConfigManager::Load()
     if (m_config.boostFactor > 2.5f) m_config.boostFactor = 2.5f;
 
     m_config.splitScreen = (GetPrivateProfileIntW(sec, L"SplitScreen", 0, ini.c_str()) != 0);
+<<<<<<< Updated upstream
+=======
+    m_config.directFlip  = (GetPrivateProfileIntW(sec, L"DirectFlip", 0, ini.c_str()) != 0);
+    m_config.fullscreenStretch = (GetPrivateProfileIntW(sec, L"FullscreenStretch", 0, ini.c_str()) != 0);
+>>>>>>> Stashed changes
     GetPrivateProfileStringW(sec, L"SplitPos", L"0.5", buf, _countof(buf), ini.c_str());
     m_config.splitPos = static_cast<float>(_wtof(buf));
     if (m_config.splitPos < 0.0f) m_config.splitPos = 0.0f;
@@ -142,6 +147,10 @@ void ConfigManager::Load()
     wchar_t gpuBuf[256] = {};
     GetPrivateProfileStringW(L"Hardware", L"SelectedGpu", L"Auto", gpuBuf, _countof(gpuBuf), ini.c_str());
     m_config.selectedGpu = (gpuBuf[0] != L'\0') ? gpuBuf : L"Auto";
+
+    wchar_t rtssBuf[MAX_PATH] = {};
+    GetPrivateProfileStringW(L"Paths", L"RtssDirectory", L"C:\\Program Files (x86)\\RivaTuner Statistics Server\\Profiles", rtssBuf, _countof(rtssBuf), ini.c_str());
+    m_config.rtssDirectory = rtssBuf;
 }
 
 void ConfigManager::Save()
@@ -174,10 +183,16 @@ void ConfigManager::Save()
     writeInt(L"VLSS5", L"OpticalFlow", m_config.opticalFlow ? 1 : 0);
     writeFloat(L"VLSS5", L"BoostFactor", m_config.boostFactor);
     writeInt(L"VLSS5", L"SplitScreen", m_config.splitScreen ? 1 : 0);
+<<<<<<< Updated upstream
+=======
+    writeInt(L"VLSS5", L"DirectFlip",  m_config.directFlip  ? 1 : 0);
+    writeInt(L"VLSS5", L"FullscreenStretch", m_config.fullscreenStretch ? 1 : 0);
+>>>>>>> Stashed changes
     writeFloat(L"VLSS5", L"SplitPos", m_config.splitPos);
 
     writeInt(L"Hotkeys", L"SettingsVk", static_cast<int>(m_config.settingsVk));
     writeInt(L"Hotkeys", L"SettingsMod", static_cast<int>(m_config.settingsMod));
 
     writeStr(L"Hardware", L"SelectedGpu", m_config.selectedGpu.c_str());
+    writeStr(L"Paths", L"RtssDirectory", m_config.rtssDirectory.c_str());
 }

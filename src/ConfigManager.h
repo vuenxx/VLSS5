@@ -15,6 +15,23 @@ struct Dlss5Config
     bool  opticalFlow        = true; // Optik akış hareket vektörleri (GPU tabanlı gerçek zamanlı hareket takibi)
     float boostFactor        = 1.0f; // 1.0 - 2.5 (Nöral Etki Yoğunluğu / Extrapolation Boost)
     bool  splitScreen        = false;// Bölünmüş Ekran (Karşılaştırma Modu)
+<<<<<<< Updated upstream
+=======
+
+    // Direct Flip (Deneysel): overlay penceresinden WS_EX_LAYERED kaldırılır.
+    // AÇIK  -> Frame Generation altında Present() stall'ı kalkar (24ms -> ~0ms),
+    //          ancak pencere OS hit-test zincirine girer; fare geçirgenliği
+    //          yalnızca HTTRANSPARENT'a bağlı kalır ve bazı oyunlarda bozulur.
+    // KAPALI -> Klasik layered overlay. Fare/imleç davranışı her oyunda doğru.
+    // Varsayılan KAPALI: doğruluk, deneysel hızdan önce gelir.
+    bool  directFlip         = false;
+
+    // Tam Ekran Yap: overlay hedef pencerenin degil, hedefin bulundugu MONITORUN
+    // tamamini kaplar; yakalanan kare cikis cozunurlugune gerilir.
+    // DLSS/MV yigini yakalama cozunurlugunde calismaya devam eder; gerdirme yalnizca
+    // son gecerde (full-screen ucgen, lineer filtre) uygulanir.
+    bool  fullscreenStretch  = false;
+>>>>>>> Stashed changes
     float splitPos           = 0.5f; // 0.0 - 1.0 (Bölünme Çizgisi Konumu, varsayılan %50)
 
     // Settings window toggle hotkey (Default: INSERT)
@@ -23,6 +40,9 @@ struct Dlss5Config
 
     // Selected GPU adapter description (e.g. L"Auto" or specific name)
     std::wstring selectedGpu = L"Auto";
+    
+    // RTSS directory path
+    std::wstring rtssDirectory = L"";
 
     std::wstring FormatHotkey() const;
 };

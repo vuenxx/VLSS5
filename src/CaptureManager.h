@@ -26,6 +26,9 @@ public:
     int  GetWidth()              const { return m_width;  }
     int  GetHeight()             const { return m_height; }
     double GetLastFrameGapMs()   const { return m_lastFrameGapMs; }
+    int  GetCurrentInputFps()    const { return m_currentInputFps; }
+    const double* GetGapHistory()const { return m_gapHistory; }
+    int  GetGapHistoryIdx()      const { return m_gapHistoryIdx; }
 
     // Zero-Copy Pipeline:
     // Acquires the freshest frame's SRV directly without intermediate CopyResource.
@@ -85,6 +88,11 @@ private:
     double        m_maxFrameGapMs          = 0.0;
     double        m_sumFrameGapMs          = 0.0;
     uint64_t      m_frameGapSamples        = 0;
+    
+    // FPS tracking for WGC
+    int           m_currentInputFps        = 0;
+    int           m_inputFpsFrameCount     = 0;
+    LARGE_INTEGER m_inputFpsLastTime       = {};
 
     // Rolling window for frame-gap jitter (variance / stddev)
     static constexpr int kJitterWindow = 120;

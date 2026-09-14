@@ -7,7 +7,9 @@
 // -----------------------------------------------------------------------
 // App — state machine that owns the overlay window and the render loop.
 // -----------------------------------------------------------------------
+// -----------------------------------------------------------------------
 enum class AppState { Menu, Capturing };
+enum class CalibState { Idle, InitUncap, CoarseUp, FineDown, Done };
 
 class App
 {
@@ -18,7 +20,10 @@ public:
     // Start WGC capture + overlay for the given target HWND.
     // 'menuHwnd' is the menu window (used to exclude from window list; hidden before this call).
     // Returns false on failure (shows menu again, caller logs the error).
-    bool StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync = false, bool dlss = true, bool fps = true);
+    // fullscreenStretch: overlay hedef pencerenin degil, hedefin bulundugu MONITORUN
+    // dikdortgenini kaplar ve yakalanan kare tam ekrana gerilir.
+    bool StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync = false, bool dlss = true, bool fps = true,
+                      bool fullscreenStretch = false);
 
     // Run the overlay render loop until Alt+S is pressed or the target window closes.
     // Blocks on the calling thread (nested Win32 modal loop).
@@ -39,6 +44,10 @@ private:
 
     // Keep the overlay rect in sync with the target window every frame.
     void UpdateOverlayPosition();
+    // Overlay'in kaplamasi gereken ekran dikdortgeni.
+    // Tam Ekran Yap acikken hedefin bulundugu monitorun tamami, kapaliyken hedefin
+    // DWM cerceve siniri.
+    RECT ComputeOverlayRect() const;
 
     // Recreate textures and swap chain after a WGC size change.
     void RecreateCaptureSizedResources();
@@ -84,6 +93,38 @@ private:
     bool          m_prevF9Down    = false;
     bool          m_dlssEnabled   = true;
     bool          m_prevF10Down   = false;
+<<<<<<< Updated upstream
+=======
+    bool          m_fgMarkerActive = false;
+    // Oyun modunda OS imlecinin gizli tutulmasi icin thread imlec sayaci durumu.
+    bool          m_cursorVisible  = true;
+    // Oturum basinda config'den okunur. true ise overlay WS_EX_LAYERED tasimaz
+    // (Direct Flip acik, fare gecirgenligi yalnizca HTTRANSPARENT'a bagli).
+    bool          m_directFlip     = false;
+    bool          m_fullscreenStretch = false;
+    // Tam Ekran modunda hedefin hangi monitorde oldugunu takip eder; monitor
+    // degismedikce overlay'i yeniden konumlandirmaya gerek yoktur.
+    HMONITOR      m_lastMonitor    = nullptr;
+    bool          m_prevF7Down    = false;
+>>>>>>> Stashed changes
+
+    // Window border stripping
+    LONG_PTR      m_originalTargetStyle   = 0;
+    LONG_PTR      m_originalTargetExStyle = 0;
+    RECT          m_originalTargetRect    = {};
+    bool          m_bordersStripped       = false;
+
+    // Warning OSD & Calibration
+    bool          m_warningDismissed      = false;
+    bool          m_prevF2Down            = false;
+    CalibState    m_calibState            = CalibState::Idle;
+    int           m_calibTargetFps        = 0;
+    ULONGLONG     m_calibTimer            = 0;
+    std::wstring  m_calibMessage          = L"";
+    ULONGLONG     m_calibMessageTimer     = 0;
+
+    void StripTargetBorders();
+    void RestoreTargetBorders();
 
     RECT m_lastTargetRect = {};
 

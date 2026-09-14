@@ -31,6 +31,7 @@ Texture2D<float4> gModelTex    : register(t0);
 Texture2D<float4> gProxyTex    : register(t1);
 Texture2D<float4> gOriginalTex : register(t2);
 Texture2D<float4> gFpsTex      : register(t3);
+Texture2D<float4> gWarningTex  : register(t4);
 
 SamplerState      gPointSamp   : register(s0);
 SamplerState      gLinearSamp  : register(s1);
@@ -48,13 +49,20 @@ cbuffer FpsConfig : register(b0)
     float2 g_workTexelSize;    // 1.0 / workSize
     int    g_splitEnabled;     // 1 = split screen enabled, 0 = disabled
     float  g_splitPos;         // 0.0 to 1.0 (screen x fraction)
-    float2 g_padding;          // 16-byte alignment
+    int    g_stretchActive;    // 1 = cikis cozunurlugu yakalamadan buyuk (Tam Ekran Yap)
+    int    g_warningEnabled;   // 1 = uyari goster
+    float2 g_warningBoxSize;   // uyari kutusu boyutu
+    float2 g_padding2;         // 16-byte alignment (80 bytes total)
 };
 
 float4 PS(float4 pos : SV_Position,
           float2 uv  : TEXCOORD0) : SV_Target
 {
-    float4 originalSample = gOriginalTex.Sample(gPointSamp, uv);
+    // 1:1 modda nokta ornekleme sart: HUD ve yazi bulaniklasmasin.
+    // Gerdirme varken nokta ornekleme blok blok gorunur; lineer filtreye geciyoruz.
+    float4 originalSample = (g_stretchActive != 0)
+        ? gOriginalTex.Sample(gLinearSamp, uv)
+        : gOriginalTex.Sample(gPointSamp, uv);
     float3 original = originalSample.rgb;
     float3 result = original;
 
@@ -150,13 +158,31 @@ float4 PS(float4 pos : SV_Position,
             color = fpsColor.rgb * fpsColor.a + color * (1.0f - fpsColor.a);
         }
     }
+    
+    if (g_warningEnabled != 0)
+    {
+        float wMargin = 16.0f;
+        float wLeft   = g_screenSize.x - g_warningBoxSize.x - wMargin;
+        float wRight  = g_screenSize.x - wMargin;
+        float wBottom = g_screenSize.y - wMargin;
+        float wTop    = g_screenSize.y - g_warningBoxSize.y - wMargin;
+
+        if (pos.x >= wLeft && pos.x < wRight && pos.y >= wTop && pos.y < wBottom)
+        {
+            float2 wUv = float2((pos.x - wLeft) / g_warningBoxSize.x, (pos.y - wTop) / g_warningBoxSize.y);
+            float4 wColor = gWarningTex.Sample(gLinearSamp, wUv);
+            color = wColor.rgb * wColor.a + color * (1.0f - wColor.a);
+        }
+    }
 
     return float4(saturate(color), 1.0f);
 }
 )HLSL";
 
-static constexpr int kFpsWidth  = 180;
-static constexpr int kFpsHeight = 36;
+static constexpr int kFpsWidth  = 300;
+static constexpr int kFpsHeight = 120;
+static constexpr int kWarningWidth = 600;
+static constexpr int kWarningHeight = 40;
 
 struct FpsCBufferData
 {
@@ -171,16 +197,28 @@ struct FpsCBufferData
     float workTexelSize[2];    // offset 40 (8 bytes) -> 48 bytes
     int   splitEnabled;        // offset 48 (4 bytes)
     float splitPos;            // offset 52 (4 bytes)
-    float padding[2];          // offset 56 (8 bytes) -> 64 bytes
+    int   stretchActive;       // offset 56 (4 bytes)
+    int   warningEnabled;      // offset 60 (4 bytes) -> 64 bytes
+    float warningBoxSize[2];   // offset 64 (8 bytes)
+    float padding2[2];         // offset 72 (8 bytes) -> 80 bytes
 };
 
 // -----------------------------------------------------------------------
 // Init
 // -----------------------------------------------------------------------
-bool Renderer::Init(ID3D11Device* device, HWND overlayHwnd, int width, int height)
+void Renderer::ApplyOutputSize(int outWidth, int outHeight)
+{
+    // 0 / negatif => cikis pipeline ile ayni (klasik 1:1 overlay modu).
+    m_outWidth  = (outWidth  > 0) ? outWidth  : m_width;
+    m_outHeight = (outHeight > 0) ? outHeight : m_height;
+}
+
+bool Renderer::Init(ID3D11Device* device, HWND overlayHwnd, int width, int height,
+                    int outWidth, int outHeight)
 {
     m_width  = width;
     m_height = height;
+    ApplyOutputSize(outWidth, outHeight);
 
     // GPU Thread Priority: Boost to maximum (+7) so that VLSS5's pipeline
     // (capture -> downscale -> NR model -> present) receives earlier time slices in WDDM scheduler.
@@ -190,7 +228,8 @@ bool Renderer::Init(ID3D11Device* device, HWND overlayHwnd, int width, int heigh
         dxgiDevice->SetGPUThreadPriority(7); // -7..7 range, 7 = maximum
     }
 
-    if (!CreateSwapChain(device, overlayHwnd, width, height)) return false;
+    // Swap chain CIKIS cozunurlugunde olusturulur; pipeline yakalama cozunurlugunde kalir.
+    if (!CreateSwapChain(device, overlayHwnd, m_outWidth, m_outHeight)) return false;
     if (!CreateRTV(device))                                    return false;
     if (!CompileShaders(device))                               return false;
     if (!CreateFpsResources(device))                           return false;
@@ -495,6 +534,26 @@ bool Renderer::CreateFpsResources(ID3D11Device* device)
     m_hFpsBmp = CreateDIBSection(m_hFpsDC, &bmi, DIB_RGB_COLORS, &m_pFpsBits, nullptr, 0);
     SelectObject(m_hFpsDC, m_hFpsBmp);
 
+    // 4. Create Warning texture
+    td.Width = kWarningWidth;
+    td.Height = kWarningHeight;
+    hr = device->CreateTexture2D(&td, nullptr, &m_warningTexture);
+    if (FAILED(hr)) return false;
+    hr = device->CreateShaderResourceView(m_warningTexture.Get(), &srvd, &m_warningSRV);
+    if (FAILED(hr)) return false;
+
+    BITMAPINFO wBmi = {};
+    wBmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
+    wBmi.bmiHeader.biWidth       = kWarningWidth;
+    wBmi.bmiHeader.biHeight      = -kWarningHeight; // top-down
+    wBmi.bmiHeader.biPlanes       = 1;
+    wBmi.bmiHeader.biBitCount     = 32;
+    wBmi.bmiHeader.biCompression  = BI_RGB;
+
+    m_hWarningDC  = CreateCompatibleDC(nullptr);
+    m_hWarningBmp = CreateDIBSection(m_hWarningDC, &wBmi, DIB_RGB_COLORS, &m_pWarningBits, nullptr, 0);
+    SelectObject(m_hWarningDC, m_hWarningBmp);
+
     m_lastRenderedFps  = -1;
     m_dlssnrActive     = false;
     m_isSubNative      = false;
@@ -514,19 +573,25 @@ bool Renderer::CreateFpsResources(ID3D11Device* device)
 }
 
 // -----------------------------------------------------------------------
-// UpdateFps
+// UpdateOSD
 // -----------------------------------------------------------------------
-void Renderer::UpdateFps(ID3D11DeviceContext* ctx, int fps, bool forceRedraw)
+void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, bool showWarning, const double* gapHistory, int gapHistoryIdx, bool forceRedraw, const std::wstring& calibMessage)
 {
     if (!m_pFpsBits || !m_hFpsDC || !m_fpsTexture) return;
 
     bool dlssnrOn = (m_dlssnrManager && m_dlssnrManager->IsEnabled() && m_dlssnrManager->IsEvaluating());
     bool dlssOn   = dlssnrOn || (m_dlssManager && m_dlssManager->IsEnabled() && m_dlssManager->IsAvailable());
-    if (!forceRedraw && fps == m_lastRenderedFps && dlssOn == m_lastRenderedDlss && dlssnrOn == m_lastRenderedDlssNr) return;
+    
+    // We redraw every time if OSD is active, because the graph is dynamic!
+    // But if we want to save perf, we can redraw every 500ms. We will just draw it.
 
-    m_lastRenderedFps    = fps;
+    if (!calibMessage.empty()) showWarning = true;
+
+    m_lastRenderedFps    = outputFps;
     m_lastRenderedDlss   = dlssOn;
     m_lastRenderedDlssNr = dlssnrOn;
+    m_lastRenderedWarning = showWarning;
+    m_lastRenderedCalibMessage = calibMessage;
 
     // 1. Draw rounded badge background
     HBRUSH hBgBrush   = CreateSolidBrush(RGB(18, 18, 22));
@@ -535,13 +600,9 @@ void Renderer::UpdateFps(ID3D11DeviceContext* ctx, int fps, bool forceRedraw)
     HGDIOBJ oldBrush  = SelectObject(m_hFpsDC, hBgBrush);
     HGDIOBJ oldPen    = SelectObject(m_hFpsDC, hBorderPen);
     RoundRect(m_hFpsDC, 0, 0, kFpsWidth, kFpsHeight, 10, 10);
-    SelectObject(m_hFpsDC, oldPen);
-    SelectObject(m_hFpsDC, oldBrush);
-    DeleteObject(hBorderPen);
-    DeleteObject(hBgBrush);
-
+    
     // 2. Draw crisp anti-aliased font
-    HFONT hFont = CreateFontW(-18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+    HFONT hFont = CreateFontW(-16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
         CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
     HGDIOBJ oldFont = SelectObject(m_hFpsDC, hFont);
@@ -550,27 +611,60 @@ void Renderer::UpdateFps(ID3D11DeviceContext* ctx, int fps, bool forceRedraw)
     SetTextColor(m_hFpsDC, textColor);
 
     const wchar_t* dlssLabel = L"• OFF";
-    if (dlssnrOn)
-    {
-        dlssLabel = L"• VLSS5";
-    }
-    else if (dlssOn)
-    {
-        dlssLabel = L"• VLSS5";
-    }
+    if (dlssnrOn) dlssLabel = L"• VLSS5";
+    else if (dlssOn) dlssLabel = L"• VLSS5";
 
-    wchar_t text[48];
-    if (fps > 0)
-        swprintf_s(text, L"%d FPS  %s", fps, dlssLabel);
-    else
-        swprintf_s(text, L"-- FPS  %s", dlssLabel);
-
-    RECT rc = { 0, 0, kFpsWidth, kFpsHeight };
+    wchar_t text[64];
+    swprintf_s(text, L" IN: %d FPS | OUT: %d FPS %s", inputFps, outputFps, dlssLabel);
+    
+    RECT rc = { 0, 4, kFpsWidth, 24 };
     DrawTextW(m_hFpsDC, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    
+    // 3. Draw Frametime Graph
+    if (gapHistory)
+    {
+        HPEN hGraphPen = CreatePen(PS_SOLID, 1, RGB(0, 200, 255));
+        SelectObject(m_hFpsDC, hGraphPen);
+        
+        int graphTop = 30;
+        int graphHeight = kFpsHeight - graphTop - 10;
+        int maxHistory = 120;
+        
+        // Find max gap to scale
+        double maxGap = 33.3; // minimum scale is 33ms (30fps)
+        for (int i = 0; i < maxHistory; ++i)
+        {
+            if (gapHistory[i] > maxGap && gapHistory[i] < 100.0) // ignore huge pauses for scaling
+                maxGap = gapHistory[i];
+        }
+        
+        for (int i = 0; i < maxHistory; ++i)
+        {
+            int idx = (gapHistoryIdx - maxHistory + i) % maxHistory;
+            if (idx < 0) idx += maxHistory;
+            
+            double gap = gapHistory[idx];
+            if (gap > 100.0) gap = 100.0;
+            
+            int x = 10 + (i * (kFpsWidth - 20)) / maxHistory;
+            int y = graphTop + graphHeight - (int)((gap / maxGap) * graphHeight);
+            
+            if (i == 0) MoveToEx(m_hFpsDC, x, y, nullptr);
+            else LineTo(m_hFpsDC, x, y);
+        }
+        
+        SelectObject(m_hFpsDC, oldPen);
+        DeleteObject(hGraphPen);
+    }
+    
     SelectObject(m_hFpsDC, oldFont);
     DeleteObject(hFont);
+    SelectObject(m_hFpsDC, oldPen);
+    SelectObject(m_hFpsDC, oldBrush);
+    DeleteObject(hBorderPen);
+    DeleteObject(hBgBrush);
 
-    // 3. Process alpha channel
+    // 4. Process alpha channel
     uint32_t* p = static_cast<uint32_t*>(m_pFpsBits);
     for (int i = 0; i < kFpsWidth * kFpsHeight; ++i)
     {
@@ -585,19 +679,68 @@ void Renderer::UpdateFps(ID3D11DeviceContext* ctx, int fps, bool forceRedraw)
         }
         else if (g > 60 || r > 40 || b > 40)
         {
-            // Text pixels: fully opaque
             p[i] = (255 << 24) | (r << 16) | (g << 8) | b;
         }
         else
         {
-            // Background badge: 80% opacity
             p[i] = (200 << 24) | (r << 16) | (g << 8) | b;
         }
     }
-
-    // 4. Upload texture to GPU
+    
     ctx->UpdateSubresource(m_fpsTexture.Get(), 0, nullptr, m_pFpsBits, kFpsWidth * sizeof(uint32_t), 0);
-    m_lastRenderedFps = fps;
+
+    // ============================================
+    // Warning Texture Update
+    // ============================================
+    if (showWarning && m_hWarningDC && m_pWarningBits && m_warningTexture)
+    {
+        HBRUSH wBgBrush = CreateSolidBrush(RGB(180, 20, 20));
+        HGDIOBJ wOldBrush = SelectObject(m_hWarningDC, wBgBrush);
+        HPEN wPen = CreatePen(PS_SOLID, 1, RGB(255, 50, 50));
+        HGDIOBJ wOldPen = SelectObject(m_hWarningDC, wPen);
+        
+        RoundRect(m_hWarningDC, 0, 0, kWarningWidth, kWarningHeight, 5, 5);
+        
+        HFONT wFont = CreateFontW(-16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+        HGDIOBJ wOldFont = SelectObject(m_hWarningDC, wFont);
+        SetBkMode(m_hWarningDC, TRANSPARENT);
+        SetTextColor(m_hWarningDC, RGB(255, 255, 255));
+        
+        const wchar_t* wText = L"YÜKSEK GPU YÜKÜ! FPS'İ SABİTLEYİN! (Kapatmak İçin F2)";
+        if (!calibMessage.empty())
+        {
+            wText = calibMessage.c_str();
+        }
+        RECT wRc = { 0, 0, kWarningWidth, kWarningHeight };
+        DrawTextW(m_hWarningDC, wText, -1, &wRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        
+        SelectObject(m_hWarningDC, wOldFont);
+        DeleteObject(wFont);
+        SelectObject(m_hWarningDC, wOldPen);
+        SelectObject(m_hWarningDC, wOldBrush);
+        DeleteObject(wPen);
+        DeleteObject(wBgBrush);
+        
+        uint32_t* wp = static_cast<uint32_t*>(m_pWarningBits);
+        for (int i = 0; i < kWarningWidth * kWarningHeight; ++i)
+        {
+            uint32_t pixel = wp[i];
+            uint8_t r = (pixel >> 16) & 0xFF;
+            uint8_t g = (pixel >> 8) & 0xFF;
+            uint8_t b = pixel & 0xFF;
+
+            if (r == 0 && g == 0 && b == 0)
+                wp[i] = 0;
+            else if (r > 100 || g > 100 || b > 100)
+                wp[i] = (255 << 24) | (r << 16) | (g << 8) | b;
+            else
+                wp[i] = (200 << 24) | (r << 16) | (g << 8) | b;
+        }
+        
+        ctx->UpdateSubresource(m_warningTexture.Get(), 0, nullptr, m_pWarningBits, kWarningWidth * sizeof(uint32_t), 0);
+    }
 
     UpdateFpsConstantBuffer(ctx);
 }
@@ -610,8 +753,10 @@ void Renderer::UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx)
     if (!m_fpsCBuffer) return;
 
     FpsCBufferData cb = {};
-    cb.screenSize[0]     = static_cast<float>(m_width);
-    cb.screenSize[1]     = static_cast<float>(m_height);
+    // HUD (FPS kutusu) piksel koordinatlariyla konumlandigi icin CIKIS cozunurlugu
+    // kullanilmali; boylece kutu gerdirilmez, native boyutta ve keskin kalir.
+    cb.screenSize[0]     = static_cast<float>(m_outWidth  > 0 ? m_outWidth  : m_width);
+    cb.screenSize[1]     = static_cast<float>(m_outHeight > 0 ? m_outHeight : m_height);
     cb.fpsBoxSize[0]     = static_cast<float>(kFpsWidth);
     cb.fpsBoxSize[1]     = static_cast<float>(kFpsHeight);
     cb.fpsEnabled        = m_fpsEnabled ? 1 : 0;
@@ -624,6 +769,11 @@ void Renderer::UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx)
     cb.workTexelSize[1]  = m_workTexelSize[1];
     cb.splitEnabled      = m_splitEnabled ? 1 : 0;
     cb.splitPos          = m_splitPos;
+    // Cikis yakalama cozunurlugunden buyukse son gecis lineer filtre kullansin.
+    cb.stretchActive     = (m_outWidth > m_width || m_outHeight > m_height) ? 1 : 0;
+    cb.warningEnabled    = m_lastRenderedWarning ? 1 : 0;
+    cb.warningBoxSize[0] = static_cast<float>(kWarningWidth);
+    cb.warningBoxSize[1] = static_cast<float>(kWarningHeight);
 
     ctx->UpdateSubresource(m_fpsCBuffer.Get(), 0, nullptr, &cb, 0, 0);
     m_cbufferDirty       = false;
@@ -632,10 +782,12 @@ void Renderer::UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx)
 // -----------------------------------------------------------------------
 // Resize — call after WGC reports a window size change
 // -----------------------------------------------------------------------
-void Renderer::Resize(ID3D11Device* device, int width, int height)
+void Renderer::Resize(ID3D11Device* device, int width, int height,
+                      int outWidth, int outHeight)
 {
     m_width  = width;
     m_height = height;
+    ApplyOutputSize(outWidth, outHeight);
 
     // Critical for D3D11: unbind RTV from immediate context before ResizeBuffers
     ComPtr<ID3D11DeviceContext> ctx;
@@ -645,9 +797,16 @@ void Renderer::Resize(ID3D11Device* device, int width, int height)
     // Detach the RTV before resize
     m_rtv.Reset();
 
+<<<<<<< Updated upstream
     UINT resizeFlags = m_tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+=======
+    // ResizeBuffers, swap chain olusturulurken kullanilan bayraklarin AYNISINI
+    // almak zorundadir; waitable bayragini dusurmek nesneyi gecersiz kilar.
+    UINT resizeFlags = m_swapChainFlags;
+    // Arabellekler CIKIS cozunurlugunde; DLSS yigini ise yakalama cozunurlugunde kalir.
+>>>>>>> Stashed changes
     m_swapChain->ResizeBuffers(0,
-        static_cast<UINT>(width), static_cast<UINT>(height),
+        static_cast<UINT>(m_outWidth), static_cast<UINT>(m_outHeight),
         DXGI_FORMAT_UNKNOWN, resizeFlags);
 
     CreateRTV(device);
@@ -774,9 +933,11 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     // 3. Bind back buffer as render target
     ctx->OMSetRenderTargets(1, m_rtv.GetAddressOf(), nullptr);
 
+    // Viewport CIKIS cozunurlugunde. Full-screen ucgen tum kaynaklari 0..1 UV ile
+    // ornekledigi icin gerdirme burada bedelsiz ve GPU filtrelemeli olarak gerceklesir.
     D3D11_VIEWPORT vp = {};
-    vp.Width    = static_cast<float>(m_width);
-    vp.Height   = static_cast<float>(m_height);
+    vp.Width    = static_cast<float>(m_outWidth);
+    vp.Height   = static_cast<float>(m_outHeight);
     vp.MaxDepth = 1.0f;
     ctx->RSSetViewports(1, &vp);
 
@@ -819,13 +980,15 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     // t1: Model Input Proxy (work resolution)
     // t2: Original Native Game Frame (full display resolution)
     // t3: FPS Counter Texture
-    ID3D11ShaderResourceView* srvs[4];
+    // t4: Warning Texture
+    ID3D11ShaderResourceView* srvs[5];
     if (usedDlssNr && m_d3d12Interop)
     {
         srvs[0] = m_d3d12Interop->GetOutputSRV();
         srvs[1] = m_d3d12Interop->GetRawInputSRV();
         srvs[2] = srv;
         srvs[3] = m_fpsSRV.Get();
+        srvs[4] = m_warningSRV.Get();
     }
     else
     {
@@ -833,8 +996,9 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
         srvs[1] = renderSRV;
         srvs[2] = renderSRV;
         srvs[3] = m_fpsSRV.Get();
+        srvs[4] = m_warningSRV.Get();
     }
-    ctx->PSSetShaderResources(0, 4, srvs);
+    ctx->PSSetShaderResources(0, 5, srvs);
 
     // Bind samplers: s0 = Point sampler (for native original), s1 = Linear sampler (for model/proxy)
     ID3D11SamplerState* samplers[2] = { m_sampler.Get(), m_linearSampler.Get() };
@@ -909,8 +1073,16 @@ void Renderer::Cleanup()
     if (m_hFpsBmp) { DeleteObject(m_hFpsBmp); m_hFpsBmp = nullptr; }
     if (m_hFpsDC)  { DeleteDC(m_hFpsDC);       m_hFpsDC  = nullptr; }
     m_pFpsBits        = nullptr;
-    m_lastRenderedFps = -1;
 
+    if (m_hWarningBmp) { DeleteObject(m_hWarningBmp); m_hWarningBmp = nullptr; }
+    if (m_hWarningDC)  { DeleteDC(m_hWarningDC);       m_hWarningDC  = nullptr; }
+    m_pWarningBits        = nullptr;
+
+    m_lastRenderedFps = -1;
+    m_lastRenderedWarning = false;
+
+    m_warningSRV.Reset();
+    m_warningTexture.Reset();
     m_fpsCBuffer.Reset();
     m_fpsSRV.Reset();
     m_fpsTexture.Reset();

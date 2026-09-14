@@ -89,6 +89,27 @@ bool CaptureManager::Start(HWND targetHwnd, ID3D11Device* device)
                 if (gapMs > 200.0)
                     DLSS_Log("[Capture] UYARI: iki WGC karesi arasinda %.1f ms bosluk "
                              "(pencere minimize/occluded olmus ya da capture session durmus olabilir)", gapMs);
+
+                // FPS Tracking
+                m_inputFpsFrameCount++;
+                if (m_inputFpsLastTime.QuadPart == 0)
+                {
+                    m_inputFpsLastTime = now;
+                }
+                else
+                {
+                    double elapsed = static_cast<double>(now.QuadPart - m_inputFpsLastTime.QuadPart) / static_cast<double>(freq.QuadPart);
+                    if (elapsed >= 0.5)
+                    {
+                        m_currentInputFps = static_cast<int>((m_inputFpsFrameCount / elapsed) + 0.5);
+                        m_inputFpsFrameCount = 0;
+                        m_inputFpsLastTime = now;
+                    }
+                }
+            }
+            else
+            {
+                m_inputFpsLastTime = now;
             }
             m_lastFrameArrivalTime = now;
         });

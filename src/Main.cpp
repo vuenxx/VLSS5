@@ -4,8 +4,12 @@
 #include "DLSSManager.h"
 #include "ConfigManager.h"
 #include "SettingsWindow.h"
+#include "RtssWindow.h"
+#include "RTSSManager.h"
 #include "resource.h"
 #include <shlwapi.h>
+#include <shobjidl.h>
+#include <shellapi.h>
 #include <commctrl.h>
 #include <uxtheme.h>
 #include <algorithm>
@@ -29,6 +33,8 @@
 #define IDC_BTN_DLSS_SETTINGS 110   // DLSS 5 Settings Button
 #define IDC_COMBO_GPU         111   // GPU Selection ComboBox
 #define IDC_BTN_GPU_HELP      112   // GPU Help '?' Button
+#define IDC_CHK_FULLSCREEN    113   // Tam Ekran Yap (monitore gerdirme) Checkbox
+#define IDC_BTN_RTSS_SETTINGS 114
 #define ID_GLOBAL_HOTKEY      201   // Global capture toggle hotkey
 #define IDT_HOTKEY_TIMER      301   // Fallback hotkey poller (50ms)
 
@@ -73,8 +79,11 @@ static HWND                    g_btnDlssSettings = nullptr;
 static HWND                    g_chkVSync        = nullptr;
 static HWND                    g_chkFps          = nullptr;
 static HWND                    g_chkDlss         = nullptr;
+static HWND                    g_chkFullscreen   = nullptr;
 static HWND                    g_btnRefresh      = nullptr;
 static HWND                    g_btnStart        = nullptr;
+
+static HWND                    g_btnRtssSettings = nullptr;
 
 static HFONT                   g_fontNormal   = nullptr;
 static HFONT                   g_fontTitle    = nullptr;
@@ -91,6 +100,8 @@ static HICON                   g_hLogoHeader  = nullptr;
 static bool                    g_vsyncEnabled = false;
 static bool                    g_fpsEnabled   = true;
 static bool                    g_dlssEnabled  = true;
+// Kalici: ConfigManager uzerinden yuklenir/kaydedilir.
+static bool                    g_fullscreenStretch = false;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -169,6 +180,8 @@ static HWND CreateButtonTooltip(HWND hParent, HWND hTarget, const wchar_t* text)
 
     return hTip;
 }
+
+
 
 static void PopulateGpuList(HWND /*hwnd*/)
 {
@@ -361,7 +374,7 @@ static bool StartCaptureWithTarget(HWND hwnd, HWND target)
 
     ShowWindow(hwnd, SW_HIDE);
 
-    if (!g_app->StartOverlay(hwnd, target, g_vsyncEnabled, g_dlssEnabled, g_fpsEnabled))
+    if (!g_app->StartOverlay(hwnd, target, g_vsyncEnabled, g_dlssEnabled, g_fpsEnabled, g_fullscreenStretch))
     {
         ShowWindow(hwnd, SW_SHOW);
         SetForegroundWindow(hwnd);
@@ -549,6 +562,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             hwnd, reinterpret_cast<HMENU>(IDC_CHK_DLSS), nullptr, nullptr);
         SF(g_chkDlss, g_fontBold);
 
+        // Tam Ekran Yap Checkbox
+        g_fullscreenStretch = ConfigManager::Get().Config().fullscreenStretch;
+        g_chkFullscreen = CreateWindowW(L"BUTTON", L"Tam Ekran Yap",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            412, 266, 158, 26,
+            hwnd, reinterpret_cast<HMENU>(IDC_CHK_FULLSCREEN), nullptr, nullptr);
+        SF(g_chkFullscreen, g_fontBold);
+
         // ---- Card 2: GPU & Kısayol Paneli ----
         // Row 1: GPU Selection
         g_lblGpu = CreateWindowW(L"STATIC", L"Grafik Kartı (GPU):",
@@ -597,16 +618,23 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_DLSS_SETTINGS), nullptr, nullptr);
         SF(g_btnDlssSettings, g_fontBold);
 
+        // Row 3: RTSS Integration
+        g_btnRtssSettings = CreateWindowW(L"BUTTON", L"RTSS AYARLARI",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            32, 404, 542, 32,
+            hwnd, reinterpret_cast<HMENU>(IDC_BTN_RTSS_SETTINGS), nullptr, nullptr);
+        SF(g_btnRtssSettings, g_fontBold);
+
         // ---- Start Button (Big Action Button) ----
         g_btnStart = CreateWindowW(L"BUTTON", L"BAŞLAT  ➔",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            20, 420, 566, 48,
+            20, 460, 566, 48,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_START), nullptr, nullptr);
         SF(g_btnStart, g_fontTitle);
 
         // ---- Status bar ----
         g_lblStatus = CreateWindowW(L"STATIC", L"Hedef uygulamayı seçin veya istediğiniz penceredeyken ALT+S basın.",
-            WS_CHILD | WS_VISIBLE | SS_CENTER, 20, 478, 566, 20,
+            WS_CHILD | WS_VISIBLE | SS_CENTER, 20, 518, 566, 20,
             hwnd, reinterpret_cast<HMENU>(IDC_LBL_STATUS), nullptr, nullptr);
         SF(g_lblStatus, g_fontSmall);
 
@@ -686,7 +714,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         TextOutW(hdc, 34, 88, L"HEDEF UYGULAMA SEÇİMİ", 21);
 
         // 4. Card 2 Panel (GPU & Kısayol)
-        RECT card2 = { 20, 314, client.right - 20, 410 };
+        RECT card2 = { 20, 314, client.right - 20, 450 };
         DrawModernPanel(hdc, card2, COLOR_CARD_BG, COLOR_BORDER, 10);
 
         EndPaint(hwnd, &ps);
@@ -783,13 +811,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         // 2. Custom draw Checkboxes (VSync, FPS, DLSS 5) with modern square + checkmark
-        if (dis->CtlID == IDC_CHK_VSYNC || dis->CtlID == IDC_CHK_FPS || dis->CtlID == IDC_CHK_DLSS)
+        if (dis->CtlID == IDC_CHK_VSYNC || dis->CtlID == IDC_CHK_FPS ||
+            dis->CtlID == IDC_CHK_DLSS  || dis->CtlID == IDC_CHK_FULLSCREEN)
         {
             bool isChecked = false;
             const wchar_t* label = L"";
             if (dis->CtlID == IDC_CHK_VSYNC)      { isChecked = g_vsyncEnabled; label = L"VSync"; }
             else if (dis->CtlID == IDC_CHK_FPS)   { isChecked = g_fpsEnabled;   label = L"FPS Göstergesi"; }
             else if (dis->CtlID == IDC_CHK_DLSS)  { isChecked = g_dlssEnabled;  label = L"VLSS5 (Nöral)"; }
+            else if (dis->CtlID == IDC_CHK_FULLSCREEN) { isChecked = g_fullscreenStretch; label = L"Tam Ekran Yap"; }
 
             RECT rc = dis->rcItem;
             int itemW = rc.right - rc.left;
@@ -894,6 +924,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             SelectObject(dis->hDC, g_fontBold);
 
             DrawTextW(dis->hDC, L"⚙ VLSS5 Ayarları", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            return TRUE;
+        }
+
+        // 4.5 Custom draw RTSS Settings Button
+        if (dis->CtlID == IDC_BTN_RTSS_SETTINGS)
+        {
+            bool isPressed = (dis->itemState & ODS_SELECTED);
+            COLORREF btnBg = isPressed ? COLOR_LIME_DARK : COLOR_LIME_ACCENT;
+
+            DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBg, 6);
+
+            SetBkMode(dis->hDC, TRANSPARENT);
+            SetTextColor(dis->hDC, COLOR_DARK_TEXT);
+            SelectObject(dis->hDC, g_fontBold);
+
+            DrawTextW(dis->hDC, L"RTSS AYARLARI", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             return TRUE;
         }
 
@@ -1016,6 +1062,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         }
 
+        // Tam Ekran Yap checkbox toggle
+        if (ctlId == IDC_CHK_FULLSCREEN)
+        {
+            g_fullscreenStretch = !g_fullscreenStretch;
+            InvalidateRect(g_chkFullscreen, nullptr, TRUE);
+
+            ConfigManager::Get().Config().fullscreenStretch = g_fullscreenStretch;
+            ConfigManager::Get().Save();
+
+            if (g_fullscreenStretch)
+                SetStatus(L"Tam Ekran Yap etkin: Pencere, monitörün tamamına gerdirilecek.");
+            else
+                SetStatus(L"Tam Ekran Yap kapalı: Overlay pencerenin kendi boyutunda kalacak.");
+            break;
+        }
+
         // Refresh window & GPU lists
         if (ctlId == IDC_BTN_REFRESH)
         {
@@ -1063,6 +1125,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 L"DLSS5 kullanmak için RTX bir kart gereklidir. AMD kartlarda çalışmaz!",
                 L"VLSS5 — GPU Gereksinimi",
                 MB_ICONINFORMATION | MB_OK);
+            break;
+        }
+
+        // RTSS Directory button click
+        if (ctlId == IDC_BTN_RTSS_SETTINGS)
+        {
+            RtssWindow::Show(hwnd);
             break;
         }
 
@@ -1232,10 +1301,117 @@ static void EnsureNvofapiAvailable()
 }
 
 // ---------------------------------------------------------------------------
+// CheckRequiredFiles
+// ---------------------------------------------------------------------------
+void CheckRequiredFiles()
+{
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    PathRemoveFileSpecW(exePath);
+
+    wchar_t file1[MAX_PATH] = {};
+    PathCombineW(file1, exePath, L"nvngx.dll_dlssnr.dll");
+    
+    wchar_t file2[MAX_PATH] = {};
+    PathCombineW(file2, exePath, L"nvngx_dlssnr.dll");
+
+    if (GetFileAttributesW(file1) == INVALID_FILE_ATTRIBUTES)
+    {
+        MessageBoxW(nullptr, 
+            L"Önemli bir dll dosyası ana klasörde bulunamadı! nvngx.dll_dllsnr.dll dosyasını lütfen geri yükleyin. Bu dosya DLSS5 dosyası değildir, programa ait bir .dll'dir ve programın yanında olmak zorundadır.", 
+            L"VLSS5 Hata", MB_ICONERROR | MB_OK | MB_TOPMOST);
+        ExitProcess(1);
+    }
+
+    if (GetFileAttributesW(file2) == INVALID_FILE_ATTRIBUTES)
+    {
+        MessageBoxW(nullptr, 
+            L"DLSS5 için gerekli olan nvngx_dlssnr.dll dosyası bulunamadı! Lütfen DLSS5'in çalışmasını istiyorsanız bu dosyayı yükleyin.", 
+            L"VLSS5 Hata", MB_ICONERROR | MB_OK | MB_TOPMOST);
+        ExitProcess(1);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CheckRivaTuner
+// ---------------------------------------------------------------------------
+static void CheckRivaTuner()
+{
+    std::wstring rtssDir = ConfigManager::Get().Config().rtssDirectory;
+    bool found = false;
+    
+    // Check configured directory first
+    if (!rtssDir.empty() && GetFileAttributesW(rtssDir.c_str()) != INVALID_FILE_ATTRIBUTES)
+    {
+        found = true;
+    }
+    
+    // Check default RTSS directory if not found
+    if (!found)
+    {
+        std::wstring profilesDir = RTSSManager::Get().GetProfilesDir();
+        if (GetFileAttributesW(profilesDir.c_str()) != INVALID_FILE_ATTRIBUTES)
+        {
+            found = true;
+        }
+    }
+
+    if (!found)
+    {
+        typedef HRESULT (WINAPI *TaskDialogIndirect_t)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
+        HMODULE hComCtl = LoadLibraryW(L"comctl32.dll");
+        TaskDialogIndirect_t pTaskDialogIndirect = hComCtl ? (TaskDialogIndirect_t)GetProcAddress(hComCtl, "TaskDialogIndirect") : nullptr;
+
+        if (pTaskDialogIndirect)
+        {
+            TASKDIALOGCONFIG tdc = { sizeof(TASKDIALOGCONFIG) };
+            tdc.hwndParent = nullptr;
+            tdc.hInstance = GetModuleHandle(nullptr);
+            tdc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+            tdc.pszWindowTitle = L"VLSS5 - RivaTuner Eksik";
+            tdc.pszMainInstruction = L"DİKKAT! Bilgisayarınızda RivaTuner tespit edilemedi.";
+            tdc.pszContent = L"Oyunlarda otomatik FPS kalibrasyonu çalışmayacaktır. Lütfen RivaTuner'ı bilgisayarınıza kurun!\n\n(Eğer RivaTuner yüklüyse ancak farklı bir dizindeyse, lütfen program açıldıktan sonra 'RTSS AYARLARI' menüsünden klasör yolunu manuel olarak seçin.)";
+            tdc.pszMainIcon = TD_WARNING_ICON;
+
+            TASKDIALOG_BUTTON buttons[] = {
+                { 1001, L"İndir" },
+                { 1002, L"Tamam" }
+            };
+            tdc.cButtons = 2;
+            tdc.pButtons = buttons;
+            tdc.nDefaultButton = 1001;
+
+            int selectedButton = 0;
+            HRESULT hr = pTaskDialogIndirect(&tdc, &selectedButton, nullptr, nullptr);
+
+            if (SUCCEEDED(hr) && selectedButton == 1001)
+            {
+                ShellExecuteW(nullptr, L"open", L"https://www.msi.com/Landing/afterburner", nullptr, nullptr, SW_SHOWNORMAL);
+            }
+        }
+        else
+        {
+            int res = MessageBoxW(nullptr, 
+                L"DİKKAT! Bilgisayarınızda RivaTuner tespit edilemedi.\n\nOyunlarda otomatik FPS kalibrasyonu çalışmayacaktır. Lütfen RivaTuner'ı bilgisayarınıza kurun!\n\n(Eğer RivaTuner yüklüyse ancak farklı bir dizindeyse, lütfen program açıldıktan sonra 'RTSS AYARLARI' menüsünden klasör yolunu manuel olarak seçin.)\n\nİndirme sayfasına gitmek için 'Evet'e basın.", 
+                L"VLSS5 - RivaTuner Eksik", 
+                MB_ICONWARNING | MB_YESNO | MB_TOPMOST);
+            
+            if (res == IDYES)
+            {
+                ShellExecuteW(nullptr, L"open", L"https://www.msi.com/Landing/afterburner", nullptr, nullptr, SW_SHOWNORMAL);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // WinMain
 // ---------------------------------------------------------------------------
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
+    CheckRequiredFiles();
+    CheckRivaTuner();
+
     // Single instance check: prevent multiple instances of VLSS5 from running simultaneously
     HANDLE hSingleInstanceMutex = CreateMutexW(nullptr, TRUE, L"Local\\VLSS5_SingleInstance_Mutex");
     if (GetLastError() == ERROR_ALREADY_EXISTS || !hSingleInstanceMutex)
@@ -1266,7 +1442,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-    winrt::init_apartment();
+    winrt::init_apartment(winrt::apartment_type::single_threaded);
 
     // Disable OS background frame-rate throttling
     {
@@ -1310,15 +1486,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 
     // Initialize DLSS 5 settings window class and common controls
     SettingsWindow::Initialize(hInstance);
+    RtssWindow::Initialize(hInstance);
 
     // Create modern dark window (fixed size, centered, styled)
     HWND hwnd = CreateWindowExW(
         0,
         L"VLSS5Main",
-        L"VLSS5 — Yüksek Performanslı Oyun Overlay",
+        L"VLSS5 - Yüksek Performanslı Oyun Overlay",
         (WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX)),
         CW_USEDEFAULT, CW_USEDEFAULT,
-        622, 555,
+        622, 595,
         nullptr, nullptr, hInstance, nullptr);
 
     if (!hwnd)

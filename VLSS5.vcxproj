@@ -125,10 +125,12 @@
     <ClCompile Include="src\Renderer.cpp" />
     <ClCompile Include="src\MotionVectorManager.cpp" />
     <ClCompile Include="src\DLSSManager.cpp" />
+    <ClCompile Include="src\RTSSManager.cpp" />
     <ClCompile Include="src\D3D12Interop.cpp" />
     <ClCompile Include="src\DLSSNRManager.cpp" />
     <ClCompile Include="src\ConfigManager.cpp" />
     <ClCompile Include="src\SettingsWindow.cpp" />
+    <ClCompile Include="src\RtssWindow.cpp" />
     <ClCompile Include="src\InputForwarder.cpp" />
     <ClCompile Include="src\WindowEnumerator.cpp" />
     <ClCompile Include="src\NvOFManager.cpp" />
@@ -144,10 +146,12 @@
     <ClInclude Include="src\Renderer.h" />
     <ClInclude Include="src\MotionVectorManager.h" />
     <ClInclude Include="src\DLSSManager.h" />
+    <ClInclude Include="src\RTSSManager.h" />
     <ClInclude Include="src\D3D12Interop.h" />
     <ClInclude Include="src\DLSSNRManager.h" />
     <ClInclude Include="src\ConfigManager.h" />
     <ClInclude Include="src\SettingsWindow.h" />
+    <ClInclude Include="src\RtssWindow.h" />
     <ClInclude Include="src\InputForwarder.h" />
     <ClInclude Include="src\WindowEnumerator.h" />
     <ClInclude Include="src\NvOFManager.h" />

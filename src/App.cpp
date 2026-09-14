@@ -1,7 +1,15 @@
 #include "App.h"
 #include "SettingsWindow.h"
 #include "ConfigManager.h"
+#include "RTSSManager.h"
 #include "resource.h"
+<<<<<<< Updated upstream
+=======
+#include <shlwapi.h>
+#pragma comment(lib, "shlwapi.lib")
+#include <algorithm>
+#include <cmath>
+>>>>>>> Stashed changes
 
 // Global pointer so the static OverlayWndProc can reach the App.
 static App* g_appInstance = nullptr;
@@ -165,17 +173,37 @@ void App::SetPreferredGpu(const std::wstring& gpuName)
 // CreateOverlayWindow
 // ==========================================================================
 
+// ComputeOverlayRect — overlay'in kaplamasi gereken ekran dikdortgeni
+RECT App::ComputeOverlayRect() const
+{
+    RECT r = {};
+    if (!m_targetHwnd) return r;
+
+    if (m_fullscreenStretch)
+    {
+        // Tam Ekran Yap: hedefin bulundugu monitorun TAMAMI.
+        // rcMonitor (rcWork degil) kullaniliyor; gorev cubugu da kapanmali.
+        HMONITOR mon = MonitorFromWindow(m_targetHwnd, MONITOR_DEFAULTTONEAREST);
+        MONITORINFO mi = { sizeof(mi) };
+        if (mon && GetMonitorInfoW(mon, &mi))
+            return mi.rcMonitor;
+    }
+
+    // Klasik mod: hedefin gercek piksel siniri.
+    // DWMWA_EXTENDED_FRAME_BOUNDS gorunmez DWM yeniden boyutlandirma golgesini ayiklar.
+    if (FAILED(DwmGetWindowAttribute(
+            m_targetHwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r))))
+    {
+        GetWindowRect(m_targetHwnd, &r); // fallback
+    }
+    return r;
+}
+
 bool App::CreateOverlayWindow(HWND targetHwnd)
 {
-    // Use DWMWA_EXTENDED_FRAME_BOUNDS to get the real pixel rect
-    // (strips the invisible DWM resize shadow from the rect).
-    RECT r = {};
-    if (FAILED(DwmGetWindowAttribute(
-            targetHwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &r, sizeof(r))))
-    {
-        GetWindowRect(targetHwnd, &r); // fallback
-    }
+    RECT r = ComputeOverlayRect();
     m_lastTargetRect = r;
+    m_lastMonitor    = MonitorFromWindow(targetHwnd, MONITOR_DEFAULTTONEAREST);
 
     int x = r.left;
     int y = r.top;
@@ -219,15 +247,21 @@ bool App::CreateOverlayWindow(HWND targetHwnd)
 // StartOverlay
 // ==========================================================================
 
-bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bool fps)
+bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bool fps,
+                       bool fullscreenStretch)
 {
     if (m_state == AppState::Capturing) return false;
 
     m_menuHwnd  = menuHwnd;
     m_targetHwnd = targetHwnd;
+    m_fullscreenStretch = fullscreenStretch;
 
     // ---- 1. D3D11 device (reused across sessions) ----
     if (!InitD3D()) return false;
+
+    // Hedef pencerenin baslik cubugunu kaldir. 
+    // "Tam Ekran Yap" aciksa VEYA pencereli moddaysa (kullanici talebi).
+    StripTargetBorders();
 
     // ---- 2. Create the overlay window ----
     if (!CreateOverlayWindow(targetHwnd)) return false;
@@ -250,9 +284,25 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
         capH = r.bottom - r.top;
     }
 
+    // Cikis cozunurlugu YALNIZCA Tam Ekran modunda ayrica belirtilir (monitor boyutu).
+    // Klasik modda 0/0 geciyoruz: Renderer cikisi pipeline'a esitler ve nokta ornekleme
+    // ile birebir davranis aynen korunur. (Pencere dikdortgeni ile WGC yakalama boyutu
+    // DPI/kenarlik yuzunden bir-iki piksel sapabilir; bunu gerdirme sanip lineer filtreye
+    // dusmek klasik modda gereksiz bulaniklik yaratirdi.)
+    const int outW = m_fullscreenStretch ? (m_lastTargetRect.right  - m_lastTargetRect.left) : 0;
+    const int outH = m_fullscreenStretch ? (m_lastTargetRect.bottom - m_lastTargetRect.top)  : 0;
+
+    if (m_fullscreenStretch)
+    {
+        DLSS_Log("[App] Tam Ekran Yap ACIK: yakalama %dx%d -> cikis %dx%d (olcek %.2fx/%.2fx)",
+            capW, capH, outW, outH,
+            capW > 0 ? (double)outW / capW : 0.0,
+            capH > 0 ? (double)outH / capH : 0.0);
+    }
+
     // ---- 4. Init renderer (swap chain for the overlay window) ----
     m_renderer = std::make_unique<Renderer>();
-    if (!m_renderer->Init(m_device.Get(), m_overlayHwnd, capW, capH))
+    if (!m_renderer->Init(m_device.Get(), m_overlayHwnd, capW, capH, outW, outH))
     {
         m_captureManager->Stop();
         DestroyWindow(m_overlayHwnd); m_overlayHwnd = nullptr;
@@ -318,7 +368,7 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
     QueryPerformanceCounter(&m_fpsLastTime);
     m_fpsFrameCount = 0;
     m_currentFps    = 0;
-    m_renderer->UpdateFps(m_context.Get(), 0);
+    m_renderer->UpdateOSD(m_context.Get(), 0, 0, false, nullptr, 0, true, m_calibMessage);
 
     // Log system state (process priority, power throttling, battery) at session start
     LogSystemInfo();
@@ -447,6 +497,34 @@ void App::UpdateOverlayPosition()
 {
     if (!m_targetHwnd || !m_overlayHwnd || m_overlayHidden) return;
 
+    // Tam Ekran Yap: overlay hedefin degil, monitorun dikdortgenini kaplar.
+    // Hedef pencere icinde hareket ettikce yeniden konumlandirmaya gerek yok;
+    // yalnizca BASKA bir monitore tasinirsa guncelliyoruz.
+    if (m_fullscreenStretch)
+    {
+        HMONITOR mon = MonitorFromWindow(m_targetHwnd, MONITOR_DEFAULTTONEAREST);
+        if (mon == m_lastMonitor) return;
+
+        m_lastMonitor = mon;
+        RECT fr = ComputeOverlayRect();
+        if (fr.right <= fr.left || fr.bottom <= fr.top) return;
+
+        m_lastTargetRect = fr;
+        UINT flags = m_overlayFocused ? 0 : SWP_NOACTIVATE;
+        SetWindowPos(m_overlayHwnd, HWND_TOPMOST,
+            fr.left, fr.top, fr.right - fr.left, fr.bottom - fr.top, flags);
+
+        // Monitor degisti -> cikis cozunurlugu degismis olabilir; swap chain'i yenile.
+        if (m_renderer && m_captureManager)
+        {
+            m_context->OMSetRenderTargets(0, nullptr, nullptr);
+            m_renderer->Resize(m_device.Get(),
+                m_captureManager->GetWidth(), m_captureManager->GetHeight(),
+                fr.right - fr.left, fr.bottom - fr.top);
+        }
+        return;
+    }
+
     // Fast check: GetWindowRect is instantaneous (< 0.0001 ms, local Win32 call, no IPC)
     RECT winRect = {};
     GetWindowRect(m_targetHwnd, &winRect);
@@ -502,7 +580,12 @@ void App::RecreateCaptureSizedResources()
     // Unbind RTV before resize
     m_context->OMSetRenderTargets(0, nullptr, nullptr);
 
-    m_renderer->Resize(m_device.Get(), w, h);
+    // Yakalama boyutu degisti (oyun penceresi yeniden boyutlandi). Tam Ekran modunda
+    // cikis monitor cozunurlugunda SABIT kalir; klasik modda 0/0 ile pipeline'a esitlenir.
+    const int outW = m_fullscreenStretch ? (m_lastTargetRect.right  - m_lastTargetRect.left) : 0;
+    const int outH = m_fullscreenStretch ? (m_lastTargetRect.bottom - m_lastTargetRect.top)  : 0;
+
+    m_renderer->Resize(m_device.Get(), w, h, outW, outH);
 }
 
 // ==========================================================================
@@ -700,6 +783,166 @@ void App::Update()
     }
     m_prevF9Down = f9Down;
 
+    // Check F2 to start calibration
+    const bool f2Down = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
+    if (f2Down && !m_prevF2Down)
+    {
+        if (m_calibState == CalibState::Idle)
+        {
+            m_calibState = CalibState::InitUncap;
+            m_calibTargetFps = 0; // Sınırsız
+            m_calibTimer = GetTickCount64();
+            m_calibMessage = L"FPS LİMİTİ SIFIRLANIYOR...";
+            
+            // Get target exe name
+            wchar_t exePath[MAX_PATH] = {};
+            DWORD pid = 0;
+            GetWindowThreadProcessId(m_targetHwnd, &pid);
+            HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            if (hProcess)
+            {
+                DWORD size = MAX_PATH;
+                QueryFullProcessImageNameW(hProcess, 0, exePath, &size);
+                CloseHandle(hProcess);
+                
+                std::wstring exeName = PathFindFileNameW(exePath);
+                DLSS_Log("[App] F2 Calibration started for exeName: %ls", exeName.c_str());
+
+                if (!RTSSManager::Get().SetFramerateLimit(exeName, m_calibTargetFps))
+                {
+                    m_calibState = CalibState::Done;
+                    m_calibMessage = L"HATA: RTSS Profili yazılamadı! Klasörü kontrol edin.";
+                    m_calibMessageTimer = GetTickCount64();
+                    DLSS_Log("[App] F2 Calibration failed to write to RTSS profile for %ls", exeName.c_str());
+                }
+            }
+        }
+    }
+    m_prevF2Down = f2Down;
+
+    // Run calibration state machine
+    if (m_calibState != CalibState::Idle)
+    {
+        ULONGLONG now = GetTickCount64();
+        // Wait 3 seconds per step for better accuracy
+        if (now - m_calibTimer > 3000)
+        {
+            m_calibTimer = now;
+            int inputFps = m_captureManager ? m_captureManager->GetCurrentInputFps() : 0;
+            int outputFps = m_currentFps;
+            
+            wchar_t exePath[MAX_PATH] = {};
+            DWORD pid = 0;
+            GetWindowThreadProcessId(m_targetHwnd, &pid);
+            HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+            std::wstring exeName = L"";
+            if (hProcess)
+            {
+                DWORD size = MAX_PATH;
+                QueryFullProcessImageNameW(hProcess, 0, exePath, &size);
+                CloseHandle(hProcess);
+                exeName = PathFindFileNameW(exePath);
+            }
+
+            if (m_calibState == CalibState::InitUncap)
+            {
+                // Uncapped (limit=0) has been applied. Wait 1.5s then start at 10.
+                m_calibState = CalibState::CoarseUp;
+                m_calibTargetFps = 10;
+                m_calibMessage = L"FPS KALİBRE EDİLİYOR (HEDEF: 10)...";
+                if (!exeName.empty())
+                {
+                    if (!RTSSManager::Get().SetFramerateLimit(exeName, m_calibTargetFps))
+                    {
+                        m_calibState = CalibState::Done;
+                        m_calibMessage = L"HATA: RTSS Profili yazılamadı! Klasörü kontrol edin.";
+                        m_calibMessageTimer = now;
+                    }
+                }
+            }
+            else if (m_calibState == CalibState::CoarseUp)
+            {
+                // Is it synced?
+                if (std::abs(inputFps - outputFps) <= 1)
+                {
+                    if (inputFps < m_calibTargetFps - 5)
+                    {
+                        // Game natively capped
+                        m_calibState = CalibState::Done;
+                        m_calibTargetFps = inputFps;
+                        m_calibMessage = L"KALİBRASYON TAMAMLANDI: " + std::to_wstring(m_calibTargetFps) + L" FPS";
+                        m_calibMessageTimer = now;
+                        if (!exeName.empty()) RTSSManager::Get().SetFramerateLimit(exeName, m_calibTargetFps);
+                    }
+                    else
+                    {
+                        m_calibTargetFps += 10;
+                        m_calibMessage = L"FPS KALİBRE EDİLİYOR (HEDEF: " + std::to_wstring(m_calibTargetFps) + L")...";
+                        if (!exeName.empty())
+                        {
+                            if (!RTSSManager::Get().SetFramerateLimit(exeName, m_calibTargetFps))
+                            {
+                                m_calibState = CalibState::Done;
+                                m_calibMessage = L"HATA: RTSS Profili yazılamadı! Klasörü kontrol edin.";
+                                m_calibMessageTimer = now;
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // Desync! Output is falling behind
+                    m_calibState = CalibState::FineDown;
+                    m_calibTargetFps -= 1;
+                    m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(m_calibTargetFps) + L")...";
+                    if (!exeName.empty())
+                    {
+                        if (!RTSSManager::Get().SetFramerateLimit(exeName, m_calibTargetFps))
+                        {
+                            m_calibState = CalibState::Done;
+                            m_calibMessage = L"HATA: RTSS Profili yazılamadı! Klasörü kontrol edin.";
+                            m_calibMessageTimer = now;
+                        }
+                    }
+                }
+            }
+            else if (m_calibState == CalibState::FineDown)
+            {
+                if (std::abs(inputFps - outputFps) <= 1)
+                {
+                    // Found sync!
+                    m_calibState = CalibState::Done;
+                    m_calibMessage = L"KALİBRASYON TAMAMLANDI: " + std::to_wstring(m_calibTargetFps) + L" FPS";
+                    m_calibMessageTimer = now;
+                }
+                else
+                {
+                    // Still desync
+                    m_calibTargetFps -= 1;
+                    m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(m_calibTargetFps) + L")...";
+                    if (!exeName.empty())
+                    {
+                        if (!RTSSManager::Get().SetFramerateLimit(exeName, m_calibTargetFps))
+                        {
+                            m_calibState = CalibState::Done;
+                            m_calibMessage = L"HATA: RTSS Profili yazılamadı! Klasörü kontrol edin.";
+                            m_calibMessageTimer = now;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    if (m_calibState == CalibState::Done)
+    {
+        if (GetTickCount64() - m_calibMessageTimer > 4000)
+        {
+            m_calibState = CalibState::Idle;
+            m_calibMessage = L"";
+        }
+    }
+
     // Check F10 to toggle DLSS 5 on/off
     const bool f10Down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
     if (f10Down && !m_prevF10Down)
@@ -716,7 +959,11 @@ void App::Update()
             {
                 m_renderer->GetDLSSManager()->SetEnabled(m_dlssEnabled);
             }
-            m_renderer->UpdateFps(m_context.Get(), m_currentFps, true);
+            int inputFps = m_captureManager ? m_captureManager->GetCurrentInputFps() : 0;
+            bool showWarning = !m_warningDismissed && (inputFps > m_currentFps + 20);
+            const double* history = m_captureManager ? m_captureManager->GetGapHistory() : nullptr;
+            int historyIdx = m_captureManager ? m_captureManager->GetGapHistoryIdx() : 0;
+            m_renderer->UpdateOSD(m_context.Get(), m_currentFps, inputFps, showWarning, history, historyIdx, true, m_calibMessage);
         }
     }
     m_prevF10Down = f10Down;
@@ -771,7 +1018,20 @@ void App::Render(ID3D11ShaderResourceView* srv)
         m_currentFps = static_cast<int>((m_fpsFrameCount / elapsed) + 0.5);
         m_fpsFrameCount = 0;
         m_fpsLastTime = frameStart;
-        m_renderer->UpdateFps(m_context.Get(), m_currentFps);
+        
+        int inputFps = m_captureManager ? m_captureManager->GetCurrentInputFps() : 0;
+        
+        // Show warning if input > output + 20 and not dismissed
+        bool showWarning = false;
+        if (!m_warningDismissed && (inputFps > m_currentFps + 20))
+        {
+            showWarning = true;
+        }
+
+        const double* history = m_captureManager ? m_captureManager->GetGapHistory() : nullptr;
+        int historyIdx = m_captureManager ? m_captureManager->GetGapHistoryIdx() : 0;
+        
+        m_renderer->UpdateOSD(m_context.Get(), m_currentFps, inputFps, showWarning, history, historyIdx, true, m_calibMessage);
     }
 
     // --- RenderFrame stage ---
@@ -858,7 +1118,17 @@ void App::StopOverlay()
         m_overlayHwnd = nullptr;
     }
 
+<<<<<<< Updated upstream
+=======
+    // Oturum bitti: thread imlec sayacini normale dondur.
+    // Bu cagri atlanirsa VLSS5 menusu uzerinde imlec gorunmez kalir.
+    SetOverlayCursorVisible(true);
+
+    RestoreTargetBorders();
+
+>>>>>>> Stashed changes
     m_targetHwnd = nullptr;
+    m_lastMonitor = nullptr;
     m_overlayFocused = false;
     m_prevF8Down     = false;
     m_overlayHidden  = false;
@@ -1046,4 +1316,58 @@ void App::FlushPerfStats()
     m_sumTotalMs    = 0.0;
     m_maxTotalMs    = 0.0;
     m_timingSamples = 0;
+}
+
+// ==========================================================================
+// Window Border Management (Borderless Windowed Mode)
+// ==========================================================================
+void App::StripTargetBorders()
+{
+    if (!m_targetHwnd || m_bordersStripped) return;
+
+    m_originalTargetStyle   = GetWindowLongPtrW(m_targetHwnd, GWL_STYLE);
+    m_originalTargetExStyle = GetWindowLongPtrW(m_targetHwnd, GWL_EXSTYLE);
+
+    // Eger pencere zaten borderless/fullscreen degilse islem yap
+    if ((m_originalTargetStyle & WS_CAPTION) == WS_CAPTION)
+    {
+        GetWindowRect(m_targetHwnd, &m_originalTargetRect);
+
+        // Mevcut saf oyun alani (client area) boyutunu al
+        RECT clientRect = {};
+        GetClientRect(m_targetHwnd, &clientRect);
+        int clientW = clientRect.right - clientRect.left;
+        int clientH = clientRect.bottom - clientRect.top;
+
+        // Pencere kenarliklarini kaldir
+        LONG_PTR newStyle = m_originalTargetStyle & ~(WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU);
+        SetWindowLongPtrW(m_targetHwnd, GWL_STYLE, newStyle);
+
+        // Pencerenin dis boyutunu, eski client boyutuna ayarla. 
+        // Boylece oyunun ic cozunurlugu kesinlikle degismez, sadece kenarliklar yok olur.
+        SetWindowPos(m_targetHwnd, nullptr, 
+            m_originalTargetRect.left, m_originalTargetRect.top, 
+            clientW, clientH, 
+            SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+        m_bordersStripped = true;
+        DLSS_Log("[App] Hedef pencere kenarliklari kaldirildi. Orijinal Client: %dx%d", clientW, clientH);
+    }
+}
+
+void App::RestoreTargetBorders()
+{
+    if (!m_targetHwnd || !m_bordersStripped) return;
+
+    SetWindowLongPtrW(m_targetHwnd, GWL_STYLE, m_originalTargetStyle);
+    SetWindowLongPtrW(m_targetHwnd, GWL_EXSTYLE, m_originalTargetExStyle);
+    
+    SetWindowPos(m_targetHwnd, nullptr, 
+        m_originalTargetRect.left, m_originalTargetRect.top, 
+        m_originalTargetRect.right - m_originalTargetRect.left, 
+        m_originalTargetRect.bottom - m_originalTargetRect.top, 
+        SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+    m_bordersStripped = false;
+    DLSS_Log("[App] Hedef pencere kenarliklari geri yuklendi.");
 }
