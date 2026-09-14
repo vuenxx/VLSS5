@@ -4,14 +4,14 @@
 
 #pragma comment(lib, "shlwapi.lib")
 
-std::wstring Dlss5Config::FormatHotkey() const
+std::wstring Dlss5Config::FormatKey(UINT vk, UINT mod)
 {
     std::wstring result;
-    if (settingsMod & MOD_CONTROL) result += L"Ctrl+";
-    if (settingsMod & MOD_ALT)     result += L"Alt+";
-    if (settingsMod & MOD_SHIFT)   result += L"Shift+";
+    if (mod & MOD_CONTROL) result += L"Ctrl+";
+    if (mod & MOD_ALT)     result += L"Alt+";
+    if (mod & MOD_SHIFT)   result += L"Shift+";
 
-    switch (settingsVk)
+    switch (vk)
     {
     case VK_INSERT:   result += L"INSERT";   break;
     case VK_HOME:     result += L"HOME";     break;
@@ -34,23 +34,28 @@ std::wstring Dlss5Config::FormatHotkey() const
     case VK_SPACE:    result += L"SPACE";    break;
     case VK_OEM_3:    result += L"~";        break;
     default:
-        if (settingsVk >= 'A' && settingsVk <= 'Z')
+        if (vk >= 'A' && vk <= 'Z')
         {
-            result += static_cast<wchar_t>(settingsVk);
+            result += static_cast<wchar_t>(vk);
         }
-        else if (settingsVk >= '0' && settingsVk <= '9')
+        else if (vk >= '0' && vk <= '9')
         {
-            result += static_cast<wchar_t>(settingsVk);
+            result += static_cast<wchar_t>(vk);
         }
         else
         {
             wchar_t hex[16];
-            swprintf_s(hex, L"VK_0x%02X", settingsVk);
+            swprintf_s(hex, L"VK_0x%02X", vk);
             result += hex;
         }
         break;
     }
     return result;
+}
+
+std::wstring Dlss5Config::FormatHotkey() const
+{
+    return FormatKey(settingsVk, settingsMod);
 }
 
 ConfigManager& ConfigManager::Get()
@@ -72,7 +77,6 @@ void ConfigManager::Load()
 {
     std::wstring ini = GetIniPath();
 
-    // If file doesn't exist yet, create default
     if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES)
     {
         Save();
@@ -85,8 +89,7 @@ void ConfigManager::Load()
     if (testBuf[0] == L'\0')
     {
         GetPrivateProfileStringW(L"DLSS5", L"Intensity", L"", testBuf, _countof(testBuf), ini.c_str());
-        if (testBuf[0] != L'\0')
-            sec = L"DLSS5";
+        if (testBuf[0] != L'\0') sec = L"DLSS5";
     }
 
     m_config.preset = GetPrivateProfileIntW(sec, L"Preset", 0, ini.c_str());
@@ -131,11 +134,9 @@ void ConfigManager::Load()
     if (m_config.boostFactor > 2.5f) m_config.boostFactor = 2.5f;
 
     m_config.splitScreen = (GetPrivateProfileIntW(sec, L"SplitScreen", 0, ini.c_str()) != 0);
-<<<<<<< Updated upstream
-=======
     m_config.directFlip  = (GetPrivateProfileIntW(sec, L"DirectFlip", 0, ini.c_str()) != 0);
     m_config.fullscreenStretch = (GetPrivateProfileIntW(sec, L"FullscreenStretch", 0, ini.c_str()) != 0);
->>>>>>> Stashed changes
+
     GetPrivateProfileStringW(sec, L"SplitPos", L"0.5", buf, _countof(buf), ini.c_str());
     m_config.splitPos = static_cast<float>(_wtof(buf));
     if (m_config.splitPos < 0.0f) m_config.splitPos = 0.0f;
@@ -144,12 +145,20 @@ void ConfigManager::Load()
     m_config.settingsVk  = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"SettingsVk", VK_INSERT, ini.c_str()));
     m_config.settingsMod = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"SettingsMod", 0, ini.c_str()));
 
+    m_config.vkFgIndicator = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkFgIndicator", VK_F7, ini.c_str()));
+    m_config.vkFocus       = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkFocus", VK_F8, ini.c_str()));
+    m_config.vkFps         = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkFps", VK_F9, ini.c_str()));
+    m_config.vkToggleVlss  = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkToggleVlss", VK_F10, ini.c_str()));
+    m_config.vkCalib       = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkCalib", VK_F2, ini.c_str()));
+    m_config.vkStart       = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkStart", 'S', ini.c_str()));
+    m_config.modStart      = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"ModStart", MOD_ALT, ini.c_str()));
+
     wchar_t gpuBuf[256] = {};
     GetPrivateProfileStringW(L"Hardware", L"SelectedGpu", L"Auto", gpuBuf, _countof(gpuBuf), ini.c_str());
     m_config.selectedGpu = (gpuBuf[0] != L'\0') ? gpuBuf : L"Auto";
 
     wchar_t rtssBuf[MAX_PATH] = {};
-    GetPrivateProfileStringW(L"Paths", L"RtssDirectory", L"C:\\Program Files (x86)\\RivaTuner Statistics Server\\Profiles", rtssBuf, _countof(rtssBuf), ini.c_str());
+    GetPrivateProfileStringW(L"Paths", L"RtssDirectory", L"", rtssBuf, _countof(rtssBuf), ini.c_str());
     m_config.rtssDirectory = rtssBuf;
 }
 
@@ -183,15 +192,20 @@ void ConfigManager::Save()
     writeInt(L"VLSS5", L"OpticalFlow", m_config.opticalFlow ? 1 : 0);
     writeFloat(L"VLSS5", L"BoostFactor", m_config.boostFactor);
     writeInt(L"VLSS5", L"SplitScreen", m_config.splitScreen ? 1 : 0);
-<<<<<<< Updated upstream
-=======
     writeInt(L"VLSS5", L"DirectFlip",  m_config.directFlip  ? 1 : 0);
     writeInt(L"VLSS5", L"FullscreenStretch", m_config.fullscreenStretch ? 1 : 0);
->>>>>>> Stashed changes
     writeFloat(L"VLSS5", L"SplitPos", m_config.splitPos);
 
     writeInt(L"Hotkeys", L"SettingsVk", static_cast<int>(m_config.settingsVk));
     writeInt(L"Hotkeys", L"SettingsMod", static_cast<int>(m_config.settingsMod));
+
+    writeInt(L"Hotkeys", L"VkFgIndicator", static_cast<int>(m_config.vkFgIndicator));
+    writeInt(L"Hotkeys", L"VkFocus", static_cast<int>(m_config.vkFocus));
+    writeInt(L"Hotkeys", L"VkFps", static_cast<int>(m_config.vkFps));
+    writeInt(L"Hotkeys", L"VkToggleVlss", static_cast<int>(m_config.vkToggleVlss));
+    writeInt(L"Hotkeys", L"VkCalib", static_cast<int>(m_config.vkCalib));
+    writeInt(L"Hotkeys", L"VkStart", static_cast<int>(m_config.vkStart));
+    writeInt(L"Hotkeys", L"ModStart", static_cast<int>(m_config.modStart));
 
     writeStr(L"Hardware", L"SelectedGpu", m_config.selectedGpu.c_str());
     writeStr(L"Paths", L"RtssDirectory", m_config.rtssDirectory.c_str());

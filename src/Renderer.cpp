@@ -575,7 +575,7 @@ bool Renderer::CreateFpsResources(ID3D11Device* device)
 // -----------------------------------------------------------------------
 // UpdateOSD
 // -----------------------------------------------------------------------
-void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, bool showWarning, const double* gapHistory, int gapHistoryIdx, bool forceRedraw, const std::wstring& calibMessage)
+void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, bool showWarning, const double* gapHistory, int gapHistoryIdx, bool forceRedraw, const std::wstring& calibMessage, bool fgMarkerActive)
 {
     if (!m_pFpsBits || !m_hFpsDC || !m_fpsTexture) return;
 
@@ -610,12 +610,17 @@ void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, 
     COLORREF textColor = dlssnrOn ? RGB(50, 255, 130) : (dlssOn ? RGB(40, 255, 110) : RGB(200, 205, 215));
     SetTextColor(m_hFpsDC, textColor);
 
-    const wchar_t* dlssLabel = L"• OFF";
-    if (dlssnrOn) dlssLabel = L"• VLSS5";
-    else if (dlssOn) dlssLabel = L"• VLSS5";
+    std::wstring dlssLabelStr = L"⯀ OFF";
+    if (dlssnrOn) dlssLabelStr = L"⯀ VLSS5";
+    else if (dlssOn) dlssLabelStr = L"⯀ VLSS5";
+    
+    if (fgMarkerActive)
+    {
+        dlssLabelStr += L" (DEV)";
+    }
 
     wchar_t text[64];
-    swprintf_s(text, L" IN: %d FPS | OUT: %d FPS %s", inputFps, outputFps, dlssLabel);
+    swprintf_s(text, L" IN: %d FPS | OUT: %d FPS %s", inputFps, outputFps, dlssLabelStr.c_str());
     
     RECT rc = { 0, 4, kFpsWidth, 24 };
     DrawTextW(m_hFpsDC, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);

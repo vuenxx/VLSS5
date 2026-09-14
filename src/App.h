@@ -79,34 +79,32 @@ private:
     AppState  m_state            = AppState::Menu;
     bool      m_running          = false;
     bool      m_prevStopKeyDown  = false;
-    bool      m_overlayFocused   = false; // F8 toggle: false = focus on target app, true = focus on overlay
-    bool      m_prevF8Down       = false;
-    bool      m_overlayHidden    = false; // Auto-Hide: true when target is minimized or not focused
+    bool      m_overlayFocused   = false;
+    bool      m_prevFocusDown    = false;
+    bool      m_overlayHidden    = false;
     ULONGLONG m_sessionStartTime = 0;
 
     // FPS tracking (measures overlay window's actual render FPS)
     LARGE_INTEGER m_fpsFreq       = {};
     LARGE_INTEGER m_fpsLastTime   = {};
-    int           m_fpsFrameCount = 0;
-    int           m_currentFps    = 0;
+    int           m_fpsFrames     = 0;
+    float         m_fpsCurrent    = 0.0f;
     bool          m_fpsEnabled    = true;
-    bool          m_prevF9Down    = false;
+    bool          m_prevFpsDown   = false;
     bool          m_dlssEnabled   = true;
-    bool          m_prevF10Down   = false;
-<<<<<<< Updated upstream
-=======
-    bool          m_fgMarkerActive = false;
+    bool          m_prevVlssDown  = false;
+
+    bool          m_fgMarkerActive      = false;
     // Oyun modunda OS imlecinin gizli tutulmasi icin thread imlec sayaci durumu.
-    bool          m_cursorVisible  = true;
+    bool          m_cursorVisible       = true;
+    bool          m_prevFgIndicatorDown = false;
     // Oturum basinda config'den okunur. true ise overlay WS_EX_LAYERED tasimaz
     // (Direct Flip acik, fare gecirgenligi yalnizca HTTRANSPARENT'a bagli).
-    bool          m_directFlip     = false;
-    bool          m_fullscreenStretch = false;
+    bool          m_directFlip          = false;
+    bool          m_fullscreenStretch   = false;
     // Tam Ekran modunda hedefin hangi monitorde oldugunu takip eder; monitor
     // degismedikce overlay'i yeniden konumlandirmaya gerek yoktur.
-    HMONITOR      m_lastMonitor    = nullptr;
-    bool          m_prevF7Down    = false;
->>>>>>> Stashed changes
+    HMONITOR      m_lastMonitor         = nullptr;
 
     // Window border stripping
     LONG_PTR      m_originalTargetStyle   = 0;
@@ -116,7 +114,7 @@ private:
 
     // Warning OSD & Calibration
     bool          m_warningDismissed      = false;
-    bool          m_prevF2Down            = false;
+    bool          m_prevCalibDown         = false;
     CalibState    m_calibState            = CalibState::Idle;
     int           m_calibTargetFps        = 0;
     ULONGLONG     m_calibTimer            = 0;

@@ -5,6 +5,7 @@
 #include "ConfigManager.h"
 #include "SettingsWindow.h"
 #include "RtssWindow.h"
+#include "HotkeysWindow.h"
 #include "RTSSManager.h"
 #include "resource.h"
 #include <shlwapi.h>
@@ -35,6 +36,7 @@
 #define IDC_BTN_GPU_HELP      112   // GPU Help '?' Button
 #define IDC_CHK_FULLSCREEN    113   // Tam Ekran Yap (monitore gerdirme) Checkbox
 #define IDC_BTN_RTSS_SETTINGS 114
+#define IDC_BTN_HOTKEYS       115   // Hotkeys Button
 #define ID_GLOBAL_HOTKEY      201   // Global capture toggle hotkey
 #define IDT_HOTKEY_TIMER      301   // Fallback hotkey poller (50ms)
 
@@ -84,6 +86,7 @@ static HWND                    g_btnRefresh      = nullptr;
 static HWND                    g_btnStart        = nullptr;
 
 static HWND                    g_btnRtssSettings = nullptr;
+static HWND                    g_btnHotkeys      = nullptr;
 
 static HFONT                   g_fontNormal   = nullptr;
 static HFONT                   g_fontTitle    = nullptr;
@@ -355,8 +358,8 @@ static DWORD g_lastHotkeyTick = 0;
 static void RegisterAppHotkey(HWND hwnd)
 {
     UnregisterHotKey(hwnd, ID_GLOBAL_HOTKEY);
-    const HotkeyConfig& cfg = InputForwarder::Config();
-    RegisterHotKey(hwnd, ID_GLOBAL_HOTKEY, cfg.modifiers, cfg.vk);
+    auto& cfg = ConfigManager::Get().Config();
+    RegisterHotKey(hwnd, ID_GLOBAL_HOTKEY, cfg.modStart | MOD_NOREPEAT, cfg.vkStart);
 }
 
 static void UnregisterAppHotkey(HWND hwnd)
@@ -593,37 +596,25 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         g_tipGpuHelp = CreateButtonTooltip(hwnd, g_btnGpuHelp,
             L"DLSS5 kullanmak için RTX bir kart gereklidir. AMD kartlarda çalışmaz!");
 
-        // Row 2: Overlay Shortcut & VLSS5 Settings
-        g_lblKeybindTitle = CreateWindowW(L"STATIC", L"Overlay Kısayolu:",
-            WS_CHILD | WS_VISIBLE, 32, 368, 130, 20,
-            hwnd, nullptr, nullptr, nullptr);
-        SF(g_lblKeybindTitle, g_fontBold);
-
-        g_lblKeybind = CreateWindowW(L"STATIC", L"",
-            WS_CHILD | WS_VISIBLE | SS_OWNERDRAW,
-            168, 364, 96, 30,
-            hwnd, reinterpret_cast<HMENU>(IDC_LBL_KEYBIND), nullptr, nullptr);
-        SF(g_lblKeybind, g_fontBold);
-        UpdateKeybindLabel();
-
-        g_btnKeybind = CreateWindowW(L"BUTTON", L"⌨ Değiştir",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            272, 364, 92, 30,
-            hwnd, reinterpret_cast<HMENU>(IDC_BTN_KEYBIND), nullptr, nullptr);
-        SF(g_btnKeybind, g_fontNormal);
-
+        // Row 2: VLSS5 Settings
         g_btnDlssSettings = CreateWindowW(L"BUTTON", L"⚙ VLSS5 Ayarları",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            372, 364, 198, 30,
+            32, 364, 538, 30,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_DLSS_SETTINGS), nullptr, nullptr);
         SF(g_btnDlssSettings, g_fontBold);
 
-        // Row 3: RTSS Integration
+        // Row 3: RTSS Integration & Hotkeys
         g_btnRtssSettings = CreateWindowW(L"BUTTON", L"RTSS AYARLARI",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            32, 404, 542, 32,
+            32, 404, 265, 32,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_RTSS_SETTINGS), nullptr, nullptr);
         SF(g_btnRtssSettings, g_fontBold);
+
+        g_btnHotkeys = CreateWindowW(L"BUTTON", L"TUŞLARI DEĞİŞTİR",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            309, 404, 265, 32,
+            hwnd, reinterpret_cast<HMENU>(IDC_BTN_HOTKEYS), nullptr, nullptr);
+        SF(g_btnHotkeys, g_fontBold);
 
         // ---- Start Button (Big Action Button) ----
         g_btnStart = CreateWindowW(L"BUTTON", L"BAŞLAT  ➔",
@@ -696,13 +687,20 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         TextOutW(hdc, 74, 38, subTitle, static_cast<int>(wcslen(subTitle)));
 
         // Keyboard Tips in Header (Right-side Pill Container)
-        RECT rcTips = { client.right - 340, 18, client.right - 20, 48 };
+        RECT rcTips = { client.right - 460, 18, client.right - 20, 48 };
         DrawModernPanel(hdc, rcTips, RGB(14, 18, 25), COLOR_BORDER, 6);
 
         SetTextColor(hdc, RGB(165, 175, 190));
         SelectObject(hdc, g_fontSmall);
-        const wchar_t tips[] = L"[F8] Odak  |  [F9] FPS  |  [F10] VLSS5  |  [Alt+S] Başlat";
-        DrawTextW(hdc, tips, -1, &rcTips, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        
+        auto& c = ConfigManager::Get().Config();
+        std::wstring tips = L"[" + Dlss5Config::FormatKey(c.vkFgIndicator) + L"] FG | [" +
+                            Dlss5Config::FormatKey(c.vkFocus) + L"] Odak | [" +
+                            Dlss5Config::FormatKey(c.vkFps) + L"] FPS | [" +
+                            Dlss5Config::FormatKey(c.vkToggleVlss) + L"] VLSS5 | [" +
+                            Dlss5Config::FormatKey(c.vkStart, c.modStart) + L"] Başlat";
+                            
+        DrawTextW(hdc, tips.c_str(), -1, &rcTips, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 
         // 3. Card 1 Panel (Hedef Uygulama Seçimi)
         RECT card1 = { 20, 76, client.right - 20, 304 };
@@ -928,7 +926,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         }
 
         // 4.5 Custom draw RTSS Settings Button
-        if (dis->CtlID == IDC_BTN_RTSS_SETTINGS)
+        if (dis->CtlID == IDC_BTN_RTSS_SETTINGS || dis->CtlID == IDC_BTN_HOTKEYS)
         {
             bool isPressed = (dis->itemState & ODS_SELECTED);
             COLORREF btnBg = isPressed ? COLOR_LIME_DARK : COLOR_LIME_ACCENT;
@@ -936,10 +934,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBg, 6);
 
             SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, COLOR_DARK_TEXT);
+            SetTextColor(dis->hDC, RGB(10, 15, 20));
             SelectObject(dis->hDC, g_fontBold);
-
-            DrawTextW(dis->hDC, L"RTSS AYARLARI", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            
+            wchar_t text[64] = {};
+            GetWindowTextW(dis->hwndItem, text, 64);
+            DrawTextW(dis->hDC, text, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             return TRUE;
         }
 
@@ -1135,6 +1135,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         }
 
+        if (ctlId == IDC_BTN_HOTKEYS)
+        {
+            HotkeysWindow::Show(hwnd);
+            break;
+        }
+
         // Start overlay
         if (ctlId == IDC_BTN_START)
         {
@@ -1150,31 +1156,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             break;
         }
 
-        // Keybind capture
-        if (ctlId == IDC_BTN_KEYBIND)
-        {
-            if (!InputForwarder::IsCapturing())
-            {
-                UnregisterAppHotkey(hwnd);
-                SetWindowTextW(g_lblKeybind, L"Tuşa basın…");
-                SetWindowTextW(g_btnKeybind, L"İptal");
-                SetStatus(L"Yeni kısayol için bir tuş kombinasyonu basın.");
-
-                InputForwarder::BeginCapture([hwnd](HotkeyConfig /*cfg*/) {
-                    PostMessageW(hwnd, WM_APP, 0, 0);
-                });
-            }
-            else
-            {
-                InputForwarder::EndCapture();
-                RegisterAppHotkey(hwnd);
-                UpdateKeybindLabel();
-                SetWindowTextW(g_btnKeybind, L"Değiştir");
-                SetStatus(L"Kısayol değiştirme iptal edildi.");
-            }
-            break;
-        }
-
         // DLSS 5 Settings window toggle
         if (ctlId == IDC_BTN_DLSS_SETTINGS)
         {
@@ -1184,24 +1165,10 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         break;
     }
 
-    case WM_APP:
+    case WM_APP + 1:
     {
         RegisterAppHotkey(hwnd);
-        UpdateKeybindLabel();
-        SetWindowTextW(g_btnKeybind, L"Değiştir");
-
-        const HotkeyConfig& cfg = InputForwarder::Config();
-        std::wstring msg = L"Kısayol kaydedildi: [";
-        msg += cfg.FormatDisplay();
-        msg += L"]";
-
-        if (!cfg.HasRealModifier())
-        {
-            msg += L"  ⚠ Modifier (Alt/Ctrl/Shift) olmadan atanmış. ";
-            msg += L"Çakışmayı önlemek için Alt+" + cfg.FormatDisplay() + L" önerilir.";
-        }
-
-        SetStatus(msg.c_str());
+        InvalidateRect(hwnd, nullptr, TRUE);
         break;
     }
 

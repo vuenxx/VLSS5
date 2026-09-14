@@ -48,7 +48,7 @@ public:
     void Cleanup();
 
     // FPS counter controls & updates
-    void UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, bool showWarning, const double* gapHistory, int gapHistoryIdx, bool forceRedraw = false, const std::wstring& calibMessage = L"");
+    void UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, bool showWarning, const double* gapHistory, int gapHistoryIdx, bool forceRedraw = false, const std::wstring& calibMessage = L"", bool fgMarkerActive = false);
     void SetFpsEnabled(bool enabled) { m_fpsEnabled = enabled; }
     bool IsFpsEnabled() const { return m_fpsEnabled; }
     void UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx);

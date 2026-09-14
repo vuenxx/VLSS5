@@ -15,8 +15,8 @@ struct Dlss5Config
     bool  opticalFlow        = true; // Optik akış hareket vektörleri (GPU tabanlı gerçek zamanlı hareket takibi)
     float boostFactor        = 1.0f; // 1.0 - 2.5 (Nöral Etki Yoğunluğu / Extrapolation Boost)
     bool  splitScreen        = false;// Bölünmüş Ekran (Karşılaştırma Modu)
-<<<<<<< Updated upstream
-=======
+
+
 
     // Direct Flip (Deneysel): overlay penceresinden WS_EX_LAYERED kaldırılır.
     // AÇIK  -> Frame Generation altında Present() stall'ı kalkar (24ms -> ~0ms),
@@ -31,12 +31,21 @@ struct Dlss5Config
     // DLSS/MV yigini yakalama cozunurlugunde calismaya devam eder; gerdirme yalnizca
     // son gecerde (full-screen ucgen, lineer filtre) uygulanir.
     bool  fullscreenStretch  = false;
->>>>>>> Stashed changes
+
     float splitPos           = 0.5f; // 0.0 - 1.0 (Bölünme Çizgisi Konumu, varsayılan %50)
 
     // Settings window toggle hotkey (Default: INSERT)
     UINT  settingsVk     = VK_INSERT;
     UINT  settingsMod    = 0;       // MOD_CONTROL, MOD_ALT, MOD_SHIFT vs. (0 = bare key)
+
+    // New configurable hotkeys
+    UINT  vkFgIndicator = VK_F7;
+    UINT  vkFocus       = VK_F8;
+    UINT  vkFps         = VK_F9;
+    UINT  vkToggleVlss  = VK_F10;
+    UINT  vkCalib       = VK_F2;
+    UINT  vkStart       = 'S';
+    UINT  modStart      = MOD_ALT; // Modifiers for Start toggle
 
     // Selected GPU adapter description (e.g. L"Auto" or specific name)
     std::wstring selectedGpu = L"Auto";
@@ -45,6 +54,7 @@ struct Dlss5Config
     std::wstring rtssDirectory = L"";
 
     std::wstring FormatHotkey() const;
+    static std::wstring FormatKey(UINT vk, UINT mod = 0);
 };
 
 class ConfigManager

@@ -611,10 +611,11 @@ void App::CheckF8FocusToggle()
 {
     if (!m_overlayHwnd) return;
 
-    const bool f8Down = (GetAsyncKeyState(VK_F8) & 0x8000) != 0;
+    auto& cfg = ConfigManager::Get().Config();
+    const bool focusDown = (GetAsyncKeyState(cfg.vkFocus) & 0x8000) != 0;
 
     // Trigger ONLY on leading edge (new press)
-    if (f8Down && !m_prevF8Down)
+    if (focusDown && !m_prevFocusDown)
     {
         if (!m_overlayFocused)
         {
@@ -774,18 +775,19 @@ void App::Update()
     if (!m_running) return;
 
     // Check F9 to toggle FPS counter display (on/off)
-    const bool f9Down = (GetAsyncKeyState(VK_F9) & 0x8000) != 0;
-    if (f9Down && !m_prevF9Down)
+    auto& cfg = ConfigManager::Get().Config();
+    const bool fpsDown = (GetAsyncKeyState(cfg.vkFps) & 0x8000) != 0;
+    if (fpsDown && !m_prevFpsDown)
     {
         m_fpsEnabled = !m_fpsEnabled;
         m_renderer->SetFpsEnabled(m_fpsEnabled);
         m_renderer->UpdateFpsConstantBuffer(m_context.Get());
     }
-    m_prevF9Down = f9Down;
+    m_prevFpsDown = fpsDown;
 
-    // Check F2 to start calibration
-    const bool f2Down = (GetAsyncKeyState(VK_F2) & 0x8000) != 0;
-    if (f2Down && !m_prevF2Down)
+    // F2: Start FPS Calibration
+    const bool calibDown = (GetAsyncKeyState(cfg.vkCalib) & 0x8000) != 0;
+    if (calibDown && !m_prevCalibDown)
     {
         if (m_calibState == CalibState::Idle)
         {
@@ -944,13 +946,19 @@ void App::Update()
     }
 
     // Check F10 to toggle DLSS 5 on/off
-    const bool f10Down = (GetAsyncKeyState(VK_F10) & 0x8000) != 0;
-    if (f10Down && !m_prevF10Down)
+    const bool vlssDown = (GetAsyncKeyState(cfg.vkToggleVlss) & 0x8000) != 0;
+    if (vlssDown && !m_prevVlssDown)
     {
         if (m_renderer)
         {
             m_dlssEnabled = !m_dlssEnabled;
-            DLSS_Log("[App] F10 pressed: DLSS toggled to %s", m_dlssEnabled ? "ENABLED" : "DISABLED");
+            // Eger devre disi kaldiysa mv ve ofa state clear!
+            if (!m_dlssEnabled)
+            {
+                auto of = m_renderer->GetNvOFManager();
+                if (of) of->ResetTracking();
+                m_renderer->ClearMotionVectors(m_context.Get());
+            }
             if (m_renderer->GetDLSSNRManager())
             {
                 m_renderer->GetDLSSNRManager()->SetEnabled(m_dlssEnabled);
@@ -966,7 +974,15 @@ void App::Update()
             m_renderer->UpdateOSD(m_context.Get(), m_currentFps, inputFps, showWarning, history, historyIdx, true, m_calibMessage);
         }
     }
-    m_prevF10Down = f10Down;
+    m_prevVlssDown = vlssDown;
+
+    // Check FG Indicator (F7)
+    const bool fgIndicatorDown = (GetAsyncKeyState(cfg.vkFgIndicator) & 0x8000) != 0;
+    if (fgIndicatorDown && !m_prevFgIndicatorDown)
+    {
+        m_fgMarkerActive = !m_fgMarkerActive;
+    }
+    m_prevFgIndicatorDown = fgIndicatorDown;
 
     // Check in-game DLSS 5 settings hotkey (Default: INSERT or user-configured key)
     const auto& scfg = ConfigManager::Get().Config();
