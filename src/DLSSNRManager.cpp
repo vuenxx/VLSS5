@@ -40,8 +40,8 @@ bool DLSSNRManager::Init(ID3D12Device* device, ID3D12CommandQueue* queue, int wi
     if (m_resolutionScale < 0.50f) m_resolutionScale = 0.50f;
     if (m_resolutionScale > 1.00f) m_resolutionScale = 1.00f;
 
-    m_workWidth  = ((int)(m_width * m_resolutionScale + 0.5f) + 1) & ~1;
-    m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f) + 1) & ~1;
+    m_workWidth  = ((int)(m_width * m_resolutionScale + 0.5f) + 15) & ~15;
+    m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f) + 15) & ~15;
     if (m_workWidth < 64) m_workWidth = 64;
     if (m_workHeight < 64) m_workHeight = 64;
 
@@ -494,8 +494,8 @@ bool DLSSNRManager::Resize(int width, int height)
 
     m_width  = width;
     m_height = height;
-    m_workWidth  = ((int)(m_width * m_resolutionScale + 0.5f) + 1) & ~1;
-    m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f) + 1) & ~1;
+    m_workWidth  = ((int)(m_width * m_resolutionScale + 0.5f) + 15) & ~15;
+    m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f) + 15) & ~15;
     if (m_workWidth < 64) m_workWidth = 64;
     if (m_workHeight < 64) m_workHeight = 64;
     m_firstFrame = true;
@@ -808,8 +808,8 @@ void DLSSNRManager::ApplyConfig(const Dlss5Config& cfg)
     if (scaleChanged)
     {
         m_resolutionScale = newScale;
-        m_workWidth  = ((int)(m_width * m_resolutionScale + 0.5f) + 1) & ~1;
-        m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f) + 1) & ~1;
+        m_workWidth  = ((int)(m_width * m_resolutionScale + 0.5f) + 15) & ~15;
+        m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f) + 15) & ~15;
         if (m_workWidth < 64) m_workWidth = 64;
         if (m_workHeight < 64) m_workHeight = 64;
     }

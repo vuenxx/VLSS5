@@ -289,8 +289,8 @@ bool Renderer::Init(ID3D11Device* device, HWND overlayHwnd, int width, int heigh
     float initScale = initialCfg.resolutionScale / 100.0f;
     if (initScale < 0.50f) initScale = 0.50f;
     if (initScale > 1.00f) initScale = 1.00f;
-    int initWorkW = ((int)(width * initScale + 0.5f) + 1) & ~1;
-    int initWorkH = ((int)(height * initScale + 0.5f) + 1) & ~1;
+    int initWorkW = ((int)(width * initScale + 0.5f) + 15) & ~15;
+    int initWorkH = ((int)(height * initScale + 0.5f) + 15) & ~15;
 
     if (m_d3d12Interop->Init(device, ctx.Get(), width, height, initWorkW, initWorkH))
     {

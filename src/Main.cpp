@@ -56,6 +56,8 @@ static const COLORREF COLOR_DARK_TEXT   = RGB(12, 18, 10);     // Dark charcoal 
 static const COLORREF COLOR_NEON_GREEN  = RGB(0, 240, 55);     // Electric neon green
 static const COLORREF COLOR_TEXT_MAIN   = RGB(242, 247, 252);  // Crisp white
 static const COLORREF COLOR_TEXT_MUTED  = RGB(139, 148, 158);  // Slate secondary text
+static const COLORREF COLOR_STOP_ACCENT = RGB(232, 62, 62);    // DURDUR button red
+static const COLORREF COLOR_STOP_DARK   = RGB(190, 44, 44);    // Pressed red
 
 // ---------------------------------------------------------------------------
 // Globals
@@ -414,8 +416,24 @@ static void UnregisterAppHotkey(HWND hwnd)
     UnregisterHotKey(hwnd, ID_GLOBAL_HOTKEY);
 }
 
+// Overlay su anda calisiyor mu? (BASLAT/DURDUR butonu ve cift-baslatma korumasi)
+static bool IsOverlayRunning()
+{
+    return (g_app && g_app->GetState() == AppState::Capturing);
+}
+
+// BASLAT <-> DURDUR yazisi degistiginde butonu yeniden cizdir.
+static void RefreshStartButton()
+{
+    if (g_btnStart) InvalidateRect(g_btnStart, nullptr, TRUE);
+}
+
 static bool StartCaptureWithTarget(HWND hwnd, HWND target)
 {
+    // Ic ice Run() dongusune karsi son savunma hatti.
+    if (IsOverlayRunning())
+        return false;
+
     if (!IsWindow(target))
     {
         SetStatus(L"Seçilen pencere artık açık değil — Yenile'ye basın.");
@@ -425,6 +443,7 @@ static bool StartCaptureWithTarget(HWND hwnd, HWND target)
     // Overlay calisirken ana pencere GIZLENMEZ, sadece simge durumuna kucultulur.
     // SW_HIDE taskbar kaydini da siliyordu ve kullanici programi kapatamiyordu.
     ShowWindow(hwnd, SW_MINIMIZE);
+    RefreshStartButton();
 
     if (!g_app->StartOverlay(hwnd, target, g_vsyncEnabled, g_dlssEnabled, g_fpsEnabled, g_fullscreenStretch))
     {
@@ -451,6 +470,7 @@ static bool StartCaptureWithTarget(HWND hwnd, HWND target)
 
     // When returned, restore main window
     ShowWindow(hwnd, SW_RESTORE);
+    RefreshStartButton();
     SetForegroundWindow(hwnd);
     BringWindowToTop(hwnd);
     PopulateList(hwnd);
@@ -994,16 +1014,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // 3. Custom draw Start Button (Big Lime Action Button: BAŞLAT ➔)
         if (dis->CtlID == IDC_BTN_START)
         {
-            bool isPressed = (dis->itemState & ODS_SELECTED);
-            COLORREF btnBg = isPressed ? COLOR_LIME_DARK : COLOR_LIME_ACCENT;
+            const bool isPressed = (dis->itemState & ODS_SELECTED) != 0;
+            const bool running   = IsOverlayRunning();
+
+            // Overlay calisirken buton DURDUR'a doner (kirmizi).
+            COLORREF btnBg = running
+                ? (isPressed ? COLOR_STOP_DARK : COLOR_STOP_ACCENT)
+                : (isPressed ? COLOR_LIME_DARK : COLOR_LIME_ACCENT);
 
             DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBg, 10);
 
             SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, COLOR_DARK_TEXT);
+            SetTextColor(dis->hDC, running ? COLOR_TEXT_MAIN : COLOR_DARK_TEXT);
             SelectObject(dis->hDC, g_fontTitle);
 
-            DrawTextW(dis->hDC, L"BAŞLAT  ➔", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(dis->hDC, running ? L"DURDUR  ■" : L"BAŞLAT  ➔",
+                      -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             return TRUE;
         }
 
@@ -1300,6 +1326,15 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         // Start overlay
         if (ctlId == IDC_BTN_START)
         {
+            // Zaten calisiyorsa yeniden BASLATMA — ic ice Run() dongusu acilirdi.
+            // Bunun yerine butonu DURDUR olarak kullan.
+            if (IsOverlayRunning())
+            {
+                g_app->RequestStop();
+                SetStatus(L"Overlay durduruluyor...");
+                break;
+            }
+
             int sel = static_cast<int>(SendMessageW(g_listBox, LB_GETCURSEL, 0, 0));
             if (sel == LB_ERR || sel >= static_cast<int>(g_windows.size()))
             {
