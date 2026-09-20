@@ -1,5 +1,7 @@
 #include "D3D12Interop.h"
 #include "MotionVectorManager.h"
+#include "ConfigManager.h"
+#include "GpuSelector.h"
 #include <d3dcompiler.h>
 #include <cstdio>
 #include <algorithm>
@@ -36,23 +38,82 @@ bool D3D12Interop::Init(ID3D11Device* d3d11Dev, ID3D11DeviceContext* d3d11Ctx, i
         return false;
     }
 
-    // Get the underlying DXGI Adapter from D3D11 device
+    // ----------------------------------------------------------------------
+    // Adapter secimi: yakalama/sunum GPU'su (A) D3D11 cihazindan gelir,
+    // DLSS GPU'su (B) konfigurasyondan cozulur. Ikisi farkliysa cross-adapter
+    // kopru modu devreye girer.
+    // ----------------------------------------------------------------------
     ComPtr<IDXGIDevice> dxgiDev;
     if (FAILED(m_d3d11Dev.As(&dxgiDev))) return false;
 
-    ComPtr<IDXGIAdapter> adapter;
-    if (FAILED(dxgiDev->GetAdapter(&adapter))) return false;
+    ComPtr<IDXGIAdapter> captureAdapter;
+    if (FAILED(dxgiDev->GetAdapter(&captureAdapter))) return false;
 
-    DXGI_ADAPTER_DESC desc{};
-    adapter->GetDesc(&desc);
-    DLSS_Log("[D3D12Interop] Creating D3D12 device on adapter: %ls", desc.Description);
+    DXGI_ADAPTER_DESC captureDesc{};
+    captureAdapter->GetDesc(&captureDesc);
+    m_captureGpuName = captureDesc.Description;
 
-    // Create D3D12 Device on the same GPU adapter
-    HRESULT hr = D3D12CreateDevice(adapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_d3d12Device));
+    const std::wstring& dlssGpuPref = ConfigManager::Get().Config().dlssGpu;
+    ComPtr<IDXGIAdapter1> dlssAdapter = GpuSelector::FindAdapter(dlssGpuPref);
+
+    ComPtr<IDXGIAdapter> chosenAdapter = captureAdapter;
+    m_crossAdapter = false;
+
+    if (dlssAdapter)
+    {
+        DXGI_ADAPTER_DESC1 dlssDesc{};
+        dlssAdapter->GetDesc1(&dlssDesc);
+        if (!GpuSelector::SameAdapter(dlssDesc.AdapterLuid, captureDesc.AdapterLuid))
+        {
+            chosenAdapter  = dlssAdapter;
+            m_crossAdapter = true;
+        }
+    }
+
+    DXGI_ADAPTER_DESC chosenDesc{};
+    chosenAdapter->GetDesc(&chosenDesc);
+    m_dlssGpuName = chosenDesc.Description;
+
+    HRESULT hr = D3D12CreateDevice(chosenAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_d3d12Device));
+    if (FAILED(hr) && m_crossAdapter)
+    {
+        // Secilen DLSS karti D3D12 destekleyemiyor: tek-adapter moduna geri don.
+        DLSS_Log("[D3D12Interop] UYARI: DLSS GPU'su '%ls' uzerinde D3D12CreateDevice basarisiz (0x%08X); "
+                 "yakalama GPU'suna geri donuluyor.", m_dlssGpuName.c_str(), hr);
+        m_crossAdapter = false;
+        chosenAdapter  = captureAdapter;
+        m_dlssGpuName  = m_captureGpuName;
+        hr = D3D12CreateDevice(chosenAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_d3d12Device));
+    }
     if (FAILED(hr))
     {
         DLSS_Log("[D3D12Interop] ERROR: D3D12CreateDevice failed: 0x%08X", hr);
         return false;
+    }
+
+    if (m_crossAdapter)
+    {
+        DLSS_Log("[D3D12Interop] CROSS-ADAPTER mod: yakalama/sunum '%ls', DLSS '%ls'.",
+                 m_captureGpuName.c_str(), m_dlssGpuName.c_str());
+        if (!InitCrossAdapterDevice(captureAdapter.Get()))
+        {
+            // Kopru kurulamadi; tek-adapter moda dus ve D3D12 cihazini A'da yeniden yarat.
+            DLSS_Log("[D3D12Interop] UYARI: Cross-adapter kopru kurulamadi; tek-adapter moda geri donuluyor.");
+            CleanupCrossAdapter();
+            m_crossAdapter = false;
+            m_d3d12Device.Reset();
+            m_dlssGpuName = m_captureGpuName;
+            hr = D3D12CreateDevice(captureAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_d3d12Device));
+            if (FAILED(hr))
+            {
+                DLSS_Log("[D3D12Interop] ERROR: D3D12CreateDevice (geri donus) failed: 0x%08X", hr);
+                return false;
+            }
+        }
+    }
+    else
+    {
+        DLSS_Log("[D3D12Interop] Tek-adapter mod: D3D12 cihazi '%ls' uzerinde.", m_dlssGpuName.c_str());
     }
 
     // Create Direct Command Queue with elevated GPU scheduling priority (GLOBAL_REALTIME or HIGH)
@@ -90,6 +151,47 @@ bool D3D12Interop::Init(ID3D11Device* d3d11Dev, ID3D11DeviceContext* d3d11Ctx, i
         return false;
     }
 
+    // --- GPU zaman damgasi altyapisi (teshis) ---
+    if (FAILED(m_cmdQueue->GetTimestampFrequency(&m_tsFrequency)))
+        m_tsFrequency = 0;
+
+    if (m_tsFrequency)
+    {
+        D3D12_QUERY_HEAP_DESC qhd = {};
+        qhd.Type  = D3D12_QUERY_HEAP_TYPE_TIMESTAMP;
+        qhd.Count = kCmdAllocCount * 2;
+        if (FAILED(m_d3d12Device->CreateQueryHeap(&qhd, IID_PPV_ARGS(&m_tsHeap))))
+        {
+            m_tsHeap.Reset();
+        }
+        else
+        {
+            D3D12_HEAP_PROPERTIES rbProps = {};
+            rbProps.Type = D3D12_HEAP_TYPE_READBACK;
+
+            D3D12_RESOURCE_DESC rbDesc = {};
+            rbDesc.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+            rbDesc.Width            = kCmdAllocCount * 2 * sizeof(UINT64);
+            rbDesc.Height           = 1;
+            rbDesc.DepthOrArraySize = 1;
+            rbDesc.MipLevels        = 1;
+            rbDesc.SampleDesc.Count = 1;
+            rbDesc.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+
+            if (FAILED(m_d3d12Device->CreateCommittedResource(
+                    &rbProps, D3D12_HEAP_FLAG_NONE, &rbDesc,
+                    D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                    IID_PPV_ARGS(&m_tsReadback))))
+            {
+                m_tsHeap.Reset();
+                m_tsReadback.Reset();
+            }
+        }
+    }
+
+    if (!m_tsHeap)
+        DLSS_Log("[D3D12Interop] NOT: GPU zaman damgasi sorgulari kullanilamiyor, gpu suresi olculemeyecek.");
+
     DLSS_Log("[D3D12Interop] Command queue created with %s priority.",
              (qDesc.Priority == D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME) ? "GLOBAL_REALTIME" : "HIGH");
 
@@ -118,6 +220,21 @@ bool D3D12Interop::Init(ID3D11Device* d3d11Dev, ID3D11DeviceContext* d3d11Ctx, i
     // Create Fences
     if (!CreateFences()) return false;
 
+    // Komut ayirici rotasyonu ve WaitForGpu icin B cihazina ait yerel fence.
+    // Cross-adapter modda m_fenceOutD12 A cihazinda yasar; bu is icin kullanilamaz.
+    hr = m_d3d12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_gpuFence));
+    if (FAILED(hr))
+    {
+        DLSS_Log("[D3D12Interop] ERROR: CreateFence (m_gpuFence) failed: 0x%08X", hr);
+        return false;
+    }
+
+    if (m_crossAdapter && !CreateCrossAdapterFences())
+    {
+        DLSS_Log("[D3D12Interop] ERROR: Cross-adapter fence'leri olusturulamadi.");
+        return false;
+    }
+
     // Create fence completion event
     m_hFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
 
@@ -136,12 +253,18 @@ bool D3D12Interop::Init(ID3D11Device* d3d11Dev, ID3D11DeviceContext* d3d11Ctx, i
 
 bool D3D12Interop::CreateFences()
 {
+    // Bu fence cifti D3D11 ile paylasilir, dolayisiyla D3D11'in uzerinde
+    // oldugu adapter'in D3D12 cihazinda yaratilmak zorundadir. Cross-adapter
+    // modda bu A cihazidir (m_srcDevice), aksi halde tek cihaz olan B'dir.
+    ID3D12Device* d11SideDevice = m_crossAdapter ? m_srcDevice.Get() : m_d3d12Device.Get();
+    if (!d11SideDevice) return false;
+
     // Input fence: D3D11 signals -> D3D12 waits
-    HRESULT hr = m_d3d12Device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&m_fenceInD12));
+    HRESULT hr = d11SideDevice->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&m_fenceInD12));
     if (FAILED(hr)) return false;
 
     HANDLE hInFence = nullptr;
-    hr = m_d3d12Device->CreateSharedHandle(m_fenceInD12.Get(), nullptr, GENERIC_ALL, nullptr, &hInFence);
+    hr = d11SideDevice->CreateSharedHandle(m_fenceInD12.Get(), nullptr, GENERIC_ALL, nullptr, &hInFence);
     if (FAILED(hr)) return false;
 
     hr = m_d3d11Dev5->OpenSharedFence(hInFence, IID_PPV_ARGS(&m_fenceInD11));
@@ -149,11 +272,11 @@ bool D3D12Interop::CreateFences()
     if (FAILED(hr)) return false;
 
     // Output fence: D3D12 signals -> D3D11 waits
-    hr = m_d3d12Device->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&m_fenceOutD12));
+    hr = d11SideDevice->CreateFence(0, D3D12_FENCE_FLAG_SHARED, IID_PPV_ARGS(&m_fenceOutD12));
     if (FAILED(hr)) return false;
 
     HANDLE hOutFence = nullptr;
-    hr = m_d3d12Device->CreateSharedHandle(m_fenceOutD12.Get(), nullptr, GENERIC_ALL, nullptr, &hOutFence);
+    hr = d11SideDevice->CreateSharedHandle(m_fenceOutD12.Get(), nullptr, GENERIC_ALL, nullptr, &hOutFence);
     if (FAILED(hr)) return false;
 
     hr = m_d3d11Dev5->OpenSharedFence(hOutFence, IID_PPV_ARGS(&m_fenceOutD11));
@@ -161,6 +284,455 @@ bool D3D12Interop::CreateFences()
     if (FAILED(hr)) return false;
 
     return true;
+}
+
+// ===========================================================================
+// Cross-adapter kopru
+//
+// A = yakalama/sunum GPU'su (D3D11 cihazi burada, monitoru bu kart suruyor)
+// B = DLSS GPU'su            (m_d3d12Device, sinir agi burada kosuyor)
+//
+// Kare akisi:
+//   1. A/D3D11 : yakalanan kareyi olcekler + optik akisi hesaplar
+//   2. A/D3D12 : giris ve hareket vektorlerini cross-adapter tampona kopyalar
+//   3. B/D3D12 : tampondan yerel dokulara alir, DLSS'i calistirir,
+//                ciktiyi cikis tamponuna kopyalar
+//   4. A/D3D12 : cikis tamponunu D3D11 sunum dokusuna kopyalar
+//   5. A/D3D11 : sunar
+//
+// Tum senkronizasyon GPU tarafinda fence'lerle yapilir; CPU hicbir adimda
+// blok olmaz (yalnizca ayirici rotasyonunda, GPU geride kalmissa).
+// ===========================================================================
+
+bool D3D12Interop::InitCrossAdapterDevice(IDXGIAdapter* captureAdapter)
+{
+    if (!captureAdapter) return false;
+
+    HRESULT hr = D3D12CreateDevice(captureAdapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_srcDevice));
+    if (FAILED(hr))
+    {
+        DLSS_Log("[D3D12Interop] ERROR: Yakalama GPU'sunda D3D12CreateDevice basarisiz: 0x%08X", hr);
+        return false;
+    }
+
+    // Kopya kuyrugu yerine DIRECT kuyruk: paylasimli D3D11 dokularindan
+    // kopyalarken bazi suruculer COPY kuyrugunda kisitli davraniyor ve
+    // yalnizca iki kopya komutu icin ayri bir kuyruk tipinin getirisi yok.
+    D3D12_COMMAND_QUEUE_DESC qd = {};
+    qd.Type     = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    qd.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+    hr = m_srcDevice->CreateCommandQueue(&qd, IID_PPV_ARGS(&m_srcQueue));
+    if (FAILED(hr))
+    {
+        qd.Priority = D3D12_COMMAND_QUEUE_PRIORITY_NORMAL;
+        hr = m_srcDevice->CreateCommandQueue(&qd, IID_PPV_ARGS(&m_srcQueue));
+    }
+    if (FAILED(hr))
+    {
+        DLSS_Log("[D3D12Interop] ERROR: Yakalama GPU'su komut kuyrugu olusturulamadi: 0x%08X", hr);
+        return false;
+    }
+
+    for (UINT i = 0; i < kCmdAllocCount; ++i)
+    {
+        if (FAILED(m_srcDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_srcUpAlloc[i]))) ||
+            FAILED(m_srcDevice->CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT, IID_PPV_ARGS(&m_srcDnAlloc[i]))))
+        {
+            DLSS_Log("[D3D12Interop] ERROR: Yakalama GPU'su komut ayiricilari olusturulamadi.");
+            return false;
+        }
+        m_srcUpFenceVal[i] = 0;
+        m_srcDnFenceVal[i] = 0;
+    }
+    m_srcUpIndex = 0;
+    m_srcDnIndex = 0;
+
+    if (FAILED(m_srcDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_srcUpAlloc[0].Get(), nullptr, IID_PPV_ARGS(&m_srcUpList))) ||
+        FAILED(m_srcDevice->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, m_srcDnAlloc[0].Get(), nullptr, IID_PPV_ARGS(&m_srcDnList))))
+    {
+        DLSS_Log("[D3D12Interop] ERROR: Yakalama GPU'su komut listeleri olusturulamadi.");
+        return false;
+    }
+    m_srcUpList->Close();
+    m_srcDnList->Close();
+
+    hr = m_srcDevice->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_srcFence));
+    if (FAILED(hr))
+    {
+        DLSS_Log("[D3D12Interop] ERROR: Yakalama GPU'su fence'i olusturulamadi: 0x%08X", hr);
+        return false;
+    }
+    m_srcFenceValue  = 0;
+    m_hSrcFenceEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+
+    return true;
+}
+
+bool D3D12Interop::CreateCrossAdapterFences()
+{
+    if (!m_srcDevice || !m_d3d12Device) return false;
+
+    // A -> B: A'da yaratilir, B'de acilir.
+    HRESULT hr = m_srcDevice->CreateFence(
+        0, D3D12_FENCE_FLAG_SHARED | D3D12_FENCE_FLAG_SHARED_CROSS_ADAPTER, IID_PPV_ARGS(&m_xaFenceInA));
+    if (FAILED(hr))
+    {
+        DLSS_Log("[D3D12Interop] ERROR: xaFenceIn olusturulamadi: 0x%08X", hr);
+        return false;
+    }
+
+    HANDLE hIn = nullptr;
+    hr = m_srcDevice->CreateSharedHandle(m_xaFenceInA.Get(), nullptr, GENERIC_ALL, nullptr, &hIn);
+    if (FAILED(hr)) return false;
+    hr = m_d3d12Device->OpenSharedHandle(hIn, IID_PPV_ARGS(&m_xaFenceInB));
+    CloseHandle(hIn);
+    if (FAILED(hr))
+    {
+        DLSS_Log("[D3D12Interop] ERROR: xaFenceIn B tarafinda acilamadi: 0x%08X", hr);
+        return false;
+    }
+
+    // B -> A: B'de yaratilir, A'da acilir.
+    hr = m_d3d12Device->CreateFence(
+        0, D3D12_FENCE_FLAG_SHARED | D3D12_FENCE_FLAG_SHARED_CROSS_ADAPTER, IID_PPV_ARGS(&m_xaFenceOutB));
+    if (FAILED(hr))
+    {
+        DLSS_Log("[D3D12Interop] ERROR: xaFenceOut olusturulamadi: 0x%08X", hr);
+        return false;
+    }
+
+    HANDLE hOut = nullptr;
+    hr = m_d3d12Device->CreateSharedHandle(m_xaFenceOutB.Get(), nullptr, GENERIC_ALL, nullptr, &hOut);
+    if (FAILED(hr)) return false;
+    hr = m_srcDevice->OpenSharedHandle(hOut, IID_PPV_ARGS(&m_xaFenceOutA));
+    CloseHandle(hOut);
+    if (FAILED(hr))
+    {
+        DLSS_Log("[D3D12Interop] ERROR: xaFenceOut A tarafinda acilamadi: 0x%08X", hr);
+        return false;
+    }
+
+    return true;
+}
+
+bool D3D12Interop::OpenOnSrcDevice(ID3D11Texture2D* tex, ComPtr<ID3D12Resource>& out, const char* label)
+{
+    out.Reset();
+    if (!tex || !m_srcDevice) return false;
+
+    ComPtr<IDXGIResource1> res;
+    if (FAILED(tex->QueryInterface(IID_PPV_ARGS(&res)))) return false;
+
+    HANDLE h = nullptr;
+    HRESULT hr = res->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &h);
+    if (FAILED(hr) || !h) return false;
+
+    hr = m_srcDevice->OpenSharedHandle(h, IID_PPV_ARGS(&out));
+    CloseHandle(h);
+    if (FAILED(hr) || !out)
+    {
+        DLSS_Log("[D3D12Interop] ERROR: '%s' yakalama GPU'sunun D3D12 cihazinda acilamadi: 0x%08X", label, hr);
+        return false;
+    }
+    return true;
+}
+
+bool D3D12Interop::CreateCrossAdapterBridge(int workWidth, int workHeight)
+{
+    m_xaIn.Reset();
+    m_xaMv.Reset();
+    m_xaOut.Reset();
+    m_bridgeBytesPerFrame = 0;
+
+    if (!m_srcDevice || !m_d3d12Device) return false;
+
+    // Tek bir cross-adapter tampon cifti kurar.
+    //   creator : tamponu URETEN cihaz (heap onun belleginde yasar, yazma yerel)
+    //   opener  : tamponu TUKETEN cihaz (okuma PCIe uzerinden)
+    auto makeBuffer = [&](XABuffer& xb, DXGI_FORMAT fmt, int w, int h,
+                          ID3D12Device* creator, ID3D12Device* opener,
+                          bool creatorIsA, const char* label) -> bool
+    {
+        D3D12_RESOURCE_DESC texDesc = {};
+        texDesc.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+        texDesc.Width            = static_cast<UINT64>(w);
+        texDesc.Height           = static_cast<UINT>(h);
+        texDesc.DepthOrArraySize = 1;
+        texDesc.MipLevels        = 1;
+        texDesc.Format           = fmt;
+        texDesc.SampleDesc.Count = 1;
+        texDesc.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+
+        UINT64 totalBytes = 0;
+        creator->GetCopyableFootprints(&texDesc, 0, 1, 0, &xb.fp, nullptr, nullptr, &totalBytes);
+
+        // Ayak izi iki cihazda ayni cikmali; satir hizalamasi (256B) spesifikasyon
+        // sabiti oldugu icin pratikte ayni, yine de dogrulayip vazgeciyoruz.
+        D3D12_PLACED_SUBRESOURCE_FOOTPRINT fpOther = {};
+        UINT64 otherBytes = 0;
+        opener->GetCopyableFootprints(&texDesc, 0, 1, 0, &fpOther, nullptr, nullptr, &otherBytes);
+        if (fpOther.Footprint.RowPitch != xb.fp.Footprint.RowPitch || otherBytes != totalBytes)
+        {
+            DLSS_Log("[D3D12Interop] ERROR: '%s' icin iki GPU farkli ayak izi bildiriyor "
+                     "(pitch %u vs %u); cross-adapter kopru kurulamaz.",
+                     label, xb.fp.Footprint.RowPitch, fpOther.Footprint.RowPitch);
+            return false;
+        }
+
+        const UINT64 kAlign = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
+        xb.sizeBytes = (totalBytes + kAlign - 1) & ~(kAlign - 1);
+
+        D3D12_HEAP_DESC hd = {};
+        hd.SizeInBytes     = xb.sizeBytes;
+        hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
+        hd.Alignment       = D3D12_CROSS_ADAPTER_RESOURCE_PLACEMENT_ALIGNMENT;
+        hd.Flags           = D3D12_HEAP_FLAG_SHARED
+                           | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER
+                           | D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+
+        ComPtr<ID3D12Heap> heapCreator, heapOpener;
+        HRESULT hr = creator->CreateHeap(&hd, IID_PPV_ARGS(&heapCreator));
+        if (FAILED(hr))
+        {
+            DLSS_Log("[D3D12Interop] ERROR: '%s' cross-adapter heap'i olusturulamadi: 0x%08X "
+                     "(surucu paylasimli cross-adapter heap desteklemiyor olabilir)", label, hr);
+            return false;
+        }
+
+        HANDLE hHeap = nullptr;
+        hr = creator->CreateSharedHandle(heapCreator.Get(), nullptr, GENERIC_ALL, nullptr, &hHeap);
+        if (FAILED(hr) || !hHeap)
+        {
+            DLSS_Log("[D3D12Interop] ERROR: '%s' heap paylasim tanitici alinamadi: 0x%08X", label, hr);
+            return false;
+        }
+        hr = opener->OpenSharedHandle(hHeap, IID_PPV_ARGS(&heapOpener));
+        CloseHandle(hHeap);
+        if (FAILED(hr) || !heapOpener)
+        {
+            DLSS_Log("[D3D12Interop] ERROR: '%s' heap karsi GPU'da acilamadi: 0x%08X", label, hr);
+            return false;
+        }
+
+        D3D12_RESOURCE_DESC bd = {};
+        bd.Dimension        = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width            = xb.sizeBytes;
+        bd.Height           = 1;
+        bd.DepthOrArraySize = 1;
+        bd.MipLevels        = 1;
+        bd.Format           = DXGI_FORMAT_UNKNOWN;
+        bd.SampleDesc.Count = 1;
+        bd.Layout           = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        bd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_CROSS_ADAPTER;
+
+        // Iki cihaz kaynak durumunu AYRI izler; uretici tarafta hep COPY_DEST,
+        // tuketici tarafta hep COPY_SOURCE kalir, gecis gerekmez.
+        ComPtr<ID3D12Resource> bufCreator, bufOpener;
+        hr = creator->CreatePlacedResource(heapCreator.Get(), 0, &bd,
+                                           D3D12_RESOURCE_STATE_COPY_DEST, nullptr, IID_PPV_ARGS(&bufCreator));
+        if (FAILED(hr))
+        {
+            DLSS_Log("[D3D12Interop] ERROR: '%s' uretici tamponu olusturulamadi: 0x%08X", label, hr);
+            return false;
+        }
+        hr = opener->CreatePlacedResource(heapOpener.Get(), 0, &bd,
+                                          D3D12_RESOURCE_STATE_COPY_SOURCE, nullptr, IID_PPV_ARGS(&bufOpener));
+        if (FAILED(hr))
+        {
+            DLSS_Log("[D3D12Interop] ERROR: '%s' tuketici tamponu olusturulamadi: 0x%08X", label, hr);
+            return false;
+        }
+
+        if (creatorIsA)
+        {
+            xb.heapA = heapCreator; xb.bufA = bufCreator;
+            xb.heapB = heapOpener;  xb.bufB = bufOpener;
+        }
+        else
+        {
+            xb.heapB = heapCreator; xb.bufB = bufCreator;
+            xb.heapA = heapOpener;  xb.bufA = bufOpener;
+        }
+
+        m_bridgeBytesPerFrame += static_cast<size_t>(totalBytes);
+        return true;
+    };
+
+    ID3D12Device* A = m_srcDevice.Get();
+    ID3D12Device* B = m_d3d12Device.Get();
+
+    // Giris ve hareket vektorleri A'da uretilir, B'de tuketilir.
+    if (!makeBuffer(m_xaIn,  DXGI_FORMAT_B8G8R8A8_UNORM, workWidth, workHeight, A, B, true,  "giris"))   return false;
+    if (!makeBuffer(m_xaMv,  DXGI_FORMAT_R16G16_FLOAT,   workWidth, workHeight, A, B, true,  "hareket")) return false;
+    // Cikis B'de uretilir, A'da tuketilir.
+    if (!makeBuffer(m_xaOut, DXGI_FORMAT_B8G8R8A8_UNORM, workWidth, workHeight, B, A, false, "cikis"))   return false;
+
+    DLSS_Log("[D3D12Interop] Cross-adapter kopru hazir: %dx%d, kare basina %.2f MB PCIe trafigi "
+             "(giris + hareket + cikis).",
+             workWidth, workHeight, static_cast<double>(m_bridgeBytesPerFrame) / (1024.0 * 1024.0));
+    return true;
+}
+
+bool D3D12Interop::SubmitUploadToBridge()
+{
+    if (!m_srcQueue || !m_srcUpList || !m_srcInD12 || !m_xaIn.bufA) return false;
+
+    // 1. A kuyrugu, D3D11'in olcekleme + optik akis isini bitirmesini bekler.
+    m_srcQueue->Wait(m_fenceInD12.Get(), m_frameIndex);
+
+    // 2. Ayirici rotasyonu: bu slotun onceki gonderimi GPU'da bitmemisse bekle.
+    m_srcUpIndex = (m_srcUpIndex + 1) % kCmdAllocCount;
+    const UINT64 needed = m_srcUpFenceVal[m_srcUpIndex];
+    if (needed > 0 && m_srcFence->GetCompletedValue() < needed && m_hSrcFenceEvent)
+    {
+        m_srcFence->SetEventOnCompletion(needed, m_hSrcFenceEvent);
+        if (WaitForSingleObject(m_hSrcFenceEvent, 1000) == WAIT_TIMEOUT)
+            DLSS_Log("[D3D12Interop] UYARI: Yakalama GPU'su yukleme fence beklemesi zaman asimina ugradi (%llu).", needed);
+    }
+
+    m_srcUpAlloc[m_srcUpIndex]->Reset();
+    m_srcUpList->Reset(m_srcUpAlloc[m_srcUpIndex].Get(), nullptr);
+
+    // 3. D3D11 dokularindan cross-adapter tamponlara kopyala.
+    // Paylasimli D3D11 kaynaklari D3D12'de COMMON'da durur; kopya kaynagi olarak
+    // ortuk durum yukseltmesi (COMMON -> COPY_SOURCE) gecerlidir, bariyere gerek yok.
+    {
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource       = m_xaIn.bufA.Get();
+        dst.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = m_xaIn.fp;
+
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource        = m_srcInD12.Get();
+        src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = 0;
+
+        m_srcUpList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+
+    if (m_srcMvD12 && m_xaMv.bufA)
+    {
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource       = m_xaMv.bufA.Get();
+        dst.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = m_xaMv.fp;
+
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource        = m_srcMvD12.Get();
+        src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = 0;
+
+        m_srcUpList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+
+    m_srcUpList->Close();
+    ID3D12CommandList* lists[] = { m_srcUpList.Get() };
+    m_srcQueue->ExecuteCommandLists(1, lists);
+
+    // 4. B'yi uyandiracak cross-adapter fence + yerel ayirici izleme fence'i.
+    m_srcQueue->Signal(m_xaFenceInA.Get(), m_frameIndex);
+    m_srcUpFenceVal[m_srcUpIndex] = ++m_srcFenceValue;
+    m_srcQueue->Signal(m_srcFence.Get(), m_srcFenceValue);
+
+    return true;
+}
+
+bool D3D12Interop::SubmitDownloadFromBridge()
+{
+    if (!m_srcQueue || !m_srcDnList || !m_srcOutD12 || !m_xaOut.bufA) return false;
+
+    // 1. A kuyrugu, B'nin DLSS ciktisini cikis tamponuna yazmasini bekler.
+    m_srcQueue->Wait(m_xaFenceOutA.Get(), m_frameIndex);
+
+    // 2. Ayirici rotasyonu.
+    m_srcDnIndex = (m_srcDnIndex + 1) % kCmdAllocCount;
+    const UINT64 needed = m_srcDnFenceVal[m_srcDnIndex];
+    if (needed > 0 && m_srcFence->GetCompletedValue() < needed && m_hSrcFenceEvent)
+    {
+        m_srcFence->SetEventOnCompletion(needed, m_hSrcFenceEvent);
+        if (WaitForSingleObject(m_hSrcFenceEvent, 1000) == WAIT_TIMEOUT)
+            DLSS_Log("[D3D12Interop] UYARI: Yakalama GPU'su indirme fence beklemesi zaman asimina ugradi (%llu).", needed);
+    }
+
+    m_srcDnAlloc[m_srcDnIndex]->Reset();
+    m_srcDnList->Reset(m_srcDnAlloc[m_srcDnIndex].Get(), nullptr);
+
+    {
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource        = m_srcOutD12.Get();
+        dst.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        dst.SubresourceIndex = 0;
+
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource       = m_xaOut.bufA.Get();
+        src.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        src.PlacedFootprint = m_xaOut.fp;
+
+        m_srcDnList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+    }
+
+    m_srcDnList->Close();
+    ID3D12CommandList* lists[] = { m_srcDnList.Get() };
+    m_srcQueue->ExecuteCommandLists(1, lists);
+
+    // 3. D3D11'in bekledigi cikis fence'i: artik sunum dokusu hazir.
+    m_srcQueue->Signal(m_fenceOutD12.Get(), m_frameIndex);
+    m_srcDnFenceVal[m_srcDnIndex] = ++m_srcFenceValue;
+    m_srcQueue->Signal(m_srcFence.Get(), m_srcFenceValue);
+
+    return true;
+}
+
+void D3D12Interop::CleanupCrossAdapter()
+{
+    // A kuyrugundaki isler bitmeden kaynaklari birakma.
+    if (m_srcQueue && m_srcFence && m_hSrcFenceEvent)
+    {
+        const UINT64 v = ++m_srcFenceValue;
+        m_srcQueue->Signal(m_srcFence.Get(), v);
+        if (m_srcFence->GetCompletedValue() < v)
+        {
+            m_srcFence->SetEventOnCompletion(v, m_hSrcFenceEvent);
+            WaitForSingleObject(m_hSrcFenceEvent, 2000);
+        }
+    }
+
+    m_xaOut.Reset();
+    m_xaMv.Reset();
+    m_xaIn.Reset();
+
+    m_xaFenceOutA.Reset();
+    m_xaFenceOutB.Reset();
+    m_xaFenceInB.Reset();
+    m_xaFenceInA.Reset();
+
+    m_srcOutD12.Reset();
+    m_srcMvD12.Reset();
+    m_srcInD12.Reset();
+
+    m_srcDnList.Reset();
+    m_srcUpList.Reset();
+    for (UINT i = 0; i < kCmdAllocCount; ++i)
+    {
+        m_srcDnAlloc[i].Reset();
+        m_srcUpAlloc[i].Reset();
+        m_srcDnFenceVal[i] = 0;
+        m_srcUpFenceVal[i] = 0;
+    }
+    m_srcUpIndex = 0;
+    m_srcDnIndex = 0;
+
+    if (m_hSrcFenceEvent)
+    {
+        CloseHandle(m_hSrcFenceEvent);
+        m_hSrcFenceEvent = nullptr;
+    }
+    m_srcFence.Reset();
+    m_srcFenceValue = 0;
+    m_srcQueue.Reset();
+    m_srcDevice.Reset();
+
+    m_bridgeBytesPerFrame = 0;
 }
 
 bool D3D12Interop::CreateDownscaleResources()
@@ -217,6 +789,41 @@ bool D3D12Interop::CreateDownscaleResources()
     return SUCCEEDED(hr);
 }
 
+// Cross-adapter modda DLSS GPU'sunda (B) yasayan yerel doku. Cross-adapter
+// tampondan buraya kopyalanir; DLSS her zaman yerel, optimal yerlesimli bir
+// kaynak okur/yazar.
+static bool CreateLocalTexture(ID3D12Device* dev, DXGI_FORMAT fmt, int w, int h,
+                               bool allowUAV, ComPtr<ID3D12Resource>& out, const char* label)
+{
+    out.Reset();
+    if (!dev) return false;
+
+    D3D12_HEAP_PROPERTIES hp = {};
+    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC rd = {};
+    rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width            = static_cast<UINT64>(w);
+    rd.Height           = static_cast<UINT>(h);
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels        = 1;
+    rd.Format           = fmt;
+    rd.SampleDesc.Count = 1;
+    rd.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    rd.Flags            = allowUAV ? D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS
+                                   : D3D12_RESOURCE_FLAG_NONE;
+
+    HRESULT hr = dev->CreateCommittedResource(
+        &hp, D3D12_HEAP_FLAG_NONE, &rd,
+        D3D12_RESOURCE_STATE_COMMON, nullptr, IID_PPV_ARGS(&out));
+    if (FAILED(hr))
+    {
+        DLSS_Log("[D3D12Interop] ERROR: DLSS GPU'sunda '%s' yerel dokusu olusturulamadi: 0x%08X", label, hr);
+        return false;
+    }
+    return true;
+}
+
 bool D3D12Interop::CreateSharedTextures(int workWidth, int workHeight)
 {
     m_sharedInD11.Reset();
@@ -226,6 +833,9 @@ bool D3D12Interop::CreateSharedTextures(int workWidth, int workHeight)
     m_sharedOutSRV.Reset();
     m_sharedOutD12.Reset();
     m_nativeOutD12.Reset();
+    m_srcInD12.Reset();
+    m_srcMvD12.Reset();
+    m_srcOutD12.Reset();
 
     m_workWidth  = workWidth;
     m_workHeight = workHeight;
@@ -263,20 +873,31 @@ bool D3D12Interop::CreateSharedTextures(int workWidth, int workHeight)
         return false;
     }
 
-    ComPtr<IDXGIResource1> resIn;
-    hr = m_sharedInD11.As(&resIn);
-    if (FAILED(hr)) return false;
-
-    HANDLE hSharedIn = nullptr;
-    hr = resIn->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &hSharedIn);
-    if (FAILED(hr) || !hSharedIn) return false;
-
-    hr = m_d3d12Device->OpenSharedHandle(hSharedIn, IID_PPV_ARGS(&m_sharedInD12));
-    CloseHandle(hSharedIn);
-    if (FAILED(hr) || !m_sharedInD12)
+    if (m_crossAdapter)
     {
-        DLSS_Log("[D3D12Interop] ERROR: Failed to open m_sharedInD12: 0x%08X", hr);
-        return false;
+        // A tarafi: D3D11 dokusunu A'nin D3D12 cihazinda ac (kopya kaynagi).
+        if (!OpenOnSrcDevice(m_sharedInD11.Get(), m_srcInD12, "giris")) return false;
+        // B tarafi: DLSS'in okuyacagi yerel doku.
+        if (!CreateLocalTexture(m_d3d12Device.Get(), DXGI_FORMAT_B8G8R8A8_UNORM,
+                                workWidth, workHeight, false, m_sharedInD12, "giris")) return false;
+    }
+    else
+    {
+        ComPtr<IDXGIResource1> resIn;
+        hr = m_sharedInD11.As(&resIn);
+        if (FAILED(hr)) return false;
+
+        HANDLE hSharedIn = nullptr;
+        hr = resIn->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &hSharedIn);
+        if (FAILED(hr) || !hSharedIn) return false;
+
+        hr = m_d3d12Device->OpenSharedHandle(hSharedIn, IID_PPV_ARGS(&m_sharedInD12));
+        CloseHandle(hSharedIn);
+        if (FAILED(hr) || !m_sharedInD12)
+        {
+            DLSS_Log("[D3D12Interop] ERROR: Failed to open m_sharedInD12: 0x%08X", hr);
+            return false;
+        }
     }
 
     // 2. Shared Output Texture (Direct Zero-Copy UAV or fallback)
@@ -289,16 +910,19 @@ bool D3D12Interop::CreateSharedTextures(int workWidth, int workHeight)
     tdOut.Format    = DXGI_FORMAT_B8G8R8A8_UNORM;
     tdOut.SampleDesc.Count = 1;
     tdOut.Usage     = D3D11_USAGE_DEFAULT;
-    // Attempt Direct Zero-Copy: Include D3D11_BIND_UNORDERED_ACCESS so D3D12 can directly evaluate Feature 18 into it
-    tdOut.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS;
+    // Cross-adapter modda DLSS zaten B'deki yerel dokuya yazar ve sonuc kopru
+    // uzerinden gelir; zero-copy UAV paylasimi anlamsiz, denemiyoruz bile.
+    tdOut.BindFlags = m_crossAdapter
+        ? (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET)
+        : (D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET | D3D11_BIND_UNORDERED_ACCESS);
     tdOut.MiscFlags = D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED;
 
     hr = m_d3d11Dev->CreateTexture2D(&tdOut, nullptr, &m_sharedOutD11);
-    if (SUCCEEDED(hr))
+    if (SUCCEEDED(hr) && !m_crossAdapter)
     {
         m_useDirectSharedOut = true;
     }
-    else
+    else if (FAILED(hr))
     {
         // Fallback for drivers/adapters that don't support UAV on shared B8G8R8A8
         DLSS_Log("[D3D12Interop] Note: Direct shared UAV output texture unsupported (0x%08X), using native copy fallback.", hr);
@@ -318,20 +942,28 @@ bool D3D12Interop::CreateSharedTextures(int workWidth, int workHeight)
         return false;
     }
 
-    ComPtr<IDXGIResource1> resOut;
-    hr = m_sharedOutD11.As(&resOut);
-    if (FAILED(hr)) return false;
-
-    HANDLE hSharedOut = nullptr;
-    hr = resOut->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &hSharedOut);
-    if (FAILED(hr) || !hSharedOut) return false;
-
-    hr = m_d3d12Device->OpenSharedHandle(hSharedOut, IID_PPV_ARGS(&m_sharedOutD12));
-    CloseHandle(hSharedOut);
-    if (FAILED(hr) || !m_sharedOutD12)
+    if (m_crossAdapter)
     {
-        DLSS_Log("[D3D12Interop] ERROR: Failed to open m_sharedOutD12: 0x%08X", hr);
-        return false;
+        // A tarafi: sunum dokusunu A'nin D3D12 cihazinda ac (kopya hedefi).
+        if (!OpenOnSrcDevice(m_sharedOutD11.Get(), m_srcOutD12, "cikis")) return false;
+    }
+    else
+    {
+        ComPtr<IDXGIResource1> resOut;
+        hr = m_sharedOutD11.As(&resOut);
+        if (FAILED(hr)) return false;
+
+        HANDLE hSharedOut = nullptr;
+        hr = resOut->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &hSharedOut);
+        if (FAILED(hr) || !hSharedOut) return false;
+
+        hr = m_d3d12Device->OpenSharedHandle(hSharedOut, IID_PPV_ARGS(&m_sharedOutD12));
+        CloseHandle(hSharedOut);
+        if (FAILED(hr) || !m_sharedOutD12)
+        {
+            DLSS_Log("[D3D12Interop] ERROR: Failed to open m_sharedOutD12: 0x%08X", hr);
+            return false;
+        }
     }
 
     if (m_useDirectSharedOut)
@@ -399,27 +1031,53 @@ bool D3D12Interop::CreateSharedTextures(int workWidth, int workHeight)
         return false;
     }
 
-    ComPtr<IDXGIResource1> resMv;
-    hr = m_sharedMvD11.As(&resMv);
-    if (FAILED(hr)) return false;
-
-    HANDLE hSharedMv = nullptr;
-    hr = resMv->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &hSharedMv);
-    if (FAILED(hr) || !hSharedMv) return false;
-
-    hr = m_d3d12Device->OpenSharedHandle(hSharedMv, IID_PPV_ARGS(&m_sharedMvD12));
-    CloseHandle(hSharedMv);
-    if (FAILED(hr) || !m_sharedMvD12)
+    if (m_crossAdapter)
     {
-        DLSS_Log("[D3D12Interop] ERROR: Failed to open m_sharedMvD12: 0x%08X", hr);
-        return false;
+        if (!OpenOnSrcDevice(m_sharedMvD11.Get(), m_srcMvD12, "hareket")) return false;
+        if (!CreateLocalTexture(m_d3d12Device.Get(), DXGI_FORMAT_R16G16_FLOAT,
+                                workWidth, workHeight, false, m_sharedMvD12, "hareket")) return false;
     }
+    else
+    {
+        ComPtr<IDXGIResource1> resMv;
+        hr = m_sharedMvD11.As(&resMv);
+        if (FAILED(hr)) return false;
+
+        HANDLE hSharedMv = nullptr;
+        hr = resMv->CreateSharedHandle(nullptr, DXGI_SHARED_RESOURCE_READ | DXGI_SHARED_RESOURCE_WRITE, nullptr, &hSharedMv);
+        if (FAILED(hr) || !hSharedMv) return false;
+
+        hr = m_d3d12Device->OpenSharedHandle(hSharedMv, IID_PPV_ARGS(&m_sharedMvD12));
+        CloseHandle(hSharedMv);
+        if (FAILED(hr) || !m_sharedMvD12)
+        {
+            DLSS_Log("[D3D12Interop] ERROR: Failed to open m_sharedMvD12: 0x%08X", hr);
+            return false;
+        }
+    }
+
+    // 5. Cross-adapter tamponlari calisma cozunurluguyle birlikte yeniden kurulur.
+    if (m_crossAdapter && !CreateCrossAdapterBridge(workWidth, workHeight))
+        return false;
 
     return true;
 }
 
 void D3D12Interop::WaitForGpu()
 {
+    // Cross-adapter modda once A kuyrugu bosaltilir: A'nin bekledigi fence'ler
+    // B tarafindan sinyallenir, ters sirada beklersek kilitlenebiliriz.
+    if (m_crossAdapter && m_srcQueue && m_srcFence && m_hSrcFenceEvent)
+    {
+        const UINT64 v = ++m_srcFenceValue;
+        m_srcQueue->Signal(m_srcFence.Get(), v);
+        if (m_srcFence->GetCompletedValue() < v)
+        {
+            m_srcFence->SetEventOnCompletion(v, m_hSrcFenceEvent);
+            WaitForSingleObject(m_hSrcFenceEvent, 2000);
+        }
+    }
+
     if (!m_cmdQueue || !m_d3d12Device) return;
     ComPtr<ID3D12Fence> fence;
     if (SUCCEEDED(m_d3d12Device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
@@ -461,6 +1119,13 @@ void D3D12Interop::Cleanup()
 {
     WaitForGpu();
 
+    CleanupCrossAdapter();
+    m_crossAdapter = false;
+    m_gpuFence.Reset();
+    m_gpuFenceValue = 0;
+
+    m_tsHeap.Reset();
+    m_tsReadback.Reset();
     m_diagStagingIn.Reset();
     m_diagStagingOut.Reset();
 
@@ -609,19 +1274,35 @@ bool D3D12Interop::BeginFrame(
         m_d3d11Ctx->Flush();
     }
 
-    // 4. Queue D3D12 CommandQueue wait for D3D11 fence
-    m_cmdQueue->Wait(m_fenceInD12.Get(), m_frameIndex);
+    // 4. DLSS kuyrugunun girisi beklemesi
+    if (m_crossAdapter)
+    {
+        // A once D3D11'i bekler, sonra giris + hareket vektorlerini kopruye
+        // yukler; B de o yuklemeyi bekler.
+        if (!SubmitUploadToBridge())
+        {
+            DLSS_Log("[D3D12Interop] ERROR: Cross-adapter yukleme gonderilemedi (kare #%llu).", m_frameIndex);
+            return false;
+        }
+        m_cmdQueue->Wait(m_xaFenceInB.Get(), m_frameIndex);
+    }
+    else
+    {
+        m_cmdQueue->Wait(m_fenceInD12.Get(), m_frameIndex);
+    }
 
     // 5. Triple-buffered command allocator rotation with per-allocator fence tracking:
     // Before reusing this command allocator, check if its last submitted fence value has completed on GPU.
     // The CPU is ONLY stalled if the GPU has not finished yet (eliminating per-frame blocking).
     m_allocIndex = (m_allocIndex + 1) % kCmdAllocCount;
+    // Not: cross-adapter modda m_fenceOutD12 A cihazinda yasar ve B'nin is
+    // bitisini temsil etmez; her iki modda da B'nin yerel fence'i kullanilir.
     UINT64 neededFenceVal = m_allocFenceValue[m_allocIndex];
-    if (m_fenceOutD12 && neededFenceVal > 0 && m_fenceOutD12->GetCompletedValue() < neededFenceVal)
+    if (m_gpuFence && neededFenceVal > 0 && m_gpuFence->GetCompletedValue() < neededFenceVal)
     {
         if (m_hFenceEvent)
         {
-            m_fenceOutD12->SetEventOnCompletion(neededFenceVal, m_hFenceEvent);
+            m_gpuFence->SetEventOnCompletion(neededFenceVal, m_hFenceEvent);
             DWORD waitRes = WaitForSingleObject(m_hFenceEvent, 1000); // Only waits if GPU hasn't caught up
             if (waitRes == WAIT_TIMEOUT)
             {
@@ -666,18 +1347,130 @@ bool D3D12Interop::BeginFrame(
             }
         }
     }
+    // Bu slotun onceki karesi GPU'da bitmis durumda (yukaridaki fence bunu garanti
+    // eder), dolayisiyla zaman damgalari okunmaya hazir.
+    if (m_tsHeap && m_tsReadback && neededFenceVal > 0)
+    {
+        const UINT slot = m_allocIndex * 2;
+        D3D12_RANGE rr = { slot * sizeof(UINT64), (slot + 2) * sizeof(UINT64) };
+        void* mapped = nullptr;
+        if (SUCCEEDED(m_tsReadback->Map(0, &rr, &mapped)) && mapped)
+        {
+            const UINT64* ts = reinterpret_cast<const UINT64*>(mapped) + slot;
+            if (ts[1] > ts[0] && m_tsFrequency)
+                m_lastGpuMs = static_cast<double>(ts[1] - ts[0]) * 1000.0 / static_cast<double>(m_tsFrequency);
+            D3D12_RANGE nowrite = { 0, 0 };
+            m_tsReadback->Unmap(0, &nowrite);
+        }
+    }
+
     m_cmdAlloc[m_allocIndex]->Reset();
     m_cmdList->Reset(m_cmdAlloc[m_allocIndex].Get(), nullptr);
+
+    if (m_tsHeap)
+        m_cmdList->EndQuery(m_tsHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, m_allocIndex * 2);
+
+    // Cross-adapter: kopru tamponlarindan B'deki yerel dokulara al.
+    // DLSSNRManager giris/hareket kaynaklarini COMMON'da bekledigi icin
+    // kopyadan sonra COMMON'a geri donuyoruz.
+    if (m_crossAdapter)
+    {
+        D3D12_RESOURCE_BARRIER toCopy[2] = {};
+        UINT n = 0;
+
+        toCopy[n].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toCopy[n].Transition.pResource   = m_sharedInD12.Get();
+        toCopy[n].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        toCopy[n].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+        toCopy[n].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        ++n;
+
+        const bool haveMv = (m_sharedMvD12 && m_xaMv.bufB);
+        if (haveMv)
+        {
+            toCopy[n].Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+            toCopy[n].Transition.pResource   = m_sharedMvD12.Get();
+            toCopy[n].Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+            toCopy[n].Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_DEST;
+            toCopy[n].Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+            ++n;
+        }
+        m_cmdList->ResourceBarrier(n, toCopy);
+
+        {
+            D3D12_TEXTURE_COPY_LOCATION dst = {};
+            dst.pResource        = m_sharedInD12.Get();
+            dst.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.SubresourceIndex = 0;
+
+            D3D12_TEXTURE_COPY_LOCATION src = {};
+            src.pResource       = m_xaIn.bufB.Get();
+            src.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint = m_xaIn.fp;
+
+            m_cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
+
+        if (haveMv)
+        {
+            D3D12_TEXTURE_COPY_LOCATION dst = {};
+            dst.pResource        = m_sharedMvD12.Get();
+            dst.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+            dst.SubresourceIndex = 0;
+
+            D3D12_TEXTURE_COPY_LOCATION src = {};
+            src.pResource       = m_xaMv.bufB.Get();
+            src.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+            src.PlacedFootprint = m_xaMv.fp;
+
+            m_cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+        }
+
+        for (UINT i = 0; i < n; ++i)
+        {
+            std::swap(toCopy[i].Transition.StateBefore, toCopy[i].Transition.StateAfter);
+        }
+        m_cmdList->ResourceBarrier(n, toCopy);
+    }
 
     return true;
 }
 
 bool D3D12Interop::EndFrame()
 {
-    if (!m_cmdList || !m_cmdQueue || !m_d3d11Ctx4 || !m_sharedOutD12) return false;
+    if (!m_cmdList || !m_cmdQueue || !m_d3d11Ctx4) return false;
+    if (!m_crossAdapter && !m_sharedOutD12) return false;
 
+    // Cross-adapter: DLSS ciktisini (B'deki yerel doku) kopru tamponuna yaz.
+    if (m_crossAdapter)
+    {
+        if (!m_nativeOutD12 || !m_xaOut.bufB) return false;
+
+        D3D12_RESOURCE_BARRIER toSrc = {};
+        toSrc.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+        toSrc.Transition.pResource   = m_nativeOutD12.Get();
+        toSrc.Transition.StateBefore = D3D12_RESOURCE_STATE_COMMON;
+        toSrc.Transition.StateAfter  = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        toSrc.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+        m_cmdList->ResourceBarrier(1, &toSrc);
+
+        D3D12_TEXTURE_COPY_LOCATION dst = {};
+        dst.pResource       = m_xaOut.bufB.Get();
+        dst.Type            = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+        dst.PlacedFootprint = m_xaOut.fp;
+
+        D3D12_TEXTURE_COPY_LOCATION src = {};
+        src.pResource        = m_nativeOutD12.Get();
+        src.Type             = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+        src.SubresourceIndex = 0;
+
+        m_cmdList->CopyTextureRegion(&dst, 0, 0, 0, &src, nullptr);
+
+        std::swap(toSrc.Transition.StateBefore, toSrc.Transition.StateAfter);
+        m_cmdList->ResourceBarrier(1, &toSrc);
+    }
     // In fallback mode (when shared UAV texture is unsupported), perform hardware copy
-    if (!m_useDirectSharedOut)
+    else if (!m_useDirectSharedOut)
     {
         if (!m_nativeOutD12) return false;
 
@@ -720,18 +1513,44 @@ bool D3D12Interop::EndFrame()
     // DLSS-NR writes directly into m_sharedOutD12 (UAV). Transitions are already handled
     // within DLSSNRManager::Evaluate (to COMMON). No copy, no additional barriers!
 
+    if (m_tsHeap && m_tsReadback)
+    {
+        m_cmdList->EndQuery(m_tsHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, m_allocIndex * 2 + 1);
+        m_cmdList->ResolveQueryData(
+            m_tsHeap.Get(), D3D12_QUERY_TYPE_TIMESTAMP,
+            m_allocIndex * 2, 2,
+            m_tsReadback.Get(), m_allocIndex * 2 * sizeof(UINT64));
+    }
+
     // 4. Close command list and execute on D3D12 GPU queue
     m_cmdList->Close();
     ID3D12CommandList* lists[] = { m_cmdList.Get() };
     m_cmdQueue->ExecuteCommandLists(1, lists);
 
-    // 5. Signal D3D12 output fence
-    m_cmdQueue->Signal(m_fenceOutD12.Get(), m_frameIndex);
+    // 5. B'nin yerel fence'i: ayirici rotasyonu ve WaitForGpu bunu izler.
+    m_cmdQueue->Signal(m_gpuFence.Get(), m_frameIndex);
 
-    // 6. Queue D3D11 context wait for D3D12 to finish processing (GPU-side sync)
+    // 6. Sonucu D3D11'e geri baglama
+    if (m_crossAdapter)
+    {
+        // B bittigini cross-adapter fence ile duyurur; A ciktiyi kopruden
+        // sunum dokusuna cekip m_fenceOutD12'yi kendi kuyrugunda sinyaller.
+        m_cmdQueue->Signal(m_xaFenceOutB.Get(), m_frameIndex);
+        if (!SubmitDownloadFromBridge())
+        {
+            DLSS_Log("[D3D12Interop] ERROR: Cross-adapter indirme gonderilemedi (kare #%llu).", m_frameIndex);
+            return false;
+        }
+    }
+    else
+    {
+        m_cmdQueue->Signal(m_fenceOutD12.Get(), m_frameIndex);
+    }
+
+    // 7. D3D11 baglami, sunum dokusunun hazir olmasini GPU tarafinda bekler.
     m_d3d11Ctx4->Wait(m_fenceOutD11.Get(), m_frameIndex);
 
-    // 7. Track the submitted fence value for this allocator.
+    // 8. Track the submitted fence value for this allocator.
     // The CPU is NOT blocked here; GPU-side Wait (m_d3d11Ctx4->Wait) is sufficient,
     // allowing full CPU/GPU concurrency and asynchronous presentation.
     m_allocFenceValue[m_allocIndex] = m_frameIndex;

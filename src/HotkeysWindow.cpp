@@ -116,7 +116,7 @@ static HWND CreateLabel(HWND parent, const wchar_t* text, int y, HFONT font)
 
 static HWND CreateRebindButton(HWND parent, int id, int y, HFONT font)
 {
-    HWND h = CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 200, y - 5, 120, 30, parent, (HMENU)(int_ptr)id, nullptr, nullptr);
+    HWND h = CreateWindowW(L"BUTTON", L"", WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 200, y - 5, 120, 30, parent, (HMENU)(INT_PTR)id, nullptr, nullptr);
     SendMessageW(h, WM_SETFONT, (WPARAM)font, FALSE);
     return h;
 }

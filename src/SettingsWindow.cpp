@@ -26,17 +26,16 @@ static constexpr COLORREF COLOR_TEXT_DIM   = RGB(139, 148, 158);
 #define IDC_SW_SLIDER_TONE    505
 #define IDC_SW_SLIDER_SKIN    506
 #define IDC_SW_SLIDER_RESSCALE 507
+#define IDC_SW_SLIDER_PASSES   516
+#define IDC_SW_SLIDER_FALLOFF  517
 #define IDC_SW_CHK_AUTOMASK   508
-#define IDC_SW_CHK_STABILIZER 511
+#define IDC_SW_CHK_OPTFLOW    511
 #define IDC_SW_CHK_SPLIT      514
 #define IDC_SW_SLIDER_SPLIT   515
-#define IDC_SW_BTN_REBIND     509
 #define IDC_SW_BTN_CLOSE      510
 
 HWND                             SettingsWindow::s_hwnd             = nullptr;
 HINSTANCE                        SettingsWindow::s_hInstance        = nullptr;
-bool                             SettingsWindow::s_rebindingKey     = false;
-HHOOK                            SettingsWindow::s_rebindHook       = nullptr;
 SettingsWindow::ConfigChangedCallback SettingsWindow::s_callback   = nullptr;
 
 HWND SettingsWindow::s_comboStyle        = nullptr;
@@ -53,15 +52,16 @@ HWND SettingsWindow::s_sliderSkin        = nullptr;
 HWND SettingsWindow::s_lblSkinVal        = nullptr;
 HWND SettingsWindow::s_sliderResScale    = nullptr;
 HWND SettingsWindow::s_lblResScaleVal    = nullptr;
+HWND SettingsWindow::s_sliderPassCount   = nullptr;
+HWND SettingsWindow::s_lblPassCountVal   = nullptr;
+HWND SettingsWindow::s_sliderPassFalloff = nullptr;
+HWND SettingsWindow::s_lblPassFalloffVal = nullptr;
 HWND SettingsWindow::s_chkAutoMask       = nullptr;
-HWND SettingsWindow::s_chkStabilizer     = nullptr;
+HWND SettingsWindow::s_chkOpticalFlow    = nullptr;
 HWND SettingsWindow::s_chkSplitScreen    = nullptr;
 HWND SettingsWindow::s_lblSplitTitle     = nullptr;
 HWND SettingsWindow::s_lblSplitVal       = nullptr;
 HWND SettingsWindow::s_sliderSplit       = nullptr;
-HWND SettingsWindow::s_lblKeyTitle       = nullptr;
-HWND SettingsWindow::s_lblHotkey         = nullptr;
-HWND SettingsWindow::s_btnRebind         = nullptr;
 HWND SettingsWindow::s_btnClose          = nullptr;
 
 HFONT SettingsWindow::s_fontTitle  = nullptr;
@@ -129,7 +129,7 @@ void SettingsWindow::Show(HWND parent)
     if (!s_hwnd)
     {
         int w = 460;
-        int h = 760;
+        int h = 782;
         int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
         int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
@@ -628,12 +628,18 @@ void SettingsWindow::CreateControls(HWND hwnd)
         y += 34;
     };
 
-    createSliderRow(L"Nöral Şiddet (Intensity):", s_sliderIntensity, s_lblIntensityVal, IDC_SW_SLIDER_INTENSE, 0, 200);
+    createSliderRow(L"Nöral Şiddet (Intensity):", s_sliderIntensity, s_lblIntensityVal, IDC_SW_SLIDER_INTENSE, 0, 100);
     createSliderRow(L"Nöral Etki Yoğunluğu (Boost):", s_sliderBoost, s_lblBoostVal, IDC_SW_SLIDER_BOOST, 100, 250);
     createSliderRow(L"Yüzey Detayı (Local Structure):", s_sliderStructure, s_lblStructureVal, IDC_SW_SLIDER_STRUCT, 0, 200);
     createSliderRow(L"Mikro Kontrast (Local Tone):", s_sliderTone, s_lblToneVal, IDC_SW_SLIDER_TONE, 0, 200);
     createSliderRow(L"Ten Doku Ayarı (Skin Structure):", s_sliderSkin, s_lblSkinVal, IDC_SW_SLIDER_SKIN, 0, 300);
     createSliderRow(L"Model Çözünürlüğü (Performans):", s_sliderResScale, s_lblResScaleVal, IDC_SW_SLIDER_RESSCALE, 50, 100);
+
+    // Çok geçişli işleme: model kendi çıktısını tekrar girdi olarak alır.
+    // Maliyeti geçiş sayısıyla DOĞRUSAL artar (3 geçiş ~ 3x model süresi), o
+    // yüzden pahalı slider listesine alınıp yalnızca bırakıldığında uygulanır.
+    createSliderRow(L"Geçiş Sayısı (Multipass):", s_sliderPassCount, s_lblPassCountVal, IDC_SW_SLIDER_PASSES, 1, 4);
+    createSliderRow(L"Geçiş Zayıflaması (Falloff):", s_sliderPassFalloff, s_lblPassFalloffVal, IDC_SW_SLIDER_FALLOFF, 25, 100);
 
     y += 4;
 
@@ -644,9 +650,15 @@ void SettingsWindow::CreateControls(HWND hwnd)
 
     y += 30;
 
-    s_chkStabilizer = CreateWindowW(L"VLSS5_ModernToggle", L"Gölge Bozulma Önleyici (BETA)",
+    // DIKKAT: bu toggle cfg.opticalFlow'u surer, cfg.temporalStabilizer'i DEGIL.
+    // Eskiden "Golge Bozulma Onleyici" etiketi tasiyordu ve hangi alani yazdigi
+    // etiketinden anlasilmiyordu; ayni anda temporalStabilizer UI'dan erisilemez
+    // durumdaydi. Etiket artik yaptigi isi soyluyor.
+    // ACIK  -> optik akis MV'leri uretilir, DLSS-NR reset=0 ile temporal birikim yapar.
+    // KAPALI -> MV yok, reset=1 her kare; temporal birikim tamamen kalkar.
+    s_chkOpticalFlow = CreateWindowW(L"VLSS5_ModernToggle", L"Optik Akış Hareket Takibi (Motion Vectors)",
         WS_CHILD | WS_VISIBLE,
-        24, y, 396, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SW_CHK_STABILIZER)), s_hInstance, nullptr);
+        24, y, 396, 26, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SW_CHK_OPTFLOW)), s_hInstance, nullptr);
 
     y += 30;
 
@@ -675,20 +687,6 @@ void SettingsWindow::CreateControls(HWND hwnd)
 
     y += 34;
 
-    // --- Hotkey Rebind Row ---
-    s_lblKeyTitle = CreateWindowW(L"STATIC", L"Menü Kısayol Tuşu:",
-        WS_CHILD | WS_VISIBLE, 24, y + 4, 150, 22, hwnd, nullptr, nullptr, nullptr);
-    SetFont(s_lblKeyTitle, s_fontBold);
-
-    s_lblHotkey = CreateWindowW(L"STATIC", L"INSERT",
-        WS_CHILD | WS_VISIBLE | SS_OWNERDRAW, 175, y, 120, 28, hwnd, nullptr, nullptr, nullptr);
-
-    s_btnRebind = CreateWindowW(L"BUTTON", L"Değiştir",
-        WS_CHILD | WS_VISIBLE | BS_OWNERDRAW, 305, y, 115, 28, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(IDC_SW_BTN_REBIND)), s_hInstance, nullptr);
-    SetFont(s_btnRebind, s_fontNormal);
-
-    y += 44;
-
     // --- Close Button ---
     s_btnClose = CreateWindowW(L"BUTTON", L"KAPAT / UYGULA",
         WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -706,26 +704,20 @@ void SettingsWindow::UpdateLayout()
     ShowWindow(s_lblSplitVal,   splitActive ? SW_SHOW : SW_HIDE);
     ShowWindow(s_sliderSplit,   splitActive ? SW_SHOW : SW_HIDE);
 
-    const int chkSplitY = 546;
-    int keyRowY = 0;
+    // Toggle sirasi: AutoMask -> OpticalFlow -> Split (her biri 30 px).
+    // 576 -> 684: Multipass ve Falloff satirlari (2 x 54 px) yukarida eklendi.
+    // 684 -> 654: Overlay kompozisyon satiri (34 px) ve Zamansal Sabitleyici
+    //             toggle'i (30 px) arayuzden kaldirildi.
+    const int chkSplitY = 654;
 
     if (splitActive)
     {
         SetWindowPos(s_lblSplitTitle, nullptr, 24, chkSplitY + 30, 290, 18, SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(s_lblSplitVal,   nullptr, 320, chkSplitY + 30, 100, 18, SWP_NOZORDER | SWP_NOACTIVATE);
         SetWindowPos(s_sliderSplit,   nullptr, 20, chkSplitY + 50, 405, 26, SWP_NOZORDER | SWP_NOACTIVATE);
-        keyRowY = chkSplitY + 88;
-    }
-    else
-    {
-        keyRowY = chkSplitY + 34;
     }
 
-    SetWindowPos(s_lblKeyTitle, nullptr, 24, keyRowY + 4, 150, 22, SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(s_lblHotkey,   nullptr, 175, keyRowY, 120, 28, SWP_NOZORDER | SWP_NOACTIVATE);
-    SetWindowPos(s_btnRebind,   nullptr, 305, keyRowY, 115, 28, SWP_NOZORDER | SWP_NOACTIVATE);
-
-    int closeBtnY = keyRowY + 44;
+    const int closeBtnY = splitActive ? (chkSplitY + 88) : (chkSplitY + 34);
     SetWindowPos(s_btnClose,    nullptr, 24, closeBtnY, 396, 36, SWP_NOZORDER | SWP_NOACTIVATE);
 
     int targetClientH = closeBtnY + 54;
@@ -788,6 +780,22 @@ void SettingsWindow::UpdateLiveLabels()
         swprintf_s(scaleBuf, L"%%%d (Ultra Perf)", scalePos);
     SetWindowTextW(s_lblResScaleVal, scaleBuf);
 
+    int passPos = static_cast<int>(SendMessageW(s_sliderPassCount, TBM_GETPOS, 0, 0));
+    wchar_t passBuf[64];
+    if (passPos <= 1)
+        swprintf_s(passBuf, L"1 (Kapalı)");
+    else
+        swprintf_s(passBuf, L"%d geçiş (~%dx maliyet)", passPos, passPos);
+    SetWindowTextW(s_lblPassCountVal, passBuf);
+
+    int falloffPos = static_cast<int>(SendMessageW(s_sliderPassFalloff, TBM_GETPOS, 0, 0));
+    wchar_t falloffBuf[64];
+    if (falloffPos >= 100)
+        swprintf_s(falloffBuf, L"1.00x (Tam)");
+    else
+        swprintf_s(falloffBuf, L"%.2fx", falloffPos / 100.0f);
+    SetWindowTextW(s_lblPassFalloffVal, falloffBuf);
+
     int splitPos = static_cast<int>(SendMessageW(s_sliderSplit, TBM_GETPOS, 0, 0));
     wchar_t splitBuf[32];
     if (splitPos == 50)
@@ -804,8 +812,12 @@ void SettingsWindow::UpdateControlValues()
     SendMessageW(s_comboStyle, CB_SETCURSEL, cfg.style, 0);
     SendMessageW(s_comboPreset, CB_SETCURSEL, cfg.preset, 0);
 
-    // Intensity: 0.0 - 2.0 -> 0 - 200
+    // Intensity: 0.0 - 1.0 -> 0 - 100
+    // Ust sinir 1.0: piksel golgelendiricide zaten saturate(g_intensity) var,
+    // 1.0 ustu her deger shader tarafinda ayni sonucu veriyordu (bkz. Renderer.cpp:80,105).
     int intPos = static_cast<int>(cfg.intensity * 100.0f + 0.5f);
+    if (intPos < 0)   intPos = 0;
+    if (intPos > 100) intPos = 100;
     SendMessageW(s_sliderIntensity, TBM_SETPOS, TRUE, intPos);
 
     // Boost: 1.0 - 2.5 -> 100 - 250
@@ -828,9 +840,11 @@ void SettingsWindow::UpdateControlValues()
 
     // Resolution Scale: 50 - 100
     SendMessageW(s_sliderResScale, TBM_SETPOS, TRUE, cfg.resolutionScale);
+    SendMessageW(s_sliderPassCount, TBM_SETPOS, TRUE, cfg.passCount);
+    SendMessageW(s_sliderPassFalloff, TBM_SETPOS, TRUE, static_cast<int>(cfg.passFalloff * 100.0f + 0.5f));
 
     Button_SetCheck(s_chkAutoMask, cfg.useAutoMask ? BST_CHECKED : BST_UNCHECKED);
-    Button_SetCheck(s_chkStabilizer, cfg.opticalFlow ? BST_CHECKED : BST_UNCHECKED);
+    Button_SetCheck(s_chkOpticalFlow,  cfg.opticalFlow ? BST_CHECKED : BST_UNCHECKED);
     Button_SetCheck(s_chkSplitScreen, cfg.splitScreen ? BST_CHECKED : BST_UNCHECKED);
 
     int splitSliderPos = static_cast<int>(cfg.splitPos * 100.0f + 0.5f);
@@ -840,8 +854,6 @@ void SettingsWindow::UpdateControlValues()
 
     UpdateLiveLabels();
     UpdateLayout();
-
-    SetWindowTextW(s_lblHotkey, cfg.FormatHotkey().c_str());
 }
 
 void SettingsWindow::OnSettingChanged()
@@ -878,8 +890,18 @@ void SettingsWindow::OnSettingChanged()
     int scalePos = static_cast<int>(SendMessageW(s_sliderResScale, TBM_GETPOS, 0, 0));
     cfg.resolutionScale = scalePos;
 
+    int passPos = static_cast<int>(SendMessageW(s_sliderPassCount, TBM_GETPOS, 0, 0));
+    cfg.passCount = passPos;
+    if (cfg.passCount < 1) cfg.passCount = 1;
+    if (cfg.passCount > 4) cfg.passCount = 4;
+
+    int falloffPos = static_cast<int>(SendMessageW(s_sliderPassFalloff, TBM_GETPOS, 0, 0));
+    cfg.passFalloff = falloffPos / 100.0f;
+    if (cfg.passFalloff < 0.25f) cfg.passFalloff = 0.25f;
+    if (cfg.passFalloff > 1.0f)  cfg.passFalloff = 1.0f;
+
     cfg.useAutoMask = (Button_GetCheck(s_chkAutoMask) == BST_CHECKED);
-    cfg.opticalFlow = (Button_GetCheck(s_chkStabilizer) == BST_CHECKED);
+    cfg.opticalFlow        = (Button_GetCheck(s_chkOpticalFlow)  == BST_CHECKED);
     cfg.splitScreen = (Button_GetCheck(s_chkSplitScreen) == BST_CHECKED);
 
     int splitPos = static_cast<int>(SendMessageW(s_sliderSplit, TBM_GETPOS, 0, 0));
@@ -895,60 +917,6 @@ void SettingsWindow::OnSettingChanged()
     {
         s_callback(cfg);
     }
-}
-
-void SettingsWindow::StartKeybindCapture()
-{
-    if (s_rebindingKey) return;
-    s_rebindingKey = true;
-    SetWindowTextW(s_btnRebind, L"Tuşa Basın...");
-
-    s_rebindHook = SetWindowsHookExW(
-        WH_KEYBOARD_LL,
-        RebindKeyboardProc,
-        s_hInstance,
-        0);
-}
-
-void SettingsWindow::EndKeybindCapture()
-{
-    if (s_rebindHook)
-    {
-        UnhookWindowsHookEx(s_rebindHook);
-        s_rebindHook = nullptr;
-    }
-    s_rebindingKey = false;
-    SetWindowTextW(s_btnRebind, L"Değiştir");
-    SetWindowTextW(s_lblHotkey, ConfigManager::Get().Config().FormatHotkey().c_str());
-}
-
-LRESULT CALLBACK SettingsWindow::RebindKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
-{
-    if (nCode >= HC_ACTION && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN))
-    {
-        auto* kbd = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
-        UINT vk = kbd->vkCode;
-
-        // Ignore pure modifier keys as standalone trigger
-        if (vk != VK_LCONTROL && vk != VK_RCONTROL &&
-            vk != VK_LMENU    && vk != VK_RMENU    &&
-            vk != VK_LSHIFT   && vk != VK_RSHIFT   &&
-            vk != VK_LWIN     && vk != VK_RWIN)
-        {
-            UINT mod = 0;
-            if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mod |= MOD_CONTROL;
-            if (GetAsyncKeyState(VK_MENU)    & 0x8000) mod |= MOD_ALT;
-            if (GetAsyncKeyState(VK_SHIFT)   & 0x8000) mod |= MOD_SHIFT;
-
-            ConfigManager::Get().Config().settingsVk  = vk;
-            ConfigManager::Get().Config().settingsMod = mod;
-            ConfigManager::Get().Save();
-
-            EndKeybindCapture();
-            return 1; // consume key
-        }
-    }
-    return CallNextHookEx(s_rebindHook, nCode, wParam, lParam);
 }
 
 LRESULT CALLBACK SettingsWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -996,7 +964,8 @@ LRESULT CALLBACK SettingsWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
         if (ctl == s_lblIntensityVal || ctl == s_lblBoostVal || ctl == s_lblStructureVal ||
             ctl == s_lblToneVal || ctl == s_lblSkinVal ||
-            ctl == s_lblResScaleVal || ctl == s_lblSplitVal)
+            ctl == s_lblResScaleVal || ctl == s_lblSplitVal ||
+            ctl == s_lblPassCountVal || ctl == s_lblPassFalloffVal)
         {
             SetTextColor(hdc, COLOR_NEON_GREEN);
             return reinterpret_cast<LRESULT>(s_brBg);
@@ -1024,7 +993,9 @@ LRESULT CALLBACK SettingsWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         UpdateLiveLabels();
 
         HWND src = reinterpret_cast<HWND>(lParam);
-        bool isExpensiveSlider = (src == s_sliderResScale);
+        // Geçiş sayısı da pahalı: her adımda N adet feature handle yeniden kurulur.
+        // Falloff pahalı DEĞİL -- yalnızca Evaluate'e geçen bir çarpan, anında uygulanır.
+        bool isExpensiveSlider = (src == s_sliderResScale || src == s_sliderPassCount);
 
         if (!isExpensiveSlider || isFinalPosition)
             OnSettingChanged();
@@ -1042,20 +1013,14 @@ LRESULT CALLBACK SettingsWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             return 0;
         }
 
-        if (id == IDC_SW_CHK_AUTOMASK || id == IDC_SW_CHK_STABILIZER || id == IDC_SW_CHK_SPLIT)
+        if (id == IDC_SW_CHK_AUTOMASK || id == IDC_SW_CHK_OPTFLOW
+            || id == IDC_SW_CHK_SPLIT)
         {
             if (id == IDC_SW_CHK_SPLIT)
             {
                 UpdateLayout();
             }
             OnSettingChanged();
-            return 0;
-        }
-
-        if (id == IDC_SW_BTN_REBIND)
-        {
-            if (!s_rebindingKey) StartKeybindCapture();
-            else EndKeybindCapture();
             return 0;
         }
 
@@ -1072,44 +1037,13 @@ LRESULT CALLBACK SettingsWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
         if (!dis) break;
 
-        // Hotkey badge pill (⌨ INSERT)
-        if (dis->hwndItem == s_lblHotkey)
+        if (dis->CtlID == IDC_SW_BTN_CLOSE)
         {
-            HPEN hPen = CreatePen(PS_SOLID, 1, COLOR_NEON_GREEN);
-            HBRUSH hBr = CreateSolidBrush(RGB(18, 24, 33));
-            HGDIOBJ oldPen = SelectObject(dis->hDC, hPen);
-            HGDIOBJ oldBr  = SelectObject(dis->hDC, hBr);
-
-            RoundRect(dis->hDC, dis->rcItem.left, dis->rcItem.top, dis->rcItem.right, dis->rcItem.bottom, 8, 8);
-
-            SelectObject(dis->hDC, oldBr);
-            SelectObject(dis->hDC, oldPen);
-            DeleteObject(hBr);
-            DeleteObject(hPen);
-
-            wchar_t keyText[64] = {};
-            GetWindowTextW(s_lblHotkey, keyText, _countof(keyText));
-
-            std::wstring badgeText = L"⌨  " + std::wstring(keyText);
-
-            SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, COLOR_NEON_GREEN);
-            SelectObject(dis->hDC, s_fontBold);
-            DrawTextW(dis->hDC, badgeText.c_str(), -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            return TRUE;
-        }
-
-        if (dis->CtlID == IDC_SW_BTN_REBIND || dis->CtlID == IDC_SW_BTN_CLOSE)
-        {
-            bool isClose = (dis->CtlID == IDC_SW_BTN_CLOSE);
             bool isPressed = (dis->itemState & ODS_SELECTED);
 
-            COLORREF bg = isClose
-                ? (isPressed ? RGB(0, 185, 45) : RGB(0, 235, 60))
-                : (isPressed ? RGB(32, 45, 60) : COLOR_CARD_BG);
-
-            COLORREF border = isClose ? bg : COLOR_NEON_GREEN;
-            COLORREF textCol = isClose ? RGB(8, 14, 18) : COLOR_NEON_GREEN;
+            COLORREF bg      = isPressed ? RGB(0, 185, 45) : RGB(0, 235, 60);
+            COLORREF border  = bg;
+            COLORREF textCol = RGB(8, 14, 18);
 
             HPEN hPen = CreatePen(PS_SOLID, 1, border);
             HBRUSH hBr = CreateSolidBrush(bg);
@@ -1140,7 +1074,6 @@ LRESULT CALLBACK SettingsWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
         return 0;
 
     case WM_DESTROY:
-        EndKeybindCapture();
         s_hwnd = nullptr;
         return 0;
     }

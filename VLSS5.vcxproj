@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
 
   <!-- ======================================================= -->
@@ -131,9 +131,11 @@
     <ClCompile Include="src\ConfigManager.cpp" />
     <ClCompile Include="src\SettingsWindow.cpp" />
     <ClCompile Include="src\RtssWindow.cpp" />
+    <ClCompile Include="src\HotkeysWindow.cpp" />
     <ClCompile Include="src\InputForwarder.cpp" />
     <ClCompile Include="src\WindowEnumerator.cpp" />
     <ClCompile Include="src\NvOFManager.cpp" />
+    <ClCompile Include="src\GpuSelector.cpp" />
   </ItemGroup>
 
   <!-- ======================================================= -->
@@ -152,9 +154,11 @@
     <ClInclude Include="src\ConfigManager.h" />
     <ClInclude Include="src\SettingsWindow.h" />
     <ClInclude Include="src\RtssWindow.h" />
+    <ClInclude Include="src\HotkeysWindow.h" />
     <ClInclude Include="src\InputForwarder.h" />
     <ClInclude Include="src\WindowEnumerator.h" />
     <ClInclude Include="src\NvOFManager.h" />
+    <ClInclude Include="src\GpuSelector.h" />
     <ClInclude Include="src\nvOpticalFlowCommon.h" />
     <ClInclude Include="src\nvOpticalFlowD3D11.h" />
     <ClInclude Include="src\resource.h" />

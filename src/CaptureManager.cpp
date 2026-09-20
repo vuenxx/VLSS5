@@ -6,6 +6,29 @@ static constexpr int32_t kFramePoolBufferCount = 5;
 // -----------------------------------------------------------------------
 // Start
 // -----------------------------------------------------------------------
+// Bayat-korumali giris FPS'i (bkz. CaptureManager.h)
+int CaptureManager::GetInputFpsFresh(double maxAgeSeconds) const
+{
+    if (m_lastFrameArrivalTime.QuadPart == 0) return 0;
+
+    LARGE_INTEGER now = {}, freq = {};
+    QueryPerformanceCounter(&now);
+    QueryPerformanceFrequency(&freq);
+    if (freq.QuadPart == 0) return m_currentInputFps;
+
+    const double age =
+        static_cast<double>(now.QuadPart - m_lastFrameArrivalTime.QuadPart) /
+        static_cast<double>(freq.QuadPart);
+
+    return (age > maxAgeSeconds) ? 0 : m_currentInputFps;
+}
+
+void CaptureManager::ResetInputFpsWindow()
+{
+    m_inputFpsFrameCount   = 0;
+    m_inputFpsLastTime     = {};
+}
+
 bool CaptureManager::Start(HWND targetHwnd, ID3D11Device* device)
 {
     Stop(); // clean up any prior session

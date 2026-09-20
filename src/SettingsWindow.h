@@ -19,7 +19,6 @@ public:
 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    static LRESULT CALLBACK RebindKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK ModernSliderProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK ModernToggleProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -28,13 +27,9 @@ private:
     static void UpdateLiveLabels();
     static void UpdateLayout();
     static void OnSettingChanged();
-    static void StartKeybindCapture();
-    static void EndKeybindCapture();
 
     static HWND                  s_hwnd;
     static HINSTANCE             s_hInstance;
-    static bool                  s_rebindingKey;
-    static HHOOK                 s_rebindHook;
     static ConfigChangedCallback s_callback;
 
     // Controls
@@ -52,15 +47,16 @@ private:
     static HWND s_lblSkinVal;
     static HWND s_sliderResScale;
     static HWND s_lblResScaleVal;
+    static HWND s_sliderPassCount;
+    static HWND s_lblPassCountVal;
+    static HWND s_sliderPassFalloff;
+    static HWND s_lblPassFalloffVal;
     static HWND s_chkAutoMask;
-    static HWND s_chkStabilizer;
+    static HWND s_chkOpticalFlow;
     static HWND s_chkSplitScreen;
     static HWND s_lblSplitTitle;
     static HWND s_lblSplitVal;
     static HWND s_sliderSplit;
-    static HWND s_lblKeyTitle;
-    static HWND s_lblHotkey;
-    static HWND s_btnRebind;
     static HWND s_btnClose;
 
     // GDI resources

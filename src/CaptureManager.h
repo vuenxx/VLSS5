@@ -27,6 +27,16 @@ public:
     int  GetHeight()             const { return m_height; }
     double GetLastFrameGapMs()   const { return m_lastFrameGapMs; }
     int  GetCurrentInputFps()    const { return m_currentInputFps; }
+
+    // Bayat-korumali giris FPS'i. m_currentInputFps YALNIZCA yeni bir WGC karesi
+    // geldiginde guncellenir; oyun donarsa ya da pencere occluded olursa son deger
+    // sonsuza kadar oldugu gibi kalir. Kalibrasyon bu bayat degeri gercek sanip
+    // sonsuz "desenkron" dongusune giriyordu. Son kare maxAge'den eskiyse 0 doneriz.
+    int  GetInputFpsFresh(double maxAgeSeconds = 1.0) const;
+
+    // Kalibrasyon FPS limitini degistirdikten sonra olcum penceresini sifirlar;
+    // boylece bir sonraki okuma eski rejimin karelerini icermez.
+    void ResetInputFpsWindow();
     const double* GetGapHistory()const { return m_gapHistory; }
     int  GetGapHistoryIdx()      const { return m_gapHistoryIdx; }
 

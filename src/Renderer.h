@@ -40,6 +40,11 @@ public:
     // Presents the swapchain.
     void Present();
 
+    // Kare uretimine BASLAMADAN once cagrilir: sunum kuyrugunda yer acilana kadar
+    // bekler. Boylece backpressure Present() icinde sert blokaj olarak degil,
+    // burada planli bir bekleme olarak sogurulur. Waitable swap chain yoksa no-op.
+    void WaitForPresentReady();
+
     // VSync controls
     void SetVSyncEnabled(bool enabled) { m_vsyncEnabled = enabled; }
     bool IsVSyncEnabled() const { return m_vsyncEnabled; }
@@ -89,6 +94,12 @@ private:
     bool CreateFpsResources(ID3D11Device* device);
 
     ComPtr<IDXGISwapChain1>          m_swapChain;
+
+    // Frame-latency waitable nesnesi + olusturma bayraklari.
+    // ResizeBuffers, CreateSwapChainForHwnd ile AYNI bayraklari almak zorundadir;
+    // waitable bayragini dusurmek nesneyi sessizce gecersiz kilar.
+    HANDLE                           m_frameLatencyWaitable = nullptr;
+    UINT                             m_swapChainFlags       = 0;
     ComPtr<ID3D11RenderTargetView>   m_rtv;
     ComPtr<ID3D11VertexShader>       m_vs;
     ComPtr<ID3D11PixelShader>        m_ps;

@@ -27,6 +27,15 @@ bool DLSSNRManager::Init(ID3D12Device* device, ID3D12CommandQueue* queue, int wi
     m_useAutoMask     = cfg.useAutoMask ? 1 : 0;
     m_temporalStabilizer = cfg.temporalStabilizer;
     m_opticalFlow        = cfg.opticalFlow;
+
+    m_passCount = cfg.passCount;
+    if (m_passCount < 1) m_passCount = 1;
+    if (m_passCount > kMaxPasses) m_passCount = kMaxPasses;
+
+    m_passFalloff = cfg.passFalloff;
+    if (m_passFalloff < 0.25f) m_passFalloff = 0.25f;
+    if (m_passFalloff > 1.0f)  m_passFalloff = 1.0f;
+
     m_resolutionScale = cfg.resolutionScale / 100.0f;
     if (m_resolutionScale < 0.50f) m_resolutionScale = 0.50f;
     if (m_resolutionScale > 1.00f) m_resolutionScale = 1.00f;
@@ -35,8 +44,6 @@ bool DLSSNRManager::Init(ID3D12Device* device, ID3D12CommandQueue* queue, int wi
     m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f) + 1) & ~1;
     if (m_workWidth < 64) m_workWidth = 64;
     if (m_workHeight < 64) m_workHeight = 64;
-    if (m_workWidth > m_width) m_workWidth = m_width;
-    if (m_workHeight > m_height) m_workHeight = m_height;
 
     // Determine paths
     wchar_t currentDir[MAX_PATH] = {};
@@ -287,11 +294,83 @@ bool DLSSNRManager::CreateGuideTextures(int width, int height)
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// CreateChainTextures -- multipass ping-pong dokulari.
+//
+// Iki doku her zaman yeter: k. gecis (k-1)&1'den okur, k&1'e yazar; son gecis
+// zaten dogrudan cagiranin cikti kaynagina yazdigi icin ucuncu bir ara doku
+// hicbir zaman gerekmez.
+//
+// Bunlar D3D11 ile PAYLASILMAZ: ara sonuclarin D3D11 tarafinda gorunmesine
+// gerek yok, dolayisiyla gecis basina ek paylasim veya fence bedeli de yok.
+// Multipass'in tum GPU maliyeti modelin kendi calismasidir; OptiScaler'daki gibi
+// gecis basina interop senkronu odenmez.
+// ---------------------------------------------------------------------------
+bool DLSSNRManager::CreateChainTextures(int width, int height)
+{
+    if (m_chainTex[0] && m_chainTex[1] && m_chainWidth == width && m_chainHeight == height)
+        return true;
+
+    m_chainTex[0].Reset();
+    m_chainTex[1].Reset();
+    m_chainWidth  = 0;
+    m_chainHeight = 0;
+
+    if (width <= 0 || height <= 0 || !m_device) return false;
+
+    D3D12_HEAP_PROPERTIES hp = {};
+    hp.Type = D3D12_HEAP_TYPE_DEFAULT;
+
+    D3D12_RESOURCE_DESC rd = {};
+    rd.Dimension        = D3D12_RESOURCE_DIMENSION_TEXTURE2D;
+    rd.Width            = width;
+    rd.Height           = height;
+    rd.DepthOrArraySize = 1;
+    rd.MipLevels        = 1;
+    // Zincir boyunca D3D12Interop'un giris/cikis dokulariyla ayni format: gecisler
+    // arasinda hicbir donusum olmasin, model her adimda ayni seyi gorsun.
+    rd.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
+    rd.SampleDesc.Count = 1;
+    rd.Layout           = D3D12_TEXTURE_LAYOUT_UNKNOWN;
+    rd.Flags            = D3D12_RESOURCE_FLAG_ALLOW_UNORDERED_ACCESS;
+
+    for (int i = 0; i < 2; ++i)
+    {
+        HRESULT hr = m_device->CreateCommittedResource(
+            &hp, D3D12_HEAP_FLAG_NONE, &rd,
+            D3D12_RESOURCE_STATE_COMMON, nullptr,
+            IID_PPV_ARGS(&m_chainTex[i]));
+        if (FAILED(hr))
+        {
+            DLSS_Log("[DLSS-NR] ERROR: Multipass zincir dokusu %d olusturulamadi (%dx%d): 0x%08X",
+                i, width, height, hr);
+            m_chainTex[0].Reset();
+            m_chainTex[1].Reset();
+            return false;
+        }
+    }
+
+    m_chainWidth  = width;
+    m_chainHeight = height;
+    DLSS_Log("[DLSS-NR] Multipass zincir dokulari hazir (%dx%d, 2 adet).", width, height);
+    return true;
+}
+
 bool DLSSNRManager::CreateFeature()
 {
     ReleaseFeature();
 
     if (!m_pfnCreate || !m_device || !m_params) return false;
+
+    const int passes = (m_passCount < 1) ? 1 : ((m_passCount > kMaxPasses) ? kMaxPasses : m_passCount);
+
+    // Ara zincir dokulari yalnizca birden fazla gecis varken gerekir.
+    if (passes > 1 && !CreateChainTextures(m_workWidth, m_workHeight))
+    {
+        DLSS_Log("[DLSS-NR] ERROR: Multipass zincir dokulari olusturulamadi, tek gecise dusuluyor.");
+        m_passCount = 1;
+        return CreateFeature();
+    }
 
     // Temporary Command Allocator & List for creation work
     ComPtr<ID3D12CommandAllocator> cmdAlloc;
@@ -302,26 +381,40 @@ bool DLSSNRManager::CreateFeature()
     hr = m_device->CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, cmdAlloc.Get(), nullptr, IID_PPV_ARGS(&cmdList));
     if (FAILED(hr)) return false;
 
-    DLSS_Log("[DLSS-NR] Calling dlssnr_call_create (Snippet=%ls, Work=%dx%d, Frame=%dx%d, Scale=%.0f%%)...",
-        m_snippetPath.c_str(), m_workWidth, m_workHeight, m_width, m_height, m_resolutionScale * 100.0f);
+    DLSS_Log("[DLSS-NR] Calling dlssnr_call_create (Snippet=%ls, Work=%dx%d, Frame=%dx%d, Scale=%.0f%%, Passes=%d)...",
+        m_snippetPath.c_str(), m_workWidth, m_workHeight, m_width, m_height, m_resolutionScale * 100.0f, passes);
 
-    m_feature = m_pfnCreate(
-        m_snippetPath.c_str(),
-        m_dataPath.c_str(),
-        m_device,
-        cmdList.Get(),
-        m_params,
-        m_workWidth,
-        m_workHeight,
-        m_preset,
-        m_intensity,
-        m_style,
-        m_localStructure,
-        m_localTone,
-        m_skinStructure,
-        m_useAutoMask,
-        m_uiCorrection
-    );
+    // Gecis basina AYRI handle. Tek handle'i ayni kare icinde tekrar cagirmak
+    // ozelligin temporal gecmisini bozar; ayri handle'larda her gecis kendi
+    // sabit kaynagini takip eder ve detay karelere yayilarak gercekten birikir.
+    bool allOk = true;
+    for (int i = 0; i < passes; ++i)
+    {
+        m_features[i] = m_pfnCreate(
+            m_snippetPath.c_str(),
+            m_dataPath.c_str(),
+            m_device,
+            cmdList.Get(),
+            m_params,
+            m_workWidth,
+            m_workHeight,
+            m_preset,
+            m_intensity,
+            m_style,
+            m_localStructure,
+            m_localTone,
+            m_skinStructure,
+            m_useAutoMask,
+            m_uiCorrection
+        );
+
+        if (!m_features[i])
+        {
+            DLSS_Log("[DLSS-NR] ERROR: Gecis %d icin feature olusturulamadi.", i + 1);
+            allOk = false;
+            break;
+        }
+    }
 
     cmdList->Close();
     ID3D12CommandList* lists[] = { cmdList.Get() };
@@ -338,34 +431,61 @@ bool DLSSNRManager::CreateFeature()
 
     int lastInit = m_pLastInit ? *m_pLastInit : 0;
     int lastCreate = m_pLastCreate ? *m_pLastCreate : 0;
-    DLSS_Log("[DLSS-NR] Feature Creation result: handle=%p, lastInit=0x%08X, lastCreate=0x%08X",
-        m_feature, lastInit, lastCreate);
+    DLSS_Log("[DLSS-NR] Feature Creation result: passes=%d, handle[0]=%p, lastInit=0x%08X, lastCreate=0x%08X",
+        passes, m_features[0], lastInit, lastCreate);
+
+    // Bir gecis kurulamadiysa kurulabilenlerle devam et: 3 istenip 2 elde etmek,
+    // hic islem yapmamaktan iyidir ve kullanici farki zaten ekranda gorur.
+    if (!allOk)
+    {
+        int usable = 0;
+        while (usable < passes && m_features[usable]) ++usable;
+        if (usable < 1)
+        {
+            m_needsRebuild = false;
+            return false;
+        }
+        DLSS_Log("[DLSS-NR] UYARI: %d gecis istendi, %d gecis kuruldu. Bununla devam ediliyor.", passes, usable);
+        m_passCount = usable;
+    }
 
     m_needsRebuild = false;
-    return (m_feature != nullptr && lastCreate == 1);
+    return (m_features[0] != nullptr && lastCreate == 1);
 }
 
 void DLSSNRManager::ReleaseFeature()
 {
-    if (m_feature && m_pfnRelease)
+    bool any = false;
+    for (int i = 0; i < kMaxPasses; ++i)
+        if (m_features[i]) { any = true; break; }
+
+    if (!any || !m_pfnRelease) return;
+
+    // Tek bir fence beklemesi tum handle'lari kapsar: hepsi ayni kuyruga is
+    // yazdi, kuyruk bosaldiginda hicbiri kullanimda degil.
+    if (m_device && m_queue)
     {
-        if (m_device && m_queue)
+        ComPtr<ID3D12Fence> fence;
+        if (SUCCEEDED(m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
         {
-            ComPtr<ID3D12Fence> fence;
-            if (SUCCEEDED(m_device->CreateFence(0, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&fence))))
-            {
-                HANDLE hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
-                m_queue->Signal(fence.Get(), 1);
-                fence->SetEventOnCompletion(1, hEvent);
-                WaitForSingleObject(hEvent, 1000);
-                CloseHandle(hEvent);
-            }
+            HANDLE hEvent = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+            m_queue->Signal(fence.Get(), 1);
+            fence->SetEventOnCompletion(1, hEvent);
+            WaitForSingleObject(hEvent, 1000);
+            CloseHandle(hEvent);
         }
-        DLSS_Log("[DLSS-NR] Releasing DLSS 5 Feature 18...");
-        m_pfnRelease(m_feature);
-        m_feature = nullptr;
-        DLSS_Log("[DLSS-NR] DLSS 5 Feature 18 released.");
     }
+
+    DLSS_Log("[DLSS-NR] Releasing DLSS 5 Feature 18 handles...");
+    for (int i = 0; i < kMaxPasses; ++i)
+    {
+        if (m_features[i])
+        {
+            m_pfnRelease(m_features[i]);
+            m_features[i] = nullptr;
+        }
+    }
+    DLSS_Log("[DLSS-NR] DLSS 5 Feature 18 handles released.");
 }
 
 bool DLSSNRManager::Resize(int width, int height)
@@ -378,17 +498,21 @@ bool DLSSNRManager::Resize(int width, int height)
     m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f) + 1) & ~1;
     if (m_workWidth < 64) m_workWidth = 64;
     if (m_workHeight < 64) m_workHeight = 64;
-    if (m_workWidth > m_width) m_workWidth = m_width;
-    if (m_workHeight > m_height) m_workHeight = m_height;
     m_firstFrame = true;
 
     if (!CreateGuideTextures(m_workWidth, m_workHeight)) return false;
+    // Zincir dokulari work cozunurlugunde olmak zorunda; CreateFeature da bunu
+    // dogruluyor ama boyut degisiminde eskilerini burada dusurmek gerekiyor.
+    m_chainTex[0].Reset();
+    m_chainTex[1].Reset();
+    m_chainWidth  = 0;
+    m_chainHeight = 0;
     return CreateFeature();
 }
 
 void DLSSNRManager::Cleanup()
 {
-    if (!m_hForwarder && !m_hNgxCore && !m_feature && !m_params)
+    if (!m_hForwarder && !m_hNgxCore && !m_features[0] && !m_params)
     {
         return;
     }
@@ -398,6 +522,10 @@ void DLSSNRManager::Cleanup()
 
     m_depthTex.Reset();
     m_motionTex.Reset();
+    m_chainTex[0].Reset();
+    m_chainTex[1].Reset();
+    m_chainWidth  = 0;
+    m_chainHeight = 0;
 
     if (m_params && m_pfnDestroyParams)
     {
@@ -453,8 +581,8 @@ bool DLSSNRManager::Evaluate(
         ULONGLONG now = GetTickCount64();
         if (now - m_lastConfigChangeTime >= 400)
         {
-            DLSS_Log("[DLSS-NR] Rebuilding Feature 18 (debounced): Scale=%.0f%% (Work=%dx%d), Preset=%d, Style=%d, Intense=%.2f, Struct=%.2f, Tone=%.2f, Skin=%.2f, AutoMask=%d",
-                m_resolutionScale * 100.0f, m_workWidth, m_workHeight, m_preset, m_style, m_intensity, m_localStructure, m_localTone, m_skinStructure, m_useAutoMask);
+            DLSS_Log("[DLSS-NR] Rebuilding Feature 18 (debounced): Scale=%.0f%% (Work=%dx%d), Preset=%d, Style=%d, Intense=%.2f, Struct=%.2f, Tone=%.2f, Skin=%.2f, AutoMask=%d, Passes=%d",
+                m_resolutionScale * 100.0f, m_workWidth, m_workHeight, m_preset, m_style, m_intensity, m_localStructure, m_localTone, m_skinStructure, m_useAutoMask, m_passCount);
             CreateGuideTextures(m_workWidth, m_workHeight);
             CreateFeature();
             m_firstFrame = true;
@@ -462,11 +590,112 @@ bool DLSSNRManager::Evaluate(
         }
     }
 
-    if (!m_feature || !m_pfnEvaluate)
+    if (!m_features[0] || !m_pfnEvaluate)
     {
         m_isEvaluating = false;
         return false;
     }
+
+    // Reset semantigi tek gecisteki ile ayni: optik akis varken yalnizca ilk
+    // karede 1, aksi halde her karede 1 (temporal birikim kapali).
+    int reset = m_firstFrame ? 1 : 0;
+    if (m_temporalStabilizer || !m_opticalFlow || !motionVectors)
+        reset = 1;
+    m_firstFrame = false;
+
+    // Kac gecis gercekten calistirilabilir: istenen sayi, kurulmus handle sayisi
+    // ve (>1 ise) zincir dokularinin varligi ile sinirli.
+    int passes = (m_passCount < 1) ? 1 : ((m_passCount > kMaxPasses) ? kMaxPasses : m_passCount);
+    while (passes > 1 && !m_features[passes - 1]) --passes;
+    if (passes > 1 && (!m_chainTex[0] || !m_chainTex[1] ||
+                       m_chainWidth != m_workWidth || m_chainHeight != m_workHeight))
+    {
+        passes = 1;
+    }
+
+    static uint64_t s_evalCount = 0;
+    s_evalCount++;
+    const bool verbose = (s_evalCount <= 5 || (s_evalCount % 300 == 0));
+
+    bool ok = true;
+    for (int k = 0; k < passes; ++k)
+    {
+        // Zincir: 0. gecis gercek girdiyi okur; sonraki her gecis bir oncekinin
+        // ciktisini okur; SON gecis dogrudan cagiranin cikti kaynagina yazar.
+        // Boylece zincir icin fazladan tek bir kopya bile yapilmaz.
+        ID3D12Resource* src = (k == 0)          ? inputColor : m_chainTex[(k - 1) & 1].Get();
+        ID3D12Resource* dst = (k == passes - 1) ? outputRes  : m_chainTex[k & 1].Get();
+
+        // Her gecis bir oncekinin uzerine daha az ekler. Falloff 1.0'da bu kapali
+        // ve davranis "her gecis tam siddet" olur; dusurmek 3-4 gecisin fazla
+        // pisirmesini (asiri keskinlik, plastik ten) engeller.
+        float passIntensity = m_intensity;
+        for (int f = 0; f < k; ++f) passIntensity *= m_passFalloff;
+
+        if (!EvaluateSinglePass(cmdList, m_features[k], src, dst, motionVectors, reset, passIntensity))
+        {
+            // Zincir kirildi: son gecis cikti kaynagina hic yazmamis olabilir,
+            // o yuzden basarisizligi bildir ve cagiran ham kareye donsun.
+            ok = false;
+            break;
+        }
+
+        if (verbose)
+        {
+            DLSS_Log("[DLSS-NR] Evaluate #%llu pass %d/%d: src=%p -> dst=%p, intensity=%.3f, reset=%d",
+                s_evalCount, k + 1, passes, src, dst, passIntensity, reset);
+        }
+    }
+
+    if (verbose || !ok)
+    {
+        DLSS_Log("[DLSS-NR] Evaluate #%llu: res=0x%08X (%d), passes=%d (istenen %d), falloff=%.2f, reset=%d, optFlow=%s (mvD12=%p, cfgOptFlow=%d), workSize=%dx%d (Scale=%.0f%%), intensity=%.2f, stabilizer=%d",
+            s_evalCount, m_lastEvalResult, m_lastEvalResult, passes, m_passCount, m_passFalloff, reset,
+            (m_opticalFlow && motionVectors) ? "ACTIVE" : "OFF",
+            motionVectors, m_opticalFlow ? 1 : 0,
+            m_workWidth, m_workHeight, m_resolutionScale * 100.0f,
+            m_intensity, m_temporalStabilizer ? 1 : 0);
+    }
+
+    if (ok)
+    {
+        m_consecutiveFailures = 0;
+    }
+    else
+    {
+        m_consecutiveFailures++;
+        if (m_consecutiveFailures >= 10)
+        {
+            DLSS_Log("[DLSS-NR] Detected %d consecutive Evaluate failures (res=0x%08X). Triggering automatic feature rebuild...",
+                m_consecutiveFailures, m_lastEvalResult);
+            m_consecutiveFailures = 0;
+            m_needsRebuild = true;
+            m_lastConfigChangeTime = GetTickCount64() - 1000;
+        }
+    }
+
+    m_isEvaluating = ok;
+    return m_isEvaluating;
+}
+
+// ---------------------------------------------------------------------------
+// EvaluateSinglePass -- tek bir Feature 18 degerlendirmesini komut listesine yazar.
+//
+// Kaynaklar giriste COMMON'dan alinip cikista COMMON'a birakilir. Bu ayni zamanda
+// zincirin bir sonraki gecisi icin gereken senkronu da saglar: COMMON'a donus
+// bariyeri o kaynaga yapilan UAV yazmalarinin bitmesini ve sonraki okumalar icin
+// gorunur olmasini garanti eder, ayrica bir UAV bariyeri gerekmez.
+// ---------------------------------------------------------------------------
+bool DLSSNRManager::EvaluateSinglePass(
+    ID3D12GraphicsCommandList* cmdList,
+    void* feature,
+    ID3D12Resource* inputColor,
+    ID3D12Resource* outputRes,
+    ID3D12Resource* motionVectors,
+    int   reset,
+    float intensity)
+{
+    if (!feature || !cmdList || !inputColor || !outputRes) return false;
 
     ID3D12Resource* activeMotion = (m_opticalFlow && motionVectors) ? motionVectors : m_motionTex.Get();
 
@@ -498,22 +727,9 @@ bool DLSSNRManager::Evaluate(
     cmdList->ResourceBarrier(barrierCount, barriersIn);
 
     // 2. Evaluate Feature 18 at Model Work Resolution
-    // If optical flow motion vectors are active: reset = 1 only on the first frame.
-    // Subsequent frames use smooth temporal recurrence across moving pixels.
-    // If optical flow is off or temporal stabilizer is explicitly enabled: reset = 1 every frame to prevent smearing/swimming.
-    int reset = m_firstFrame ? 1 : 0;
-    if (m_temporalStabilizer || !m_opticalFlow || !motionVectors)
-    {
-        reset = 1;
-    }
-    m_firstFrame = false;
-
-    static uint64_t s_evalCount = 0;
-    s_evalCount++;
-
     int res = m_pfnEvaluate(
         cmdList,
-        m_feature,
+        feature,
         m_params,
         inputColor,
         m_depthTex.Get(),
@@ -525,7 +741,7 @@ bool DLSSNRManager::Evaluate(
         m_workHeight,
         m_depthInverted ? 1 : 0,
         reset,
-        m_intensity,
+        intensity,
         m_style,
         m_localStructure,
         m_localTone,
@@ -534,17 +750,7 @@ bool DLSSNRManager::Evaluate(
         1.0f, 1.0f // motion scale
     );
 
-    if (s_evalCount <= 5 || (s_evalCount % 300 == 0) || (res != 1))
-    {
-        DLSS_Log("[DLSS-NR] Evaluate #%llu: res=0x%08X (%d), reset=%d, optFlow=%s (mvD12=%p, cfgOptFlow=%d), workSize=%dx%d (Scale=%.0f%%), intensity=%.2f, stabilizer=%d",
-            s_evalCount, res, res, reset,
-            (m_opticalFlow && motionVectors) ? "ACTIVE" : "OFF",
-            motionVectors, m_opticalFlow ? 1 : 0,
-            m_workWidth, m_workHeight, m_resolutionScale * 100.0f,
-            m_intensity, m_temporalStabilizer ? 1 : 0);
-    }
-
-    // 3. Transition resources back to COMMON for D3D11 sharing
+    // 3. Transition resources back to COMMON (D3D11 paylasimi / sonraki gecis icin)
     D3D12_RESOURCE_BARRIER barriersOut[3] = {};
     barriersOut[0].Type  = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
     barriersOut[0].Transition.pResource   = inputColor;
@@ -569,32 +775,30 @@ bool DLSSNRManager::Evaluate(
 
     cmdList->ResourceBarrier(barrierCount, barriersOut);
 
-    if (res == 1)
-    {
-        m_consecutiveFailures = 0;
-    }
-    else
-    {
-        m_consecutiveFailures++;
-        if (m_consecutiveFailures >= 10)
-        {
-            DLSS_Log("[DLSS-NR] Detected %d consecutive Evaluate failures (res=0x%08X). Triggering automatic feature rebuild...",
-                m_consecutiveFailures, res);
-            m_consecutiveFailures = 0;
-            m_needsRebuild = true;
-            m_lastConfigChangeTime = GetTickCount64() - 1000;
-        }
-    }
-
     m_lastEvalResult = res;
-    m_isEvaluating = (res == 1);
-    return m_isEvaluating;
+    return (res == 1);
 }
 
 void DLSSNRManager::ApplyConfig(const Dlss5Config& cfg)
 {
     m_temporalStabilizer = cfg.temporalStabilizer;
     m_opticalFlow        = cfg.opticalFlow;
+
+    // Falloff yalnizca Evaluate cagrisina gecen bir carpandir; feature'i yeniden
+    // kurmayi gerektirmez, o yuzden asagidaki "changed" hesabinin disinda durur
+    // ve slider surukleye surukleye aninda etkisini gosterir.
+    m_passFalloff = cfg.passFalloff;
+    if (m_passFalloff < 0.25f) m_passFalloff = 0.25f;
+    if (m_passFalloff > 1.0f)  m_passFalloff = 1.0f;
+
+    int newPassCount = cfg.passCount;
+    if (newPassCount < 1) newPassCount = 1;
+    if (newPassCount > kMaxPasses) newPassCount = kMaxPasses;
+
+    // Gecis sayisi degisirse handle kumesi yeniden kurulmak ZORUNDA: her gecisin
+    // kendi temporal gecmisi var ve sayi degisince zincirin sekli de degisiyor.
+    bool passCountChanged = (m_passCount != newPassCount);
+    m_passCount = newPassCount;
 
     float newScale = cfg.resolutionScale / 100.0f;
     if (newScale < 0.50f) newScale = 0.50f;
@@ -608,11 +812,9 @@ void DLSSNRManager::ApplyConfig(const Dlss5Config& cfg)
         m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f) + 1) & ~1;
         if (m_workWidth < 64) m_workWidth = 64;
         if (m_workHeight < 64) m_workHeight = 64;
-        if (m_workWidth > m_width) m_workWidth = m_width;
-        if (m_workHeight > m_height) m_workHeight = m_height;
     }
 
-    bool changed = scaleChanged ||
+    bool changed = scaleChanged || passCountChanged ||
                    (m_preset != cfg.preset ||
                     m_style != cfg.style ||
                     m_intensity != cfg.intensity ||

@@ -80,6 +80,24 @@ public:
     float GetSkinStructure()    const { return m_skinStructure; }
     void  SetSkinStructure(float v)   { if (m_skinStructure != v) { m_skinStructure = v; MarkConfigChanged(); } }
 
+    // --- Cok Gecisli (Multipass) Noral Isleme -------------------------------
+    // Model kendi ciktisini tekrar girdi olarak alip N kez calisir. Her gecisin
+    // AYRI feature handle'i vardir: NGX ozelligi kare-icinde temporal gecmis
+    // tutar, tek handle'i ayni karede tekrar cagirmak o gecmisi birbirine
+    // karistirir ve sonuc detay kazanmak yerine yalnizca renk kaymasi olur.
+    // Ayri handle'larda k. gecis her karede AYNI kaynagi (k-1. gecisin ciktisi)
+    // gordugu icin kendi gecmisi tutarli kalir ve detay gercekten birikir.
+    int   GetPassCount()        const { return m_passCount; }
+    void  SetPassCount(int v)
+    {
+        if (v < 1) v = 1;
+        if (v > kMaxPasses) v = kMaxPasses;
+        if (m_passCount != v) { m_passCount = v; MarkConfigChanged(); }
+    }
+
+    float GetPassFalloff()      const { return m_passFalloff; }
+    void  SetPassFalloff(float v)     { if (m_passFalloff != v) m_passFalloff = v; }
+
     float GetResolutionScale()  const { return m_resolutionScale; }
     int   GetWorkWidth()        const { return m_workWidth;  }
     int   GetWorkHeight()       const { return m_workHeight; }
@@ -97,8 +115,21 @@ private:
     bool LoadForwarder();
     void DiscoverAndSetFloatSlot();
     bool CreateGuideTextures(int width, int height);
+    bool CreateChainTextures(int width, int height);
     bool CreateFeature();
     void ReleaseFeature();
+
+    // Tek bir gecisi komut listesine yazar. Cagrilar arasinda kaynak durumlari
+    // COMMON'a geri dondugu icin bir sonraki gecis oncekinin ciktisini guvenle
+    // okur -- COMMON'a gecis bariyeri o kaynak icin yazma gorunurlugunu saglar.
+    bool EvaluateSinglePass(
+        ID3D12GraphicsCommandList* cmdList,
+        void* feature,
+        ID3D12Resource* inputColor,
+        ID3D12Resource* outputRes,
+        ID3D12Resource* motionVectors,
+        int   reset,
+        float intensity);
 
     int   m_width           = 0;
     int   m_height          = 0;
@@ -117,6 +148,8 @@ private:
     int       m_uiCorrection          = 0;
     bool      m_depthInverted         = false;
     bool      m_needsRebuild          = false;
+    int       m_passCount             = 1;
+    float     m_passFalloff           = 1.0f;
     bool      m_temporalStabilizer    = false;
     bool      m_opticalFlow           = true;
     ULONGLONG m_lastConfigChangeTime  = 0;
@@ -148,8 +181,16 @@ private:
     int*                           m_pLastInit = nullptr;
     int*                           m_pLastCreate = nullptr;
 
-    // Active Feature Handle
-    void* m_feature = nullptr;
+    // Aktif Feature Handle'lari -- gecis basina bir tane (indeks 0 = ilk gecis).
+    static constexpr int kMaxPasses = 4;
+    void* m_features[kMaxPasses] = {};
+
+    // Gecisler arasi ping-pong dokulari (work cozunurlugu, native D3D12).
+    // Paylasimli degil: ara sonuclarin D3D11 tarafinda gorunmesi gerekmiyor,
+    // bu da gecis basina ek bir paylasim/senkron bedeli olmamasi demek.
+    ComPtr<ID3D12Resource> m_chainTex[2];
+    int m_chainWidth  = 0;
+    int m_chainHeight = 0;
 
     // Guide textures for DLSS-NR model
     ComPtr<ID3D12Resource> m_depthTex;

@@ -1,6 +1,8 @@
 #include "ConfigManager.h"
 #include <shlwapi.h>
 #include <cstdio>
+#include <cstring>
+#include <string>
 
 #pragma comment(lib, "shlwapi.lib")
 
@@ -101,8 +103,10 @@ void ConfigManager::Load()
     wchar_t buf[64] = {};
     GetPrivateProfileStringW(sec, L"Intensity", L"1.0", buf, _countof(buf), ini.c_str());
     m_config.intensity = static_cast<float>(_wtof(buf));
+    // Ust sinir 1.0: piksel golgelendirici zaten saturate(g_intensity) uyguluyor,
+    // 1.0 ustu degerler shader tarafinda hicbir fark yaratmiyordu (Renderer.cpp:80,105).
     if (m_config.intensity < 0.0f) m_config.intensity = 0.0f;
-    if (m_config.intensity > 2.0f) m_config.intensity = 2.0f;
+    if (m_config.intensity > 1.0f) m_config.intensity = 1.0f;
 
     GetPrivateProfileStringW(sec, L"LocalStructure", L"1.0", buf, _countof(buf), ini.c_str());
     m_config.localStructure = static_cast<float>(_wtof(buf));
@@ -125,6 +129,15 @@ void ConfigManager::Load()
     if (m_config.resolutionScale < 50)  m_config.resolutionScale = 50;
     if (m_config.resolutionScale > 100) m_config.resolutionScale = 100;
 
+    m_config.passCount = GetPrivateProfileIntW(sec, L"PassCount", 1, ini.c_str());
+    if (m_config.passCount < 1) m_config.passCount = 1;
+    if (m_config.passCount > 4) m_config.passCount = 4;
+
+    GetPrivateProfileStringW(sec, L"PassFalloff", L"1.0", buf, _countof(buf), ini.c_str());
+    m_config.passFalloff = static_cast<float>(_wtof(buf));
+    if (m_config.passFalloff < 0.25f) m_config.passFalloff = 0.25f;
+    if (m_config.passFalloff > 1.0f)  m_config.passFalloff = 1.0f;
+
     m_config.temporalStabilizer = (GetPrivateProfileIntW(sec, L"TemporalStabilizer", 0, ini.c_str()) != 0);
     m_config.opticalFlow        = (GetPrivateProfileIntW(sec, L"OpticalFlow", 1, ini.c_str()) != 0);
 
@@ -133,8 +146,11 @@ void ConfigManager::Load()
     if (m_config.boostFactor < 1.0f) m_config.boostFactor = 1.0f;
     if (m_config.boostFactor > 2.5f) m_config.boostFactor = 2.5f;
 
+    m_config.overlayMode = GetPrivateProfileIntW(sec, L"OverlayMode", 1, ini.c_str());
+    if (m_config.overlayMode < 0) m_config.overlayMode = 0;
+    if (m_config.overlayMode > 2) m_config.overlayMode = 2;
+
     m_config.splitScreen = (GetPrivateProfileIntW(sec, L"SplitScreen", 0, ini.c_str()) != 0);
-    m_config.directFlip  = (GetPrivateProfileIntW(sec, L"DirectFlip", 0, ini.c_str()) != 0);
     m_config.fullscreenStretch = (GetPrivateProfileIntW(sec, L"FullscreenStretch", 0, ini.c_str()) != 0);
 
     GetPrivateProfileStringW(sec, L"SplitPos", L"0.5", buf, _countof(buf), ini.c_str());
@@ -157,9 +173,96 @@ void ConfigManager::Load()
     GetPrivateProfileStringW(L"Hardware", L"SelectedGpu", L"Auto", gpuBuf, _countof(gpuBuf), ini.c_str());
     m_config.selectedGpu = (gpuBuf[0] != L'\0') ? gpuBuf : L"Auto";
 
+    // DlssGpu yoksa (eski INI dosyalari) SelectedGpu ile ayni kabul edilir:
+    // tek-GPU davranisi birebir korunur, kimse farkinda olmadan cross-adapter
+    // kopru moduna dusmez.
+    wchar_t dlssGpuBuf[256] = {};
+    GetPrivateProfileStringW(L"Hardware", L"DlssGpu", L"", dlssGpuBuf, _countof(dlssGpuBuf), ini.c_str());
+    m_config.dlssGpu = (dlssGpuBuf[0] != 0) ? dlssGpuBuf : m_config.selectedGpu;
+
     wchar_t rtssBuf[MAX_PATH] = {};
     GetPrivateProfileStringW(L"Paths", L"RtssDirectory", L"", rtssBuf, _countof(rtssBuf), ini.c_str());
     m_config.rtssDirectory = rtssBuf;
+
+    // Buraya kadar okunan her sey, profil API'sinin GERCEKTEN gordugu bolumden
+    // geldi. Dosya bozuksa simdi ayni degerlerle temiz bir dosya yaziyoruz;
+    // boylece olu bolum ve artik anahtarlar kaybolur, davranis degismez.
+    if (IniNeedsRepair(ini))
+    {
+        RepairIni(ini);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// INI onarimi
+//
+// Windows profil API'si bir satiri bolum basligi olarak ancak satir tam olarak
+// '[' ile basliyorsa tanir. Bir editor dosyayi UTF-8 BOM ile kaydederse ilk
+// satir "<EF BB BF>[VLSS5]" olur; API bu basligi GORMEZ ve ilk yazma isleminde
+// ayni isimle IKINCI bir [VLSS5] bolumu olusturur. O andan sonra okunan ve
+// yazilan her sey ikinci bolumdur, ilk bolum sessizce olu kalir.
+//
+// DIKKAT: BOM'u tek basina silmek olu ilk bolumu canlandirir ve kullanicinin
+// ayarlarini eski degerlere geri dondurur. Bu yuzden onarim "once oku, sonra
+// dosyayi sil, mevcut degerlerle yeniden yaz" sirasiyla yapilmak zorunda.
+// ---------------------------------------------------------------------------
+bool ConfigManager::IniNeedsRepair(const std::wstring& path) const
+{
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+                           OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+
+    std::string data;
+    char    buf[4096];
+    DWORD   got = 0;
+    while (ReadFile(h, buf, sizeof(buf), &got, nullptr) && got > 0)
+    {
+        data.append(buf, got);
+    }
+    CloseHandle(h);
+
+    if (data.size() >= 3
+        && static_cast<unsigned char>(data[0]) == 0xEF
+        && static_cast<unsigned char>(data[1]) == 0xBB
+        && static_cast<unsigned char>(data[2]) == 0xBF)
+    {
+        return true;
+    }
+
+    // Mukerrer bolum basligi de ayni sonucu dogurur (ikincisi olu kalir).
+    // UTF-16 dosyalarda bu ASCII taramasi eslesmez; orada BOM sorunu da yoktur.
+    const char* kSection = "[VLSS5]";
+    const size_t kLen    = 7;
+    int count = 0;
+    for (size_t i = 0; i + kLen <= data.size(); ++i)
+    {
+        const bool atLineStart = (i == 0) || (data[i - 1] == '\n') || (data[i - 1] == '\r');
+        if (atLineStart && _strnicmp(data.c_str() + i, kSection, kLen) == 0)
+        {
+            ++count;
+        }
+    }
+    return count > 1;
+}
+
+void ConfigManager::RepairIni(const std::wstring& path)
+{
+    DeleteFileW(path.c_str());
+
+    // Dosyayi UTF-16LE BOM ile olustur: WritePrivateProfileStringW bu durumda
+    // Unicode yazar ve ASCII disi yollar (rtssDirectory) bozulmaz. BOM'suz
+    // olusturulan dosya ANSI kabul edilir.
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                           CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        const unsigned char bom[2] = { 0xFF, 0xFE };
+        DWORD written = 0;
+        WriteFile(h, bom, sizeof(bom), &written, nullptr);
+        CloseHandle(h);
+    }
+
+    Save();
 }
 
 void ConfigManager::Save()
@@ -188,11 +291,13 @@ void ConfigManager::Save()
     writeFloat(L"VLSS5", L"SkinStructure", m_config.skinStructure);
     writeInt(L"VLSS5", L"UseAutoMask", m_config.useAutoMask ? 1 : 0);
     writeInt(L"VLSS5", L"ResolutionScale", m_config.resolutionScale);
+    writeInt(L"VLSS5", L"PassCount", m_config.passCount);
+    writeFloat(L"VLSS5", L"PassFalloff", m_config.passFalloff);
     writeInt(L"VLSS5", L"TemporalStabilizer", m_config.temporalStabilizer ? 1 : 0);
     writeInt(L"VLSS5", L"OpticalFlow", m_config.opticalFlow ? 1 : 0);
     writeFloat(L"VLSS5", L"BoostFactor", m_config.boostFactor);
+    writeInt(L"VLSS5", L"OverlayMode", m_config.overlayMode);
     writeInt(L"VLSS5", L"SplitScreen", m_config.splitScreen ? 1 : 0);
-    writeInt(L"VLSS5", L"DirectFlip",  m_config.directFlip  ? 1 : 0);
     writeInt(L"VLSS5", L"FullscreenStretch", m_config.fullscreenStretch ? 1 : 0);
     writeFloat(L"VLSS5", L"SplitPos", m_config.splitPos);
 
@@ -208,5 +313,6 @@ void ConfigManager::Save()
     writeInt(L"Hotkeys", L"ModStart", static_cast<int>(m_config.modStart));
 
     writeStr(L"Hardware", L"SelectedGpu", m_config.selectedGpu.c_str());
+    writeStr(L"Hardware", L"DlssGpu", m_config.dlssGpu.c_str());
     writeStr(L"Paths", L"RtssDirectory", m_config.rtssDirectory.c_str());
 }

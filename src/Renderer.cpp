@@ -71,8 +71,24 @@ float4 PS(float4 pos : SV_Position,
         float3 model = gModelTex.Sample(gLinearSamp, uv).rgb;
         float3 raw = gProxyTex.Sample(gLinearSamp, uv).rgb;
 
-        // Boost linear extrapolation: saturate(raw + boost * (model - raw))
-        float3 boostedModel = saturate(raw + (model - raw) * g_boostFactor);
+        // Boost linear extrapolation: raw + boost * (model - raw)
+        //
+        // KANAL OLUMU KORUMASI -- burayi saturate()'e geri cevirme.
+        // Eski hali `saturate(raw + delta)` idi ve KANAL BASINA kirpiyordu. Boost > 1.0
+        // iken bir kanalda delta negatifse o kanal 0'a cakiliyor, piksel notr griden
+        // saf bir primary'ye donuyordu (gece sahnelerinde koyu kumasta kirmizi/mavi
+        // benekler). Ornek: raw=(0.020,0.022,0.030), model=(0.012,0.014,0.034),
+        // boost=2.5 -> saturate((0.000,0.002,0.040)) = R kanali tamamen olu.
+        //
+        // Cozum: delta'yi kanal basina kirpmak yerine TOPLUCA olcekle. En kisitlayici
+        // kanal tam sinirda (0 veya 1) durur, digerleri ayni oranda kisilir; boost
+        // vektorunun yonu -- yani hue -- korunur.
+        float3 delta = (model - raw) * g_boostFactor;
+        float3 kLow  = (delta < -1e-6f) ? (raw / max(-delta, 1e-6f))        : 1.0f;
+        float3 kHigh = (delta >  1e-6f) ? ((1.0f - raw) / max(delta, 1e-6f)) : 1.0f;
+        float  kFit  = saturate(min(min(kLow.r, min(kLow.g, kLow.b)),
+                                    min(kHigh.r, min(kHigh.g, kHigh.b))));
+        float3 boostedModel = raw + delta * kFit;
 
         if (g_isSubNative == 0)
         {
@@ -108,11 +124,26 @@ float4 PS(float4 pos : SV_Position,
             float3 transferredLuma = original * effectiveRatio;
 
             // Chrominance transfer: model's clean neural chroma scaled to match transferred luma
+            //
+            // Bolmenin tabani kRatioFloor ile AYNI olmak zorunda. Eskiden burada
+            // max(modelLuma, 1e-5) vardi -- rawRatio'nun tabanindan 195 kat kucuk.
+            // Koyu bir pikselde modelLuma ~0.004'e duserse carpan 3x, ~0.00007'ye
+            // duserse 178x oluyordu; modelChroma tavani asip son saturate() ile saf
+            // primary'ye cakiliyordu. Ayni near-black problemi icin iki farkli epsilon
+            // kullanma.
             float targetLuma = dot(transferredLuma, kLuma);
-            float3 modelChroma = boostedModel * (targetLuma / max(modelLuma, 1e-5f));
+            float chromaScale = (targetLuma + kRatioFloor) / (modelLuma + kRatioFloor);
+            chromaScale = clamp(chromaScale, 1.0f / kMaxRatio, kMaxRatio);
+            float3 modelChroma = boostedModel * chromaScale;
+
+            // Koyu piksellerde kroma bilgisi zaten guvenilmez (hem model hem proxy
+            // quantization gurultusunde yuzuyor). Transferi luma tabanli olarak sondur:
+            // siyaha yakin yuzeyler yalnizca luminans yolunu kullanir.
+            const float kChromaFadeLuma = 0.02f;
+            float darkFade = saturate(targetLuma / kChromaFadeLuma);
 
             // Blend between luminance-only transfer and model chroma
-            result = lerp(transferredLuma, modelChroma, saturate(g_colourStrength));
+            result = lerp(transferredLuma, modelChroma, saturate(g_colourStrength) * darkFade);
         }
     }
 
@@ -272,6 +303,20 @@ bool Renderer::Init(ID3D11Device* device, HWND overlayHwnd, int width, int heigh
             nrInitialized = true;
             DLSS_Log("[Renderer] DLSS 5 Neural Rendering is ACTIVE (Display: %dx%d, Model Work: %dx%d, Scale: %d%%).",
                 width, height, m_dlssnrManager->GetWorkWidth(), m_dlssnrManager->GetWorkHeight(), initialCfg.resolutionScale);
+
+            if (m_d3d12Interop->IsCrossAdapter())
+            {
+                DLSS_Log("[Renderer] GPU ayrimi ETKIN -- yakalama/sunum: '%ls', DLSS: '%ls'. "
+                         "Kare basina %.2f MB PCIe transferi.",
+                    m_d3d12Interop->GetCaptureGpuName().c_str(),
+                    m_d3d12Interop->GetDlssGpuName().c_str(),
+                    static_cast<double>(m_d3d12Interop->GetBridgeBytesPerFrame()) / (1024.0 * 1024.0));
+            }
+            else
+            {
+                DLSS_Log("[Renderer] Tek GPU: yakalama/sunum ve DLSS '%ls' uzerinde.",
+                    m_d3d12Interop->GetDlssGpuName().c_str());
+            }
         }
         else
         {
@@ -349,14 +394,48 @@ bool Renderer::CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int h
     desc.Format      = DXGI_FORMAT_B8G8R8A8_UNORM;
     desc.SampleDesc  = { 1, 0 };
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
-    desc.BufferCount = 2;
+    // BufferCount 2 -> 3. Iki arabellekle FLIP_DISCARD'da hicbir bosluk kalmaz:
+    // her Present, DWM onceki kareyi tuketene kadar beklemek zorundadir.
+    desc.BufferCount = 3;
     desc.Scaling     = DXGI_SCALING_STRETCH;
     desc.SwapEffect  = DXGI_SWAP_EFFECT_FLIP_DISCARD; // lowest latency
     desc.AlphaMode   = DXGI_ALPHA_MODE_IGNORE;
-    desc.Flags       = m_tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
+
+    // ---- Waitable swap chain ----
+    //
+    // Olculen sorun (2026-09-15 logu): render=0.9 ms, present=31-143 ms.
+    // Yani boru hattinin tamami ~1 ms suruyor, geri kalan her sey Present() icinde
+    // bloke geciyor. Sebep: syncInterval=0 ile sinirsiz kare basiyoruz, DWM kuyrugu
+    // kompozisyon hizinda bosaltiyor, kuyruk dolunca Present() bir arabellek serbest
+    // kalana kadar BLOKE OLUYOR.
+    //
+    // FRAME_LATENCY_WAITABLE_OBJECT bu backpressure'i Present() icindeki sert blokaj
+    // yerine, kare uretimine baslamadan once beklenebilen bir cekirdek nesnesine
+    // cevirir:
+    //   - Present() aninda geri doner, boru hatti serilesmez
+    //   - Zaten atilacak kareler icin GPU/DLSS harcanmaz
+    //   - Sunum temposu kompozisyon hizina kilitlenir -> jitter ve stutter duser
+    //   - Gecikme artmaz; SetMaximumFrameLatency(1) ile sinirlanir
+    //
+    // WS_EX_LAYERED ile tam uyumludur: fare gecirgenliginden odun vermez.
+    const UINT kTearingFlag  = m_tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0u;
+    const UINT kWaitableFlag = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+
+    desc.Flags       = kTearingFlag | kWaitableFlag;
+    m_swapChainFlags = desc.Flags;
 
     HRESULT hr = factory2->CreateSwapChainForHwnd(
         device, hwnd, &desc, nullptr, nullptr, &m_swapChain);
+
+    if (FAILED(hr))
+    {
+        // Waitable desteklenmiyorsa once onsuz dene.
+        DLSS_Log("[Renderer] Waitable swap chain olusturulamadi (hr=0x%08X), waitable'siz deneniyor", hr);
+        desc.Flags       = kTearingFlag;
+        m_swapChainFlags = desc.Flags;
+        hr = factory2->CreateSwapChainForHwnd(
+            device, hwnd, &desc, nullptr, nullptr, &m_swapChain);
+    }
 
     if (FAILED(hr))
     {
@@ -364,8 +443,23 @@ bool Renderer::CreateSwapChain(ID3D11Device* device, HWND hwnd, int width, int h
         desc.SwapEffect  = DXGI_SWAP_EFFECT_DISCARD;
         desc.BufferCount = 1;
         desc.Flags       = 0;
+        m_swapChainFlags = 0;
         hr = factory2->CreateSwapChainForHwnd(
             device, hwnd, &desc, nullptr, nullptr, &m_swapChain);
+    }
+
+    // Waitable nesnesini al. NOT: waitable kullanilirken gecerli olan, IDXGIDevice1
+    // uzerindeki degil IDXGISwapChain2 uzerindeki maksimum kare gecikmesidir.
+    if (SUCCEEDED(hr) && (m_swapChainFlags & kWaitableFlag))
+    {
+        ComPtr<IDXGISwapChain2> swapChain2;
+        if (SUCCEEDED(m_swapChain.As(&swapChain2)))
+        {
+            swapChain2->SetMaximumFrameLatency(1);
+            m_frameLatencyWaitable = swapChain2->GetFrameLatencyWaitableObject();
+        }
+        if (!m_frameLatencyWaitable)
+            DLSS_Log("[Renderer] UYARI: frame latency waitable nesnesi alinamadi");
     }
 
     // Prevent DXGI from intercepting Alt+Enter
@@ -802,14 +896,11 @@ void Renderer::Resize(ID3D11Device* device, int width, int height,
     // Detach the RTV before resize
     m_rtv.Reset();
 
-<<<<<<< Updated upstream
-    UINT resizeFlags = m_tearingSupported ? DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING : 0;
-=======
     // ResizeBuffers, swap chain olusturulurken kullanilan bayraklarin AYNISINI
     // almak zorundadir; waitable bayragini dusurmek nesneyi gecersiz kilar.
+    // ResizeBuffers olusturma bayraklarinin AYNISINI almak zorunda.
     UINT resizeFlags = m_swapChainFlags;
     // Arabellekler CIKIS cozunurlugunde; DLSS yigini ise yakalama cozunurlugunde kalir.
->>>>>>> Stashed changes
     m_swapChain->ResizeBuffers(0,
         static_cast<UINT>(m_outWidth), static_cast<UINT>(m_outHeight),
         DXGI_FORMAT_UNKNOWN, resizeFlags);
@@ -1023,6 +1114,15 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
 // -----------------------------------------------------------------------
 // Present
 // -----------------------------------------------------------------------
+void Renderer::WaitForPresentReady()
+{
+    if (!m_frameLatencyWaitable) return;
+
+    // 100 ms ust sinir: DWM beklenmedik sekilde durursa dongu kilitlenmesin.
+    if (WaitForSingleObjectEx(m_frameLatencyWaitable, 100, TRUE) == WAIT_TIMEOUT)
+        DLSS_Log("[Present] UYARI: frame latency bekleme 100 ms zaman asimina ugradi");
+}
+
 void Renderer::Present()
 {
     LARGE_INTEGER t0, t1, freq;
@@ -1051,6 +1151,13 @@ void Renderer::Present()
 // -----------------------------------------------------------------------
 void Renderer::Cleanup()
 {
+    if (m_frameLatencyWaitable)
+    {
+        CloseHandle(m_frameLatencyWaitable);
+        m_frameLatencyWaitable = nullptr;
+    }
+    m_swapChainFlags = 0;
+
     if (m_dlssnrManager)
     {
         m_dlssnrManager->Cleanup();

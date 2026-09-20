@@ -13,6 +13,7 @@
 #include <shellapi.h>
 #include <commctrl.h>
 #include <uxtheme.h>
+#include <TlHelp32.h>
 #include <algorithm>
 #include <cwctype>
 #pragma comment(lib, "shlwapi.lib")
@@ -37,6 +38,8 @@
 #define IDC_CHK_FULLSCREEN    113   // Tam Ekran Yap (monitore gerdirme) Checkbox
 #define IDC_BTN_RTSS_SETTINGS 114
 #define IDC_BTN_HOTKEYS       115   // Hotkeys Button
+#define IDC_COMBO_DLSSGPU     116   // DLSS hesaplama GPU'su ComboBox
+#define IDC_BTN_DLSSGPU_HELP  117   // DLSS GPU Help '?' Button
 #define ID_GLOBAL_HOTKEY      201   // Global capture toggle hotkey
 #define IDT_HOTKEY_TIMER      301   // Fallback hotkey poller (50ms)
 
@@ -74,6 +77,10 @@ static HWND                    g_lblGpu          = nullptr;
 static HWND                    g_comboGpu        = nullptr;
 static HWND                    g_btnGpuHelp      = nullptr;
 static HWND                    g_tipGpuHelp      = nullptr;
+static HWND                    g_lblDlssGpu      = nullptr;
+static HWND                    g_comboDlssGpu    = nullptr;
+static HWND                    g_btnDlssGpuHelp  = nullptr;
+static HWND                    g_tipDlssGpuHelp  = nullptr;
 static HWND                    g_lblKeybindTitle = nullptr;
 static HWND                    g_lblKeybind      = nullptr;
 static HWND                    g_btnKeybind      = nullptr;
@@ -330,6 +337,46 @@ static void PopulateGpuList(HWND /*hwnd*/)
     }
 
     SendMessageW(g_comboGpu, CB_SETCURSEL, selectedIndex, 0);
+
+    // ---- DLSS hesaplama GPU'su listesi ----
+    // Ayni g_gpuList'i indeksler; tek fark RTX olmayan kartlarin isaretlenmesi.
+    if (g_comboDlssGpu)
+    {
+        SendMessageW(g_comboDlssGpu, CB_RESETCONTENT, 0, 0);
+
+        for (size_t idx = 0; idx < g_gpuList.size(); ++idx)
+        {
+            std::wstring label = g_gpuList[idx].displayName;
+            if (idx > 0 && !ContainsCaseInsensitive(g_gpuList[idx].name, L"RTX"))
+                label += L"  — DLSS yok";
+
+            SendMessageW(g_comboDlssGpu, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
+        }
+
+        const std::wstring& savedDlssGpu = ConfigManager::Get().Config().dlssGpu;
+        int dlssIndex = 0; // Otomatik (RTX Oncelikli)
+        if (!savedDlssGpu.empty() && savedDlssGpu != L"Auto")
+        {
+            for (size_t idx = 1; idx < g_gpuList.size(); ++idx)
+            {
+                if (ContainsCaseInsensitive(g_gpuList[idx].name, savedDlssGpu))
+                {
+                    dlssIndex = static_cast<int>(idx);
+                    break;
+                }
+            }
+
+            if (dlssIndex == 0)
+            {
+                // Kayitli kart bu makinede yok: Otomatik'e dus ve kaydi duzelt.
+                ConfigManager::Get().Config().dlssGpu = L"Auto";
+                ConfigManager::Get().Save();
+                DLSS_Log("[Main] Kayitli DLSS GPU'su '%ls' bulunamadi; Otomatik'e donuldu.", savedDlssGpu.c_str());
+            }
+        }
+
+        SendMessageW(g_comboDlssGpu, CB_SETCURSEL, dlssIndex, 0);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -575,14 +622,14 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
         // ---- Card 2: GPU & Kısayol Paneli ----
         // Row 1: GPU Selection
-        g_lblGpu = CreateWindowW(L"STATIC", L"Grafik Kartı (GPU):",
-            WS_CHILD | WS_VISIBLE, 32, 328, 130, 20,
+        g_lblGpu = CreateWindowW(L"STATIC", L"Ekran / Yakalama GPU:",
+            WS_CHILD | WS_VISIBLE, 32, 328, 160, 20,
             hwnd, nullptr, nullptr, nullptr);
         SF(g_lblGpu, g_fontBold);
 
         g_comboGpu = CreateWindowExW(0, L"COMBOBOX", nullptr,
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
-            168, 324, 370, 200,
+            196, 324, 342, 200,
             hwnd, reinterpret_cast<HMENU>(IDC_COMBO_GPU), nullptr, nullptr);
         SF(g_comboGpu, g_fontNormal);
         SetWindowTheme(g_comboGpu, L"DarkMode_Explorer", nullptr);
@@ -594,38 +641,62 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         SF(g_btnGpuHelp, g_fontBold);
 
         g_tipGpuHelp = CreateButtonTooltip(hwnd, g_btnGpuHelp,
-            L"DLSS5 kullanmak için RTX bir kart gereklidir. AMD kartlarda çalışmaz!");
+            L"Ekranı yakalayıp sunan kart. Monitörünüzü hangi kart sürüyorsa o seçilmelidir.");
 
-        // Row 2: VLSS5 Settings
+        // Row 2: DLSS hesaplama GPU'su
+        // Yakalama kartindan AYRI secilebilir. Tipik kullanim: monitörü iGPU
+        // sürüyor, sinir agi RTX karta veriliyor.
+        g_lblDlssGpu = CreateWindowW(L"STATIC", L"DLSS Hesaplama GPU:",
+            WS_CHILD | WS_VISIBLE, 32, 364, 160, 20,
+            hwnd, nullptr, nullptr, nullptr);
+        SF(g_lblDlssGpu, g_fontBold);
+
+        g_comboDlssGpu = CreateWindowExW(0, L"COMBOBOX", nullptr,
+            WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
+            196, 360, 342, 200,
+            hwnd, reinterpret_cast<HMENU>(IDC_COMBO_DLSSGPU), nullptr, nullptr);
+        SF(g_comboDlssGpu, g_fontNormal);
+        SetWindowTheme(g_comboDlssGpu, L"DarkMode_Explorer", nullptr);
+
+        g_btnDlssGpuHelp = CreateWindowW(L"BUTTON", L"?",
+            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+            544, 359, 26, 26,
+            hwnd, reinterpret_cast<HMENU>(IDC_BTN_DLSSGPU_HELP), nullptr, nullptr);
+        SF(g_btnDlssGpuHelp, g_fontBold);
+
+        g_tipDlssGpuHelp = CreateButtonTooltip(hwnd, g_btnDlssGpuHelp,
+            L"Sinir ağının koşacağı kart. RTX gereklidir. Yakalama kartından farklı seçilirse her kare PCIe üzerinden taşınır.");
+
+        // Row 3: VLSS5 Settings
         g_btnDlssSettings = CreateWindowW(L"BUTTON", L"⚙ VLSS5 Ayarları",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            32, 364, 538, 30,
+            32, 400, 538, 30,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_DLSS_SETTINGS), nullptr, nullptr);
         SF(g_btnDlssSettings, g_fontBold);
 
-        // Row 3: RTSS Integration & Hotkeys
+        // Row 4: RTSS Integration & Hotkeys
         g_btnRtssSettings = CreateWindowW(L"BUTTON", L"RTSS AYARLARI",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            32, 404, 265, 32,
+            32, 440, 265, 32,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_RTSS_SETTINGS), nullptr, nullptr);
         SF(g_btnRtssSettings, g_fontBold);
 
         g_btnHotkeys = CreateWindowW(L"BUTTON", L"TUŞLARI DEĞİŞTİR",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            309, 404, 265, 32,
+            309, 440, 265, 32,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_HOTKEYS), nullptr, nullptr);
         SF(g_btnHotkeys, g_fontBold);
 
         // ---- Start Button (Big Action Button) ----
         g_btnStart = CreateWindowW(L"BUTTON", L"BAŞLAT  ➔",
             WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            20, 460, 566, 48,
+            20, 496, 566, 48,
             hwnd, reinterpret_cast<HMENU>(IDC_BTN_START), nullptr, nullptr);
         SF(g_btnStart, g_fontTitle);
 
         // ---- Status bar ----
         g_lblStatus = CreateWindowW(L"STATIC", L"Hedef uygulamayı seçin veya istediğiniz penceredeyken ALT+S basın.",
-            WS_CHILD | WS_VISIBLE | SS_CENTER, 20, 518, 566, 20,
+            WS_CHILD | WS_VISIBLE | SS_CENTER, 20, 554, 566, 20,
             hwnd, reinterpret_cast<HMENU>(IDC_LBL_STATUS), nullptr, nullptr);
         SF(g_lblStatus, g_fontSmall);
 
@@ -686,21 +757,46 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         const wchar_t subTitle[] = L"Youtube: @vuenxxmx";
         TextOutW(hdc, 74, 38, subTitle, static_cast<int>(wcslen(subTitle)));
 
-        // Keyboard Tips in Header (Right-side Pill Container)
-        RECT rcTips = { client.right - 460, 18, client.right - 20, 48 };
-        DrawModernPanel(hdc, rcTips, RGB(14, 18, 25), COLOR_BORDER, 6);
+        // Alt basligin sag kenari: kisayol hapi bunun ustune taşmamalı.
+        SIZE subSize = {};
+        GetTextExtentPoint32W(hdc, subTitle, static_cast<int>(wcslen(subTitle)), &subSize);
+        const LONG subtitleRight = 74 + subSize.cx;
 
-        SetTextColor(hdc, RGB(165, 175, 190));
-        SelectObject(hdc, g_fontSmall);
-        
+        // Keyboard Tips in Header (Right-side Pill Container)
+        //
+        // Hapın GENİŞLİĞİ metne göre hesaplanır, sabit değil: kısayollar
+        // kullanıcı tarafından değiştirilebiliyor ve sabit 440 px hem gereksiz
+        // yer kaplayıp alt başlığın üstüne biniyor hem de uzun kombinasyonlarda
+        // yetmiyordu.
         auto& c = ConfigManager::Get().Config();
         std::wstring tips = L"[" + Dlss5Config::FormatKey(c.vkFgIndicator) + L"] FG | [" +
                             Dlss5Config::FormatKey(c.vkFocus) + L"] Odak | [" +
                             Dlss5Config::FormatKey(c.vkFps) + L"] FPS | [" +
                             Dlss5Config::FormatKey(c.vkToggleVlss) + L"] VLSS5 | [" +
                             Dlss5Config::FormatKey(c.vkStart, c.modStart) + L"] Başlat";
-                            
-        DrawTextW(hdc, tips.c_str(), -1, &rcTips, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+
+        SelectObject(hdc, g_fontSmall);
+        SIZE tipsSize = {};
+        GetTextExtentPoint32W(hdc, tips.c_str(), static_cast<int>(tips.length()), &tipsSize);
+
+        static constexpr LONG kPillPadX = 14;   // metnin iki yanındaki boşluk
+        static constexpr LONG kPillGap  = 16;   // alt başlık ile hap arası en az boşluk
+
+        LONG pillLeft = client.right - 20 - (tipsSize.cx + kPillPadX * 2);
+        if (pillLeft < subtitleRight + kPillGap)
+        {
+            // Çok uzun kısayol dizisi: hapı alt başlığın bitimine dayayıp metni
+            // ucu noktalı kırpıyoruz; üst üste binmesine izin vermiyoruz.
+            pillLeft = subtitleRight + kPillGap;
+        }
+
+        RECT rcTips = { pillLeft, 18, client.right - 20, 48 };
+        DrawModernPanel(hdc, rcTips, RGB(14, 18, 25), COLOR_BORDER, 6);
+
+        SetTextColor(hdc, RGB(165, 175, 190));
+        SelectObject(hdc, g_fontSmall);
+        DrawTextW(hdc, tips.c_str(), -1, &rcTips,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         // 3. Card 1 Panel (Hedef Uygulama Seçimi)
         RECT card1 = { 20, 76, client.right - 20, 304 };
@@ -712,7 +808,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         TextOutW(hdc, 34, 88, L"HEDEF UYGULAMA SEÇİMİ", 21);
 
         // 4. Card 2 Panel (GPU & Kısayol)
-        RECT card2 = { 20, 314, client.right - 20, 450 };
+        RECT card2 = { 20, 314, client.right - 20, 486 };
         DrawModernPanel(hdc, card2, COLOR_CARD_BG, COLOR_BORDER, 10);
 
         EndPaint(hwnd, &ps);
@@ -979,8 +1075,8 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             return TRUE;
         }
 
-        // 7. Custom draw GPU Help '?' Button
-        if (dis->CtlID == IDC_BTN_GPU_HELP)
+        // 7. Custom draw GPU Help '?' Buttons (yakalama + DLSS)
+        if (dis->CtlID == IDC_BTN_GPU_HELP || dis->CtlID == IDC_BTN_DLSSGPU_HELP)
         {
             bool isPressed = (dis->itemState & ODS_SELECTED);
             COLORREF btnBg = isPressed ? RGB(36, 46, 62) : RGB(26, 34, 46);
@@ -1105,15 +1201,69 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 std::wstring statusMsg;
                 if (chosenName == L"Auto")
                 {
-                    statusMsg = L"Grafik kartı: Otomatik (RTX Öncelikli)";
+                    statusMsg = L"Ekran/yakalama GPU: Otomatik (RTX Öncelikli)";
                 }
                 else
                 {
-                    statusMsg = L"Grafik kartı seçildi: " + g_gpuList[sel].displayName;
+                    statusMsg = L"Ekran/yakalama GPU: " + g_gpuList[sel].displayName;
                 }
                 SetStatus(statusMsg.c_str());
                 DLSS_Log("[Main] GPU selection changed to: %ls", chosenName.c_str());
             }
+            break;
+        }
+
+        // DLSS hesaplama GPU'su degisimi
+        if (ctlId == IDC_COMBO_DLSSGPU && HIWORD(wParam) == CBN_SELCHANGE)
+        {
+            int sel = static_cast<int>(SendMessageW(g_comboDlssGpu, CB_GETCURSEL, 0, 0));
+            if (sel >= 0 && sel < static_cast<int>(g_gpuList.size()))
+            {
+                const std::wstring& chosenName = g_gpuList[sel].name;
+                ConfigManager::Get().Config().dlssGpu = chosenName;
+                ConfigManager::Get().Save();
+
+                // Cihazlar oturum basinda kuruluyor; degisiklik bir sonraki
+                // BASLAT'ta etkili olur.
+                std::wstring statusMsg;
+                if (chosenName == L"Auto")
+                {
+                    statusMsg = L"DLSS hesaplama GPU: Otomatik (RTX Öncelikli)";
+                }
+                else if (!ContainsCaseInsensitive(chosenName, L"RTX"))
+                {
+                    statusMsg = L"⚠ " + g_gpuList[sel].displayName + L" DLSS5 çalıştıramaz! RTX bir kart seçin.";
+                }
+                else
+                {
+                    statusMsg = L"DLSS hesaplama GPU: " + g_gpuList[sel].displayName;
+                }
+
+                // Yakalama kartindan farkliysa kare basina PCIe transferi olur.
+                const std::wstring& captureGpu = ConfigManager::Get().Config().selectedGpu;
+                if (chosenName != captureGpu)
+                    statusMsg += L"  (ayrı kart — yeniden başlatın)";
+
+                SetStatus(statusMsg.c_str());
+                DLSS_Log("[Main] DLSS hesaplama GPU'su: %ls", chosenName.c_str());
+            }
+            break;
+        }
+
+        // DLSS GPU Help '?' button click
+        if (ctlId == IDC_BTN_DLSSGPU_HELP)
+        {
+            MessageBoxW(
+                hwnd,
+                L"Sinir ağının (DLSS5) koşacağı kart.\n\n"
+                L"RTX bir kart gereklidir; AMD ve Intel kartlarda çalışmaz.\n\n"
+                L"Yakalama kartıyla AYNI seçilirse en düşük gecikmeyi alırsınız.\n\n"
+                L"FARKLI seçilirse her kare (giriş + hareket vektörü + çıkış) PCIe "
+                L"üzerinden taşınır. Bu, monitörü iGPU sürüyorsa mantıklıdır; iki güçlü "
+                L"kart arasında genellikle zarar eder.\n\n"
+                L"Değişiklik bir sonraki BAŞLAT'ta etkili olur.",
+                L"VLSS5 — DLSS Hesaplama GPU",
+                MB_ICONINFORMATION | MB_OK);
             break;
         }
 
@@ -1122,8 +1272,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         {
             MessageBoxW(
                 hwnd,
-                L"DLSS5 kullanmak için RTX bir kart gereklidir. AMD kartlarda çalışmaz!",
-                L"VLSS5 — GPU Gereksinimi",
+                L"Bu kart ekranı yakalar ve overlay'i sunar.\n\n"
+                L"Monitörünüzü hangi kart sürüyorsa o seçilmelidir: tam ekran sunum, "
+                L"ekranı süren kartta olmak zorundadır.\n\n"
+                L"Sinir ağını başka bir karta vermek isterseniz bir alttaki "
+                L"\"DLSS Hesaplama GPU\" ayarını kullanın.",
+                L"VLSS5 — Ekran / Yakalama GPU",
                 MB_ICONINFORMATION | MB_OK);
             break;
         }
@@ -1371,6 +1525,42 @@ static void CheckRivaTuner()
     }
 }
 
+static bool IsProcessRunning(const wchar_t* processName)
+{
+    bool exists = false;
+    PROCESSENTRY32W entry;
+    entry.dwSize = sizeof(PROCESSENTRY32W);
+
+    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
+    if (snapshot == INVALID_HANDLE_VALUE)
+        return false;
+
+    if (Process32FirstW(snapshot, &entry))
+    {
+        do
+        {
+            if (_wcsicmp(entry.szExeFile, processName) == 0)
+            {
+                exists = true;
+                break;
+            }
+        } while (Process32NextW(snapshot, &entry));
+    }
+    CloseHandle(snapshot);
+    return exists;
+}
+
+static void CheckRivaTunerRunning()
+{
+    if (!IsProcessRunning(L"RTSS.exe"))
+    {
+        MessageBoxW(nullptr,
+            L"UYARI! Arka planda RivaTuner çalışmadığı tespit edildi. Lütfen FPS kalibrasyonu için arkada uygulamayı açık bırakın. Kalibrasyon yapılmadığı sürece FPS çok kötü olabilir.",
+            L"VLSS5 - RivaTuner Çalışmıyor",
+            MB_ICONWARNING | MB_OK | MB_TOPMOST);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // WinMain
 // ---------------------------------------------------------------------------
@@ -1378,6 +1568,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
     CheckRequiredFiles();
     CheckRivaTuner();
+    CheckRivaTunerRunning();
 
     // Single instance check: prevent multiple instances of VLSS5 from running simultaneously
     HANDLE hSingleInstanceMutex = CreateMutexW(nullptr, TRUE, L"Local\\VLSS5_SingleInstance_Mutex");
@@ -1454,6 +1645,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     // Initialize DLSS 5 settings window class and common controls
     SettingsWindow::Initialize(hInstance);
     RtssWindow::Initialize(hInstance);
+    HotkeysWindow::Initialize(hInstance);
 
     // Create modern dark window (fixed size, centered, styled)
     HWND hwnd = CreateWindowExW(
@@ -1462,7 +1654,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
         L"VLSS5 - Yüksek Performanslı Oyun Overlay",
         (WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX)),
         CW_USEDEFAULT, CW_USEDEFAULT,
-        622, 595,
+        622, 631,
         nullptr, nullptr, hInstance, nullptr);
 
     if (!hwnd)

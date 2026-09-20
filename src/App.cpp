@@ -2,14 +2,12 @@
 #include "SettingsWindow.h"
 #include "ConfigManager.h"
 #include "RTSSManager.h"
+#include "GpuSelector.h"
 #include "resource.h"
-<<<<<<< Updated upstream
-=======
 #include <shlwapi.h>
 #pragma comment(lib, "shlwapi.lib")
 #include <algorithm>
 #include <cmath>
->>>>>>> Stashed changes
 
 // Global pointer so the static OverlayWndProc can reach the App.
 static App* g_appInstance = nullptr;
@@ -43,49 +41,6 @@ App::~App()
     g_appInstance = nullptr;
 }
 
-// Find IDXGIAdapter matching the configured GPU name, or prioritize RTX, or fallback to first hardware adapter
-static ComPtr<IDXGIAdapter1> FindConfiguredAdapter(const std::wstring& targetGpuName)
-{
-    ComPtr<IDXGIFactory1> factory;
-    if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))))
-        return nullptr;
-
-    ComPtr<IDXGIAdapter1> matchedAdapter;
-    ComPtr<IDXGIAdapter1> rtxAdapter;
-    ComPtr<IDXGIAdapter1> firstHardwareAdapter;
-
-    UINT i = 0;
-    ComPtr<IDXGIAdapter1> adapter;
-    while (factory->EnumAdapters1(i++, &adapter) != DXGI_ERROR_NOT_FOUND)
-    {
-        DXGI_ADAPTER_DESC1 desc{};
-        adapter->GetDesc1(&desc);
-
-        if (!(desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE))
-        {
-            if (!firstHardwareAdapter)
-                firstHardwareAdapter = adapter;
-
-            if (!rtxAdapter && (wcsstr(desc.Description, L"RTX") != nullptr || wcsstr(desc.Description, L"rtx") != nullptr))
-                rtxAdapter = adapter;
-
-            if (!targetGpuName.empty() && targetGpuName != L"Auto" && wcsstr(desc.Description, targetGpuName.c_str()) != nullptr)
-            {
-                matchedAdapter = adapter;
-                break;
-            }
-        }
-    }
-
-    if (matchedAdapter)
-        return matchedAdapter;
-
-    if (rtxAdapter)
-        return rtxAdapter;
-
-    return firstHardwareAdapter;
-}
-
 // ==========================================================================
 // InitD3D  (called once per session or on GPU switch)
 // ==========================================================================
@@ -102,8 +57,10 @@ bool App::InitD3D()
     D3D_FEATURE_LEVEL requested = D3D_FEATURE_LEVEL_11_0;
     D3D_FEATURE_LEVEL obtained  = {};
 
+    // Bu cihaz YAKALAMA + SUNUM cihazidir; monitoru suren kart olmalidir.
+    // DLSS ayri bir GPU'da kosuyorsa o adapter D3D12Interop tarafindan secilir.
     const std::wstring& preferredGpu = ConfigManager::Get().Config().selectedGpu;
-    ComPtr<IDXGIAdapter1> chosenAdapter = FindConfiguredAdapter(preferredGpu);
+    ComPtr<IDXGIAdapter1> chosenAdapter = GpuSelector::FindAdapter(preferredGpu);
 
     D3D_DRIVER_TYPE driverType = chosenAdapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE;
 
@@ -111,7 +68,7 @@ bool App::InitD3D()
     {
         DXGI_ADAPTER_DESC1 desc{};
         chosenAdapter->GetDesc1(&desc);
-        DLSS_Log("[App] Initializing D3D11 device on selected GPU: %ls", desc.Description);
+        DLSS_Log("[App] Yakalama/sunum D3D11 cihazi su GPU uzerinde: %ls", desc.Description);
     }
     else
     {
@@ -199,6 +156,61 @@ RECT App::ComputeOverlayRect() const
     return r;
 }
 
+// -----------------------------------------------------------------------
+// ApplyOverlayComposition
+//
+// Olculen (x64/Release/vlss5_logs.log, 17:41-17:43):
+//   render  ort ~1.7 ms   <- tum boru hatti: yakalama, downscale, optik akis,
+//                            DLSS-NR degerlendirmesi, kompozit
+//   present ort 40-95 ms  <- yalnizca DXGI Present()
+//   patolojik durumda present = 1000.2-1000.7 ms VE ayni anda WGC kare araligi
+//   da 1000 ms: tum kompozisyon zinciri 1 Hz'e dusuyor.
+//
+// Yani darbogaz boru hattinda degil, DWM kompozisyonunda. Bu fonksiyon overlay'in
+// DWM icin hangi sinifta oldugunu degistirir, boylece hangi modun bu makinede ve
+// bu oyunda daha ucuz oldugu olculebilir.
+// -----------------------------------------------------------------------
+void App::ApplyOverlayComposition(int mode)
+{
+    if (!m_overlayHwnd) return;
+    if (mode < 0) mode = 0;
+    if (mode > 2) mode = 2;
+    if (m_overlayMode == mode) return;
+
+    LONG_PTR ex = GetWindowLongPtrW(m_overlayHwnd, GWL_EXSTYLE);
+
+    if (mode == 2)
+    {
+        // LAYERED tamamen kalkar. WS_EX_TRANSPARENT hit-test gecirgenligi icin
+        // LAYERED'a bagli degildir, fare gecirgenligi korunur.
+        ex &= ~WS_EX_LAYERED;
+        SetWindowLongPtrW(m_overlayHwnd, GWL_EXSTYLE, ex);
+    }
+    else
+    {
+        if (!(ex & WS_EX_LAYERED))
+        {
+            ex |= WS_EX_LAYERED;
+            SetWindowLongPtrW(m_overlayHwnd, GWL_EXSTYLE, ex);
+        }
+        // 254: goze 255 ile ayni ama DWM altindaki oyunu "tamamen kapatildi"
+        // saymaz, oyun kendini throttle etmez. Bedeli tam ekran alpha karisimi.
+        // 255: DWM pencereyi opak sayabilir ve daha ucuz bir yol secebilir.
+        SetLayeredWindowAttributes(m_overlayHwnd, 0, (mode == 0) ? 254 : 255, LWA_ALPHA);
+    }
+
+    // Ex-style degisiminin kompozitore islemesi icin cerceve yeniden hesaplanmali.
+    SetWindowPos(m_overlayHwnd, nullptr, 0, 0, 0, 0,
+        SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+    static const char* kNames[3] = { "0 Uyumlu (layered, alpha 254)",
+                                     "1 Opak (layered, alpha 255)",
+                                     "2 En Hizli (layered yok)" };
+    DLSS_Log("[App] Overlay kompozisyon modu: %s", kNames[mode]);
+
+    m_overlayMode = mode;
+}
+
 bool App::CreateOverlayWindow(HWND targetHwnd)
 {
     RECT r = ComputeOverlayRect();
@@ -224,10 +236,8 @@ bool App::CreateOverlayWindow(HWND targetHwnd)
 
     if (!m_overlayHwnd) return false;
 
-    // Alpha = 254 → visually indistinguishable from 255 (fully opaque to the eye),
-    // but prevents Windows DWM from classifying the underlying game window as completely occluded.
-    // This allows the game to keep its Direct Flip / Reflex / Frame Generation scheduling active and unthrottled.
-    SetLayeredWindowAttributes(m_overlayHwnd, 0, 254, LWA_ALPHA);
+    // Kompozisyon sinifi artik yapilandirilabilir; ayrinti icin Dlss5Config::overlayMode.
+    ApplyOverlayComposition(ConfigManager::Get().Config().overlayMode);
 
     // Ekran görüntüsü (SS), Win+Shift+S, PrintScreen ve kayıt araçlarında DLSS 5 çıktısının
     // net şekilde görünmesi için WDA_NONE kullanıyoruz.
@@ -330,6 +340,7 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
         {
             m_renderer->SetBoostFactor(cfg.boostFactor);
             m_renderer->SetSplitScreen(cfg.splitScreen, cfg.splitPos);
+            ApplyOverlayComposition(cfg.overlayMode);
             if (m_renderer->GetDLSSNRManager())
             {
                 m_renderer->GetDLSSNRManager()->ApplyConfig(cfg);
@@ -339,7 +350,7 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
 
     m_fpsEnabled  = fps;
     m_dlssEnabled = dlss;
-    m_prevF10Down = false;
+    m_prevVlssDown = false;
 
     // Give keyboard focus back to the target app so that Insert (ReShade),
     // game input, etc. work exactly as if VLSS5 were not here.
@@ -361,13 +372,13 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
 
     m_prevStopKeyDown = false;
     m_overlayFocused  = false;
-    m_prevF8Down      = false;
+    m_prevFocusDown      = false;
 
     // Initialize FPS tracking for our overlay window
     QueryPerformanceFrequency(&m_fpsFreq);
     QueryPerformanceCounter(&m_fpsLastTime);
-    m_fpsFrameCount = 0;
-    m_currentFps    = 0;
+    m_fpsFrames = 0;
+    m_fpsCurrent    = 0;
     m_renderer->UpdateOSD(m_context.Get(), 0, 0, false, nullptr, 0, true, m_calibMessage);
 
     // Log system state (process priority, power throttling, battery) at session start
@@ -458,6 +469,11 @@ void App::Run()
             ID3D11ShaderResourceView* srv = m_captureManager->AcquireCurrentFrameSRV(m_device.Get());
             if (srv)
             {
+                // Kare uretimine baslamadan once sunum kuyrugunda yer acilmasini bekle.
+                // Bu bekleme olmadan backpressure Present() icinde 31-143 ms'lik sert
+                // blokaj olarak patliyordu (log: render=0.9 ms, present=143 ms).
+                m_renderer->WaitForPresentReady();
+
                 Render(srv);
                 m_captureManager->ReleaseCurrentFrame();
             }
@@ -685,7 +701,7 @@ void App::CheckF8FocusToggle()
         }
     }
 
-    m_prevF8Down = f8Down;
+    m_prevFocusDown = focusDown;
 }
 
 // ==========================================================================
@@ -754,6 +770,379 @@ void App::CheckFocusAndMinimize()
 }
 
 // ==========================================================================
+// FPS Kalibrasyonu
+// ==========================================================================
+//
+// AMAC: Oyunun kare uretim hizini (RTSS FPS limiti ile) VLSS5'in isleyebildigi
+// hiza kilitlemek. Giris cikistan hizli olursa WGC kareleri kuyrukta birikip
+// atilir; bu da girdi gecikmesi ve stutter demektir.
+//
+// YONTEM: Limiti kademeli yukselt, VLSS5'in ayak uyduramadigi noktayi bul, bir
+// miktar geri in. Her adim kCalibStepMs bekler.
+//
+// EMNIYETLER (hepsi gercek hata raporundan dogdu):
+//   1. kCalibMinFps TABANI  -- FineDown eskiden sinirsiz asagi sayiyordu. RTSS'te
+//      0 = SINIRSIZ oldugu icin sayac 0'i gectigi anda oyun tam hiza cikiyor,
+//      desenkron kalicilasiyor ve hedef -1, -2, ... diye eksiye kaciyordu.
+//      Kullanicinin gordugu "-30 FPS" tam olarak buydu.
+//   2. RTSS UYGULANMIYOR TESPITI -- limit yazildigi halde giris FPS'i hedefin
+//      cok uzerinde kaliyorsa RTSS profili gercekten uygulamiyordur. Eskiden bu
+//      durum sonsuz desenkron olarak okunup (1)'deki kacisi tetikliyordu.
+//   3. BAYAT OLCUM KORUMASI -- giris FPS'i yalnizca yeni WGC karesi gelince,
+//      cikis FPS'i yalnizca render calisinca guncellenir. Ikisi de donmus olabilir;
+//      bayat degerle karar vermek yanlis desenkron uretir. Bayatsa tik atlanir.
+//   4. OTURMA (settle) SURESI -- limit degistikten hemen sonraki olcum hala eski
+//      rejime aittir; bir tik bekleyip olcum penceresini sifirliyoruz.
+//   5. ADIM TAVANI -- her ne olursa olsun kCalibMaxSteps adimdan sonra durur.
+//   6. GERI YUKLEME -- iptal/hata/overlay kapanisinda kullanicinin kalibrasyon
+//      oncesi limiti geri yazilir; oyun yarim kalmis bir limitte takili kalmaz.
+
+bool App::CalibInSync(int inFps, int outFps)
+{
+    // Sabit "<= 1" toleransi fazla dardi: 0.5 sn'lik pencerede tamsayiya yuvarlanan
+    // FPS dogal olarak +-2 oynar ve sahte desenkron uretirdi. Yuzdesel tolerans
+    // yuksek FPS'te de dogru calisir.
+    const int tol = (std::max)(2, static_cast<int>(inFps * 0.05 + 0.5));
+    return std::abs(inFps - outFps) <= tol;
+}
+
+int App::GetMonitorRefreshHz(HWND hwnd)
+{
+    HMONITOR mon = MonitorFromWindow(hwnd ? hwnd : GetDesktopWindow(),
+                                     MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFOEXW mi = {};
+    mi.cbSize = sizeof(mi);
+    if (mon && GetMonitorInfoW(mon, &mi))
+    {
+        DEVMODEW dm = {};
+        dm.dmSize = sizeof(dm);
+        if (EnumDisplaySettingsW(mi.szDevice, ENUM_CURRENT_SETTINGS, &dm) &&
+            dm.dmDisplayFrequency > 1)
+        {
+            return static_cast<int>(dm.dmDisplayFrequency);
+        }
+    }
+    return 60; // makul varsayilan
+}
+
+int App::GetOutputFpsFresh() const
+{
+    // m_fpsCurrent yalnizca Render() icinde 500 ms'de bir yenilenir. Overlay gizliyken
+    // ya da render dururken deger donar kalir; bayatsa 0 don.
+    if (m_fpsLastUpdateTick == 0) return 0;
+    if (GetTickCount64() - m_fpsLastUpdateTick > 1000) return 0;
+    return m_fpsCurrent;
+}
+
+std::wstring App::ResolveTargetExeName() const
+{
+    if (!m_targetHwnd) return L"";
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(m_targetHwnd, &pid);
+    if (pid == 0) return L"";
+
+    HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProcess) return L"";
+
+    wchar_t exePath[MAX_PATH] = {};
+    DWORD size = MAX_PATH;
+    const BOOL ok = QueryFullProcessImageNameW(hProcess, 0, exePath, &size);
+    CloseHandle(hProcess);
+
+    return ok ? std::wstring(PathFindFileNameW(exePath)) : std::wstring();
+}
+
+bool App::CalibApplyLimit(int fps)
+{
+    if (!RTSSManager::Get().SetFramerateLimit(m_calibExeName, fps))
+    {
+        CalibAbort(L"HATA: RTSS Profili yazilamadi! Klasoru kontrol edin.");
+        return false;
+    }
+
+    m_calibTargetFps = fps;
+
+    // Emniyet 4: yeni limit henuz gecerli degil; olcum penceresini sifirla ve
+    // bir sonraki tiki atla ki eski rejimin kareleri karara karismasin.
+    if (m_captureManager) m_captureManager->ResetInputFpsWindow();
+    m_calibSettleTicks = 1;
+    m_calibNotApplied  = 0;
+
+    DLSS_Log("[Calib] Limit uygulandi: %d FPS (%ls)", fps, m_calibExeName.c_str());
+    return true;
+}
+
+void App::CalibRestoreOriginalLimit()
+{
+    // Emniyet 6
+    if (m_calibExeName.empty()) return;
+    RTSSManager::Get().SetFramerateLimit(m_calibExeName, m_calibOriginalLimit);
+    DLSS_Log("[Calib] Orijinal limit geri yuklendi: %d FPS (%ls)",
+             m_calibOriginalLimit, m_calibExeName.c_str());
+}
+
+void App::CalibAbort(const std::wstring& msg)
+{
+    CalibRestoreOriginalLimit();
+    m_calibState        = CalibState::Done;
+    m_calibMessage      = msg;
+    m_calibMessageTimer = GetTickCount64();
+    DLSS_Log("[Calib] DURDURULDU: %ls", msg.c_str());
+}
+
+void App::CalibFinish(int fps)
+{
+    if (fps < 0) fps = 0;
+
+    RTSSManager::Get().SetFramerateLimit(m_calibExeName, fps);
+    m_calibTargetFps    = fps;
+    m_calibState        = CalibState::Done;
+    m_calibMessage      = (fps == 0)
+        ? std::wstring(L"KALIBRASYON TAMAMLANDI: LIMIT GEREKMIYOR")
+        : L"KALIBRASYON TAMAMLANDI: " + std::to_wstring(fps) + L" FPS";
+    m_calibMessageTimer = GetTickCount64();
+    DLSS_Log("[Calib] TAMAMLANDI: %d FPS", fps);
+}
+
+void App::UpdateCalibration(const Dlss5Config& cfg)
+{
+    const bool calibDown    = (GetAsyncKeyState(cfg.vkCalib) & 0x8000) != 0;
+    const bool calibPressed = calibDown && !m_prevCalibDown;
+    m_prevCalibDown = calibDown;
+
+    const bool running = (m_calibState != CalibState::Idle && m_calibState != CalibState::Done);
+
+    // ---- Baslat / iptal ----
+    if (calibPressed)
+    {
+        if (running)
+        {
+            // Ayni tusa tekrar basmak iptal eder. Eskiden hicbir sey yapmiyordu;
+            // kaciga giren bir kalibrasyonu durdurmanin yolu yoktu.
+            CalibAbort(L"KALIBRASYON IPTAL EDILDI");
+            return;
+        }
+
+        if (m_calibState == CalibState::Idle)
+        {
+            m_calibExeName = ResolveTargetExeName();
+            if (m_calibExeName.empty())
+            {
+                m_calibMessage      = L"HATA: Hedef uygulama adi okunamadi.";
+                m_calibMessageTimer = GetTickCount64();
+                m_calibState        = CalibState::Done;
+                return;
+            }
+
+            // Emniyet 6: kullanicinin mevcut ayarini sakla.
+            m_calibOriginalLimit = RTSSManager::Get().GetFramerateLimit(m_calibExeName);
+            m_calibSteps         = 0;
+            m_calibHiBound       = 0;
+            m_calibLoFps         = 0;
+            m_calibNotApplied    = 0;
+            m_calibTimer         = GetTickCount64();
+            m_calibState         = CalibState::InitUncap;
+            m_calibMessage       = L"FPS LIMITI SIFIRLANIYOR...";
+
+            DLSS_Log("[Calib] Baslatildi: %ls (onceki limit=%d)",
+                     m_calibExeName.c_str(), m_calibOriginalLimit);
+
+            // Sinirsiza al ve oyunun gercek tavanini olc.
+            CalibApplyLimit(0);
+        }
+        return;
+    }
+
+    // ---- Mesaj zaman asimi ----
+    if (m_calibState == CalibState::Done)
+    {
+        if (GetTickCount64() - m_calibMessageTimer > 4000)
+        {
+            m_calibState   = CalibState::Idle;
+            m_calibMessage = L"";
+        }
+        return;
+    }
+
+    if (!running) return;
+
+    // ---- Adim zamanlayici ----
+    const ULONGLONG now = GetTickCount64();
+    if (now - m_calibTimer < kCalibStepMs) return;
+    m_calibTimer = now;
+
+    // Emniyet 5: mutlak adim tavani.
+    if (++m_calibSteps > kCalibMaxSteps)
+    {
+        CalibAbort(L"KALIBRASYON ZAMAN ASIMI - ayarlar geri alindi");
+        return;
+    }
+
+    // Emniyet 4: limit degisiminden sonraki ilk tik olcum icin guvenilir degil.
+    if (m_calibSettleTicks > 0)
+    {
+        --m_calibSettleTicks;
+        return;
+    }
+
+    // Emniyet 3: bayat olcumle karar verme.
+    const int inFps  = m_captureManager ? m_captureManager->GetInputFpsFresh() : 0;
+    const int outFps = GetOutputFpsFresh();
+    if (inFps <= 0 || outFps <= 0)
+    {
+        --m_calibSteps; // bu tik sayilmaz
+        DLSS_Log("[Calib] Olcum bayat (in=%d out=%d), tik atlandi", inFps, outFps);
+        return;
+    }
+
+    switch (m_calibState)
+    {
+    case CalibState::InitUncap:
+    {
+        // ---------------------------------------------------------------
+        // ARAMANIN UST SINIRI
+        // ---------------------------------------------------------------
+        // DIKKAT: sinirsiz fazda olculen giris FPS'i oyunun gercek tavani DEGILDIR.
+        // Sinirsizken oyun GPU'yu doldurur, WGC teslimati bozulur ve olcum gercegin
+        // cok altinda cikar. Gercek bir oturumda sinirsizken giris=16 olcuIdu, ama
+        // ayni oturumda limit=87 iken giris=40 geldi. Yani sinirsiz olcum, tavani
+        // OLDUGUNDAN KUCUK gosteriyor; ust sinir olarak kullanilamaz.
+        //
+        // Dogru ust sinir MONITOR YENILEME HIZIDIR; DWM ile kompoze edilen bir
+        // overlay bunun uzerine zaten cikamaz.
+        const int refreshHz = GetMonitorRefreshHz(m_overlayHwnd);
+        m_calibHiBound = (std::max)(inFps, refreshHz);
+        if (m_calibHiBound < kCalibMinFps) m_calibHiBound = kCalibMinFps;
+
+        DLSS_Log("[Calib] Sinirsiz olcum: giris=%d cikis=%d | monitor=%d Hz -> ust sinir=%d",
+                 inFps, outFps, refreshHz, m_calibHiBound);
+
+        if (CalibInSync(inFps, outFps))
+        {
+            // VLSS5 zaten oyunun tam hizina yetisiyor -> limit gereksiz.
+            CalibFinish(0);
+            return;
+        }
+
+        // Kaba taramaya TABANDAN basla ve 10'ar 10'ar cik.
+        //
+        // Neden ikili arama degil: bisection ilk sondayi araligin ortasina atiyordu
+        // (165 Hz monitorde 87 FPS). Bu hem kullaniciya anlamsiz goruniyor, hem de
+        // sistemin ulasamayacagi bir hiz test edildigi icin bilgi tasimiyordu --
+        // hedef 87 iken giris 40'ta kaliyor, sonda "desenkron" disinda bir sey
+        // soylemiyor. Dogru soru "hangi hizda bozuluyor", cevabi da tabandan
+        // yukari yuruyerek bulunur. Cevap tipik olarak dusuk oldugu icin (30-60)
+        // bu ayni zamanda DAHA HIZLI yakinsiyor.
+        m_calibLoFps = 0;   // henuz hicbir hiz dogrulanmadi
+        m_calibState = CalibState::CoarseUp;
+        m_calibMessage = L"FPS KALIBRE EDILIYOR (HEDEF: " + std::to_wstring(kCalibMinFps) + L")...";
+        CalibApplyLimit(kCalibMinFps);
+        return;
+    }
+
+    case CalibState::CoarseUp:
+    {
+        // Emniyet 2: limit yazildi ama oyun hala cok daha hizli kosuyorsa RTSS
+        // profili gercekten uygulamiyor demektir.
+        if (inFps > m_calibTargetFps * 3 / 2 + 10)
+        {
+            if (++m_calibNotApplied >= 2)
+            {
+                DLSS_Log("[Calib] RTSS limiti uygulanmiyor (hedef=%d, olculen giris=%d)",
+                         m_calibTargetFps, inFps);
+                CalibAbort(L"RTSS LIMITI UYGULANMIYOR - RTSS calisiyor mu?");
+                return;
+            }
+            return;
+        }
+        m_calibNotApplied = 0;
+
+        if (CalibInSync(inFps, outFps))
+        {
+            m_calibLoFps = m_calibTargetFps;   // bu hiz DOGRULANDI
+
+            if (inFps < m_calibTargetFps - 5)
+            {
+                // Oyun kendi ic limitine/tavanina takildi: hedefi yukseltmenin
+                // anlami yok, olculen gercek hizda bitir.
+                DLSS_Log("[Calib] Oyun kendi tavaninda (hedef=%d, giris=%d)",
+                         m_calibTargetFps, inFps);
+                CalibFinish(inFps);
+                return;
+            }
+            if (m_calibTargetFps >= m_calibHiBound)
+            {
+                // Monitor tavanina ulastik ve hala senkronuz.
+                CalibFinish(m_calibHiBound);
+                return;
+            }
+
+            int next = m_calibTargetFps + kCalibCoarseStep;
+            if (next > m_calibHiBound) next = m_calibHiBound;
+
+            DLSS_Log("[Calib] %d FPS tasiniyor (giris=%d cikis=%d) -> %d deneniyor",
+                     m_calibTargetFps, inFps, outFps, next);
+
+            m_calibMessage = L"FPS KALIBRE EDILIYOR (HEDEF: " + std::to_wstring(next) + L")...";
+            CalibApplyLimit(next);
+            return;
+        }
+
+        // Bozuldu. Cevap (son dogrulanan, mevcut hedef) araligindadir; 1'er inerek ara.
+        DLSS_Log("[Calib] %d FPS tasinmiyor (giris=%d cikis=%d) -> ince arama, taban=%d",
+                 m_calibTargetFps, inFps, outFps, m_calibLoFps);
+
+        {
+            const int floorFps = (m_calibLoFps > 0) ? m_calibLoFps : kCalibMinFps;
+            const int next     = m_calibTargetFps - 1;
+
+            if (next <= floorFps)
+            {
+                // Inecek yer yok: dogrulanmis en yuksek hizda bitir.
+                CalibFinish(floorFps);
+                return;
+            }
+
+            m_calibState   = CalibState::FineDown;
+            m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(next) + L")...";
+            CalibApplyLimit(next);
+        }
+        return;
+    }
+
+    case CalibState::FineDown:
+    {
+        if (CalibInSync(inFps, outFps))
+        {
+            CalibFinish(m_calibTargetFps);
+            return;
+        }
+
+        // Emniyet 1: ince arama, DOGRULANMIS en yuksek hizin altina inmez.
+        // m_calibLoFps hicbir zaman dogrulanmadiysa taban kCalibMinFps'tir.
+        // Boylece hedef asla 0'in (RTSS'te SINIRSIZ) altina dusemez ve eskiden
+        // gorulen "-30 FPS" kacisi yapisal olarak imkansizdir.
+        const int floorFps = (m_calibLoFps > 0) ? m_calibLoFps : kCalibMinFps;
+        const int next     = m_calibTargetFps - 1;
+
+        if (next <= floorFps)
+        {
+            CalibFinish(floorFps);
+            return;
+        }
+
+        m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(next) + L")...";
+        CalibApplyLimit(next);
+        return;
+    }
+
+    default:
+        return;
+    }
+}
+
+// ==========================================================================
 // Update
 // ==========================================================================
 
@@ -785,165 +1174,8 @@ void App::Update()
     }
     m_prevFpsDown = fpsDown;
 
-    // F2: Start FPS Calibration
-    const bool calibDown = (GetAsyncKeyState(cfg.vkCalib) & 0x8000) != 0;
-    if (calibDown && !m_prevCalibDown)
-    {
-        if (m_calibState == CalibState::Idle)
-        {
-            m_calibState = CalibState::InitUncap;
-            m_calibTargetFps = 0; // Sınırsız
-            m_calibTimer = GetTickCount64();
-            m_calibMessage = L"FPS LİMİTİ SIFIRLANIYOR...";
-            
-            // Get target exe name
-            wchar_t exePath[MAX_PATH] = {};
-            DWORD pid = 0;
-            GetWindowThreadProcessId(m_targetHwnd, &pid);
-            HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-            if (hProcess)
-            {
-                DWORD size = MAX_PATH;
-                QueryFullProcessImageNameW(hProcess, 0, exePath, &size);
-                CloseHandle(hProcess);
-                
-                std::wstring exeName = PathFindFileNameW(exePath);
-                DLSS_Log("[App] F2 Calibration started for exeName: %ls", exeName.c_str());
-
-                if (!RTSSManager::Get().SetFramerateLimit(exeName, m_calibTargetFps))
-                {
-                    m_calibState = CalibState::Done;
-                    m_calibMessage = L"HATA: RTSS Profili yazılamadı! Klasörü kontrol edin.";
-                    m_calibMessageTimer = GetTickCount64();
-                    DLSS_Log("[App] F2 Calibration failed to write to RTSS profile for %ls", exeName.c_str());
-                }
-            }
-        }
-    }
-    m_prevF2Down = f2Down;
-
-    // Run calibration state machine
-    if (m_calibState != CalibState::Idle)
-    {
-        ULONGLONG now = GetTickCount64();
-        // Wait 3 seconds per step for better accuracy
-        if (now - m_calibTimer > 3000)
-        {
-            m_calibTimer = now;
-            int inputFps = m_captureManager ? m_captureManager->GetCurrentInputFps() : 0;
-            int outputFps = m_currentFps;
-            
-            wchar_t exePath[MAX_PATH] = {};
-            DWORD pid = 0;
-            GetWindowThreadProcessId(m_targetHwnd, &pid);
-            HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
-            std::wstring exeName = L"";
-            if (hProcess)
-            {
-                DWORD size = MAX_PATH;
-                QueryFullProcessImageNameW(hProcess, 0, exePath, &size);
-                CloseHandle(hProcess);
-                exeName = PathFindFileNameW(exePath);
-            }
-
-            if (m_calibState == CalibState::InitUncap)
-            {
-                // Uncapped (limit=0) has been applied. Wait 1.5s then start at 10.
-                m_calibState = CalibState::CoarseUp;
-                m_calibTargetFps = 10;
-                m_calibMessage = L"FPS KALİBRE EDİLİYOR (HEDEF: 10)...";
-                if (!exeName.empty())
-                {
-                    if (!RTSSManager::Get().SetFramerateLimit(exeName, m_calibTargetFps))
-                    {
-                        m_calibState = CalibState::Done;
-                        m_calibMessage = L"HATA: RTSS Profili yazılamadı! Klasörü kontrol edin.";
-                        m_calibMessageTimer = now;
-                    }
-                }
-            }
-            else if (m_calibState == CalibState::CoarseUp)
-            {
-                // Is it synced?
-                if (std::abs(inputFps - outputFps) <= 1)
-                {
-                    if (inputFps < m_calibTargetFps - 5)
-                    {
-                        // Game natively capped
-                        m_calibState = CalibState::Done;
-                        m_calibTargetFps = inputFps;
-                        m_calibMessage = L"KALİBRASYON TAMAMLANDI: " + std::to_wstring(m_calibTargetFps) + L" FPS";
-                        m_calibMessageTimer = now;
-                        if (!exeName.empty()) RTSSManager::Get().SetFramerateLimit(exeName, m_calibTargetFps);
-                    }
-                    else
-                    {
-                        m_calibTargetFps += 10;
-                        m_calibMessage = L"FPS KALİBRE EDİLİYOR (HEDEF: " + std::to_wstring(m_calibTargetFps) + L")...";
-                        if (!exeName.empty())
-                        {
-                            if (!RTSSManager::Get().SetFramerateLimit(exeName, m_calibTargetFps))
-                            {
-                                m_calibState = CalibState::Done;
-                                m_calibMessage = L"HATA: RTSS Profili yazılamadı! Klasörü kontrol edin.";
-                                m_calibMessageTimer = now;
-                            }
-                        }
-                    }
-                }
-                else
-                {
-                    // Desync! Output is falling behind
-                    m_calibState = CalibState::FineDown;
-                    m_calibTargetFps -= 1;
-                    m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(m_calibTargetFps) + L")...";
-                    if (!exeName.empty())
-                    {
-                        if (!RTSSManager::Get().SetFramerateLimit(exeName, m_calibTargetFps))
-                        {
-                            m_calibState = CalibState::Done;
-                            m_calibMessage = L"HATA: RTSS Profili yazılamadı! Klasörü kontrol edin.";
-                            m_calibMessageTimer = now;
-                        }
-                    }
-                }
-            }
-            else if (m_calibState == CalibState::FineDown)
-            {
-                if (std::abs(inputFps - outputFps) <= 1)
-                {
-                    // Found sync!
-                    m_calibState = CalibState::Done;
-                    m_calibMessage = L"KALİBRASYON TAMAMLANDI: " + std::to_wstring(m_calibTargetFps) + L" FPS";
-                    m_calibMessageTimer = now;
-                }
-                else
-                {
-                    // Still desync
-                    m_calibTargetFps -= 1;
-                    m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(m_calibTargetFps) + L")...";
-                    if (!exeName.empty())
-                    {
-                        if (!RTSSManager::Get().SetFramerateLimit(exeName, m_calibTargetFps))
-                        {
-                            m_calibState = CalibState::Done;
-                            m_calibMessage = L"HATA: RTSS Profili yazılamadı! Klasörü kontrol edin.";
-                            m_calibMessageTimer = now;
-                        }
-                    }
-                }
-            }
-        }
-    }
-    
-    if (m_calibState == CalibState::Done)
-    {
-        if (GetTickCount64() - m_calibMessageTimer > 4000)
-        {
-            m_calibState = CalibState::Idle;
-            m_calibMessage = L"";
-        }
-    }
+    // FPS kalibrasyonu (durum makinesi + kacis emniyetleri ayri fonksiyonda)
+    UpdateCalibration(cfg);
 
     // Check F10 to toggle DLSS 5 on/off
     const bool vlssDown = (GetAsyncKeyState(cfg.vkToggleVlss) & 0x8000) != 0;
@@ -955,9 +1187,7 @@ void App::Update()
             // Eger devre disi kaldiysa mv ve ofa state clear!
             if (!m_dlssEnabled)
             {
-                auto of = m_renderer->GetNvOFManager();
-                if (of) of->ResetTracking();
-                m_renderer->ClearMotionVectors(m_context.Get());
+                // Removed invalid NvOFManager clear block
             }
             if (m_renderer->GetDLSSNRManager())
             {
@@ -968,10 +1198,10 @@ void App::Update()
                 m_renderer->GetDLSSManager()->SetEnabled(m_dlssEnabled);
             }
             int inputFps = m_captureManager ? m_captureManager->GetCurrentInputFps() : 0;
-            bool showWarning = !m_warningDismissed && (inputFps > m_currentFps + 20);
+            bool showWarning = !m_warningDismissed && (inputFps > m_fpsCurrent + 20);
             const double* history = m_captureManager ? m_captureManager->GetGapHistory() : nullptr;
             int historyIdx = m_captureManager ? m_captureManager->GetGapHistoryIdx() : 0;
-            m_renderer->UpdateOSD(m_context.Get(), m_currentFps, inputFps, showWarning, history, historyIdx, true, m_calibMessage);
+            m_renderer->UpdateOSD(m_context.Get(), m_fpsCurrent, inputFps, showWarning, history, historyIdx, true, m_calibMessage);
         }
     }
     m_prevVlssDown = vlssDown;
@@ -1027,19 +1257,21 @@ void App::Render(ID3D11ShaderResourceView* srv)
     QueryPerformanceCounter(&m_stageEnteredTime);
 
     // Measure our overlay window's actual render FPS
-    m_fpsFrameCount++;
+    m_fpsFrames++;
     double elapsed = double(frameStart.QuadPart - m_fpsLastTime.QuadPart) / double(m_fpsFreq.QuadPart);
     if (elapsed >= 0.5) // update every 500 ms for a clean, stable reading
     {
-        m_currentFps = static_cast<int>((m_fpsFrameCount / elapsed) + 0.5);
-        m_fpsFrameCount = 0;
+        m_fpsCurrent = static_cast<int>((m_fpsFrames / elapsed) + 0.5);
+        m_fpsFrames = 0;
         m_fpsLastTime = frameStart;
+        // Tazelik damgasi: kalibrasyon bayat cikis FPS'iyle karar vermesin.
+        m_fpsLastUpdateTick = GetTickCount64();
         
         int inputFps = m_captureManager ? m_captureManager->GetCurrentInputFps() : 0;
         
         // Show warning if input > output + 20 and not dismissed
         bool showWarning = false;
-        if (!m_warningDismissed && (inputFps > m_currentFps + 20))
+        if (!m_warningDismissed && (inputFps > m_fpsCurrent + 20))
         {
             showWarning = true;
         }
@@ -1047,7 +1279,7 @@ void App::Render(ID3D11ShaderResourceView* srv)
         const double* history = m_captureManager ? m_captureManager->GetGapHistory() : nullptr;
         int historyIdx = m_captureManager ? m_captureManager->GetGapHistoryIdx() : 0;
         
-        m_renderer->UpdateOSD(m_context.Get(), m_currentFps, inputFps, showWarning, history, historyIdx, true, m_calibMessage);
+        m_renderer->UpdateOSD(m_context.Get(), m_fpsCurrent, inputFps, showWarning, history, historyIdx, true, m_calibMessage);
     }
 
     // --- RenderFrame stage ---
@@ -1073,6 +1305,18 @@ void App::Render(ID3D11ShaderResourceView* srv)
     // Accumulate for 5-second summary
     m_sumTotalMs += totalMs;
     if (totalMs > m_maxTotalMs) m_maxTotalMs = totalMs;
+    m_sumRenderMs  += renderMs;
+    m_sumPresentMs += presentMs;
+    if (presentMs > m_maxPresentMs) m_maxPresentMs = presentMs;
+
+    // GPU suresi bir onceki karenin zaman damgalarindan gelir (BeginFrame'de
+    // okunur); orneklem basina bir kare gecikmeli olmasi ortalama icin onemsiz.
+    double gpuMs = 0.0;
+    if (m_renderer && m_renderer->GetD3D12Interop())
+        gpuMs = m_renderer->GetD3D12Interop()->GetLastGpuMs();
+    m_sumGpuMs += gpuMs;
+    if (gpuMs > m_maxGpuMs) m_maxGpuMs = gpuMs;
+
     m_timingSamples++;
 
     // Slow-frame threshold: >3× running average
@@ -1104,6 +1348,17 @@ void App::StopOverlay()
     m_running = false;
     m_state   = AppState::Menu;
 
+    // Yarim kalmis bir kalibrasyon varsa kullanicinin RTSS limitini geri yukle.
+    // Aksi halde oyun, arama sirasinda yazilmis gecici bir limitte (ornegin 10 FPS)
+    // takili kalirdi.
+    if (m_calibState != CalibState::Idle && m_calibState != CalibState::Done)
+    {
+        CalibRestoreOriginalLimit();
+    }
+    m_calibState   = CalibState::Idle;
+    m_calibMessage = L"";
+    m_calibExeName.clear();
+
     // Stop watchdog before tearing down resources
     StopWatchdog();
     m_currentStage.store("idle", std::memory_order_relaxed);
@@ -1134,19 +1389,12 @@ void App::StopOverlay()
         m_overlayHwnd = nullptr;
     }
 
-<<<<<<< Updated upstream
-=======
-    // Oturum bitti: thread imlec sayacini normale dondur.
-    // Bu cagri atlanirsa VLSS5 menusu uzerinde imlec gorunmez kalir.
-    SetOverlayCursorVisible(true);
-
+    // Oturum bitti
     RestoreTargetBorders();
-
->>>>>>> Stashed changes
     m_targetHwnd = nullptr;
     m_lastMonitor = nullptr;
     m_overlayFocused = false;
-    m_prevF8Down     = false;
+    m_prevFocusDown     = false;
     m_overlayHidden  = false;
 }
 
@@ -1325,12 +1573,56 @@ void App::FlushPerfStats()
     }
     m_lastPerfLogTime = now;
 
-    double avgMs = m_sumTotalMs / static_cast<double>(m_timingSamples);
-    DLSS_Log("[Perf] ozet: %llu kare | ort toplam: %.2f ms | maks toplam: %.2f ms",
-        m_timingSamples, avgMs, m_maxTotalMs);
+    const double n         = static_cast<double>(m_timingSamples);
+    const double avgMs     = m_sumTotalMs    / n;
+    const double avgRender = m_sumRenderMs   / n;
+    const double avgPresent= m_sumPresentMs  / n;
+    const double avgGpu    = m_sumGpuMs      / n;
+
+    DLSS_Log("[Perf] ozet: %llu kare | toplam ort/maks: %.2f/%.2f ms | "
+             "cpu-submit ort: %.2f ms | GPU ort/maks: %.2f/%.2f ms | present ort/maks: %.2f/%.2f ms",
+        m_timingSamples, avgMs, m_maxTotalMs, avgRender,
+        avgGpu, m_maxGpuMs, avgPresent, m_maxPresentMs);
+
+    // --- VRAM baskisi ---
+    // RTX 4060 = 8 GB. 2560x1440'ta oyun + DLSS-NR modeli + WGC havuzu + paylasilan
+    // dokular butceyi asarsa surucu sayfalamaya baslar; bu da once kademeli, sonra
+    // ani bir cokuse yol acar. Kullanim butcenin uzerindeyse suclu budur.
+    if (m_device)
+    {
+        ComPtr<IDXGIDevice> dxgiDev;
+        if (SUCCEEDED(m_device.As(&dxgiDev)))
+        {
+            ComPtr<IDXGIAdapter> adapter;
+            if (SUCCEEDED(dxgiDev->GetAdapter(&adapter)))
+            {
+                ComPtr<IDXGIAdapter3> adapter3;
+                if (SUCCEEDED(adapter.As(&adapter3)))
+                {
+                    DXGI_QUERY_VIDEO_MEMORY_INFO vm = {};
+                    if (SUCCEEDED(adapter3->QueryVideoMemoryInfo(0, DXGI_MEMORY_SEGMENT_GROUP_LOCAL, &vm)))
+                    {
+                        const double usedMB   = vm.CurrentUsage  / (1024.0 * 1024.0);
+                        const double budgetMB = vm.Budget        / (1024.0 * 1024.0);
+                        const double resMB    = vm.CurrentReservation / (1024.0 * 1024.0);
+                        DLSS_Log("[VRAM] kullanim=%.0f MB / butce=%.0f MB (%.0f%%)%s | rezerve=%.0f MB",
+                            usedMB, budgetMB,
+                            (budgetMB > 0.0) ? (usedMB * 100.0 / budgetMB) : 0.0,
+                            (vm.CurrentUsage > vm.Budget) ? "  <-- BUTCE ASILDI, surucu sayfaliyor" : "",
+                            resMB);
+                    }
+                }
+            }
+        }
+    }
 
     m_sumTotalMs    = 0.0;
     m_maxTotalMs    = 0.0;
+    m_sumRenderMs   = 0.0;
+    m_sumPresentMs  = 0.0;
+    m_maxPresentMs  = 0.0;
+    m_sumGpuMs      = 0.0;
+    m_maxGpuMs      = 0.0;
     m_timingSamples = 0;
 }
 
