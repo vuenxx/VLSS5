@@ -1229,6 +1229,12 @@ void App::Update()
     }
     s_prevSettingsDown = settingsDown;
 
+    // Ayarlar penceresi acikken bazi oyunlar focus kaybina ragmen ClipCursor'u
+    // her frame yeniden uyguluyor; imlecin pencerede serbest kalmasi icin
+    // clip rect'i surekli temiz tutuyoruz.
+    if (SettingsWindow::IsOpen())
+        ClipCursor(nullptr);
+
     // Keep overlay perfectly aligned with the moving/resizing target.
     UpdateOverlayPosition();
 

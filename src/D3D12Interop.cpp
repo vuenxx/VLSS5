@@ -485,10 +485,9 @@ bool D3D12Interop::CreateCrossAdapterBridge(int workWidth, int workHeight)
         D3D12_HEAP_DESC hd = {};
         hd.SizeInBytes     = xb.sizeBytes;
         hd.Properties.Type = D3D12_HEAP_TYPE_DEFAULT;
-        hd.Alignment       = D3D12_CROSS_ADAPTER_RESOURCE_PLACEMENT_ALIGNMENT;
+        hd.Alignment       = D3D12_DEFAULT_RESOURCE_PLACEMENT_ALIGNMENT;
         hd.Flags           = D3D12_HEAP_FLAG_SHARED
-                           | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER
-                           | D3D12_HEAP_FLAG_ALLOW_ONLY_BUFFERS;
+                           | D3D12_HEAP_FLAG_SHARED_CROSS_ADAPTER;
 
         ComPtr<ID3D12Heap> heapCreator, heapOpener;
         HRESULT hr = creator->CreateHeap(&hd, IID_PPV_ARGS(&heapCreator));

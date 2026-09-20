@@ -422,11 +422,13 @@ static bool StartCaptureWithTarget(HWND hwnd, HWND target)
         return false;
     }
 
-    ShowWindow(hwnd, SW_HIDE);
+    // Overlay calisirken ana pencere GIZLENMEZ, sadece simge durumuna kucultulur.
+    // SW_HIDE taskbar kaydini da siliyordu ve kullanici programi kapatamiyordu.
+    ShowWindow(hwnd, SW_MINIMIZE);
 
     if (!g_app->StartOverlay(hwnd, target, g_vsyncEnabled, g_dlssEnabled, g_fpsEnabled, g_fullscreenStretch))
     {
-        ShowWindow(hwnd, SW_SHOW);
+        ShowWindow(hwnd, SW_RESTORE);
         SetForegroundWindow(hwnd);
         SetStatus(L"Overlay başlatılamadı. Pencereyi kontrol edin.");
         return false;
@@ -448,7 +450,7 @@ static bool StartCaptureWithTarget(HWND hwnd, HWND target)
     }
 
     // When returned, restore main window
-    ShowWindow(hwnd, SW_SHOW);
+    ShowWindow(hwnd, SW_RESTORE);
     SetForegroundWindow(hwnd);
     BringWindowToTop(hwnd);
     PopulateList(hwnd);

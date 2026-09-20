@@ -124,6 +124,50 @@ void SettingsWindow::Initialize(HINSTANCE hInstance)
     RegisterClassExW(&wct);
 }
 
+// ---------------------------------------------------------------------------
+// ForceForeground
+//   Oyun foreground'dayken SetForegroundWindow sessizce yok sayilir (foreground
+//   lock). Bu yuzden hedef thread'e AttachThreadInput ile baglanip kilit
+//   timeout'unu gecici olarak sifirliyoruz. Amac pencereyi one almak DEGIL;
+//   oyunun gercekten WM_ACTIVATEAPP/WM_KILLFOCUS alip mouse'u KENDI birakmasi.
+//   Aksi halde oyun her frame SetCursorPos(merkez) + ClipCursor yapmaya devam
+//   eder ve imlec ekranin ortasinda cakili kalir.
+// ---------------------------------------------------------------------------
+static void ForceForeground(HWND hwnd)
+{
+    if (!hwnd) return;
+
+    HWND  fg    = GetForegroundWindow();
+    DWORD fgTid = fg ? GetWindowThreadProcessId(fg, nullptr) : 0;
+    DWORD myTid = GetCurrentThreadId();
+
+    DWORD lockTimeout = 0;
+    SystemParametersInfoW(SPI_GETFOREGROUNDLOCKTIMEOUT, 0, &lockTimeout, 0);
+    SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0,
+                          reinterpret_cast<PVOID>(0), SPIF_SENDCHANGE);
+
+    const bool attached = (fgTid != 0 && fgTid != myTid &&
+                           AttachThreadInput(myTid, fgTid, TRUE) != 0);
+
+    ShowWindow(hwnd, SW_SHOW);
+    SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+    BringWindowToTop(hwnd);
+    SetForegroundWindow(hwnd);
+    SetActiveWindow(hwnd);
+    SetFocus(hwnd);
+
+    if (attached)
+        AttachThreadInput(myTid, fgTid, FALSE);
+
+    SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0,
+                          reinterpret_cast<PVOID>(static_cast<UINT_PTR>(lockTimeout)),
+                          SPIF_SENDCHANGE);
+
+    // Emniyet kemeri: bazi motorlar focus kaybinda bile clip rect'i birakmiyor.
+    ClipCursor(nullptr);
+}
+
 void SettingsWindow::Show(HWND parent)
 {
     if (!s_hwnd)
@@ -133,13 +177,19 @@ void SettingsWindow::Show(HWND parent)
         int x = (GetSystemMetrics(SM_CXSCREEN) - w) / 2;
         int y = (GetSystemMetrics(SM_CYSCREEN) - h) / 2;
 
+        // NOT: owner olarak overlay penceresi VERILMEZ. Overlay WS_EX_NOACTIVATE
+        // oldugu icin ona bagli bir popup duzgun aktive olmuyordu.
+        HWND owner = parent;
+        if (owner && (GetWindowLongPtrW(owner, GWL_EXSTYLE) & WS_EX_NOACTIVATE))
+            owner = nullptr;
+
         s_hwnd = CreateWindowExW(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
             L"VLSS5_SettingsWindowClass",
             L"VLSS5 Nöral Yapılandırma",
             WS_POPUP | WS_CAPTION | WS_SYSMENU | WS_VISIBLE,
             x, y, w, h,
-            parent, nullptr, s_hInstance, nullptr);
+            owner, nullptr, s_hInstance, nullptr);
 
         if (s_hwnd)
         {
@@ -158,11 +208,9 @@ void SettingsWindow::Show(HWND parent)
             DwmSetWindowAttribute(s_hwnd, 33 /* DWMWA_WINDOW_CORNER_PREFERENCE */, &cornerPref, sizeof(cornerPref));
         }
     }
-    else
-    {
-        ShowWindow(s_hwnd, SW_SHOW);
-        SetForegroundWindow(s_hwnd);
-    }
+
+    // Hem ilk olusturmada hem tekrar gosterimde: foreground'i gercekten al.
+    ForceForeground(s_hwnd);
 
     UpdateControlValues();
 }
@@ -172,6 +220,7 @@ void SettingsWindow::Hide()
     if (s_hwnd)
     {
         ShowWindow(s_hwnd, SW_HIDE);
+        ClipCursor(nullptr);
     }
 }
 
