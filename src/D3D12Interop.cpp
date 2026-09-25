@@ -10,6 +10,78 @@
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 
+// bkz. D3D12Interop.h'deki aciklama: process-omurlu, oturumlar arasi paylasilan D3D12 cihazi/kuyruk.
+ComPtr<ID3D12Device>       D3D12Interop::m_d3d12Device;
+ComPtr<ID3D12CommandQueue> D3D12Interop::m_cmdQueue;
+LUID                       D3D12Interop::s_deviceAdapterLuid = {};
+bool                       D3D12Interop::s_deviceCrossAdapter = false;
+bool                       D3D12Interop::s_deviceValid = false;
+
+// ---------------------------------------------------------------------------
+// EnsureDevice
+// ---------------------------------------------------------------------------
+bool D3D12Interop::EnsureDevice(IDXGIAdapter* chosenAdapter, bool crossAdapter)
+{
+    DXGI_ADAPTER_DESC desc = {};
+    chosenAdapter->GetDesc(&desc);
+
+    if (s_deviceValid && m_d3d12Device && m_cmdQueue &&
+        s_deviceCrossAdapter == crossAdapter &&
+        memcmp(&s_deviceAdapterLuid, &desc.AdapterLuid, sizeof(LUID)) == 0)
+    {
+        DLSS_Log("[D3D12Interop] Mevcut D3D12 cihazi/komut kuyrugu yeniden kullaniliyor ('%ls').", desc.Description);
+        return true;
+    }
+
+    // Hedef farkli (ya da ilk cagri): eskisini birak, sifirdan kur.
+    m_cmdQueue.Reset();
+    m_d3d12Device.Reset();
+    s_deviceValid = false;
+
+    HRESULT hr = D3D12CreateDevice(chosenAdapter, D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_d3d12Device));
+    if (FAILED(hr)) return false;
+
+    D3D12_COMMAND_QUEUE_DESC qDesc = {};
+    qDesc.Type     = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    qDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+
+    D3D12_FEATURE_DATA_COMMAND_QUEUE_PRIORITY queuePriority = {};
+    queuePriority.CommandListType = D3D12_COMMAND_LIST_TYPE_DIRECT;
+    queuePriority.Priority        = D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME;
+
+    if (SUCCEEDED(m_d3d12Device->CheckFeatureSupport(
+            D3D12_FEATURE_COMMAND_QUEUE_PRIORITY,
+            &queuePriority,
+            sizeof(queuePriority))) &&
+        queuePriority.PriorityForTypeIsSupported)
+    {
+        qDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME;
+    }
+
+    hr = m_d3d12Device->CreateCommandQueue(&qDesc, IID_PPV_ARGS(&m_cmdQueue));
+    if (FAILED(hr) && qDesc.Priority == D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME)
+    {
+        DLSS_Log("[D3D12Interop] GLOBAL_REALTIME queue creation failed (0x%08X), falling back to HIGH priority.", hr);
+        qDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
+        hr = m_d3d12Device->CreateCommandQueue(&qDesc, IID_PPV_ARGS(&m_cmdQueue));
+    }
+
+    if (FAILED(hr))
+    {
+        DLSS_Log("[D3D12Interop] ERROR: CreateCommandQueue failed: 0x%08X", hr);
+        m_d3d12Device.Reset();
+        return false;
+    }
+
+    DLSS_Log("[D3D12Interop] Command queue created with %s priority.",
+             (qDesc.Priority == D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME) ? "GLOBAL_REALTIME" : "HIGH");
+
+    s_deviceAdapterLuid  = desc.AdapterLuid;
+    s_deviceCrossAdapter = crossAdapter;
+    s_deviceValid        = true;
+    return true;
+}
+
 bool D3D12Interop::Init(ID3D11Device* d3d11Dev, ID3D11DeviceContext* d3d11Ctx, int width, int height, int workWidth, int workHeight)
 {
     Cleanup();
@@ -74,20 +146,24 @@ bool D3D12Interop::Init(ID3D11Device* d3d11Dev, ID3D11DeviceContext* d3d11Ctx, i
     chosenAdapter->GetDesc(&chosenDesc);
     m_dlssGpuName = chosenDesc.Description;
 
-    HRESULT hr = D3D12CreateDevice(chosenAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_d3d12Device));
-    if (FAILED(hr) && m_crossAdapter)
+    HRESULT hr = S_OK;
+    if (!EnsureDevice(chosenAdapter.Get(), m_crossAdapter) && m_crossAdapter)
     {
         // Secilen DLSS karti D3D12 destekleyemiyor: tek-adapter moduna geri don.
-        DLSS_Log("[D3D12Interop] UYARI: DLSS GPU'su '%ls' uzerinde D3D12CreateDevice basarisiz (0x%08X); "
-                 "yakalama GPU'suna geri donuluyor.", m_dlssGpuName.c_str(), hr);
+        DLSS_Log("[D3D12Interop] UYARI: DLSS GPU'su '%ls' uzerinde D3D12CreateDevice basarisiz; "
+                 "yakalama GPU'suna geri donuluyor.", m_dlssGpuName.c_str());
         m_crossAdapter = false;
         chosenAdapter  = captureAdapter;
         m_dlssGpuName  = m_captureGpuName;
-        hr = D3D12CreateDevice(chosenAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_d3d12Device));
+        if (!EnsureDevice(chosenAdapter.Get(), m_crossAdapter))
+        {
+            DLSS_Log("[D3D12Interop] ERROR: D3D12CreateDevice failed.");
+            return false;
+        }
     }
-    if (FAILED(hr))
+    else if (!m_d3d12Device)
     {
-        DLSS_Log("[D3D12Interop] ERROR: D3D12CreateDevice failed: 0x%08X", hr);
+        DLSS_Log("[D3D12Interop] ERROR: D3D12CreateDevice failed.");
         return false;
     }
 
@@ -101,12 +177,10 @@ bool D3D12Interop::Init(ID3D11Device* d3d11Dev, ID3D11DeviceContext* d3d11Ctx, i
             DLSS_Log("[D3D12Interop] UYARI: Cross-adapter kopru kurulamadi; tek-adapter moda geri donuluyor.");
             CleanupCrossAdapter();
             m_crossAdapter = false;
-            m_d3d12Device.Reset();
             m_dlssGpuName = m_captureGpuName;
-            hr = D3D12CreateDevice(captureAdapter.Get(), D3D_FEATURE_LEVEL_11_0, IID_PPV_ARGS(&m_d3d12Device));
-            if (FAILED(hr))
+            if (!EnsureDevice(captureAdapter.Get(), m_crossAdapter))
             {
-                DLSS_Log("[D3D12Interop] ERROR: D3D12CreateDevice (geri donus) failed: 0x%08X", hr);
+                DLSS_Log("[D3D12Interop] ERROR: D3D12CreateDevice (geri donus) failed.");
                 return false;
             }
         }
@@ -114,41 +188,6 @@ bool D3D12Interop::Init(ID3D11Device* d3d11Dev, ID3D11DeviceContext* d3d11Ctx, i
     else
     {
         DLSS_Log("[D3D12Interop] Tek-adapter mod: D3D12 cihazi '%ls' uzerinde.", m_dlssGpuName.c_str());
-    }
-
-    // Create Direct Command Queue with elevated GPU scheduling priority (GLOBAL_REALTIME or HIGH)
-    // so VLSS5's DLSS/Neural Rendering passes get prioritized by the WDDM GPU scheduler.
-    D3D12_COMMAND_QUEUE_DESC qDesc = {};
-    qDesc.Type     = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    qDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
-
-    // Check hardware/driver support for GLOBAL_REALTIME queue priority via CheckFeatureSupport
-    D3D12_FEATURE_DATA_COMMAND_QUEUE_PRIORITY queuePriority = {};
-    queuePriority.CommandListType = D3D12_COMMAND_LIST_TYPE_DIRECT;
-    queuePriority.Priority        = D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME;
-
-    if (SUCCEEDED(m_d3d12Device->CheckFeatureSupport(
-            D3D12_FEATURE_COMMAND_QUEUE_PRIORITY,
-            &queuePriority,
-            sizeof(queuePriority))) &&
-        queuePriority.PriorityForTypeIsSupported)
-    {
-        qDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME;
-    }
-
-    hr = m_d3d12Device->CreateCommandQueue(&qDesc, IID_PPV_ARGS(&m_cmdQueue));
-    if (FAILED(hr) && qDesc.Priority == D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME)
-    {
-        // GLOBAL_REALTIME creation can fail if process lacks sufficient privileges; fallback to HIGH
-        DLSS_Log("[D3D12Interop] GLOBAL_REALTIME queue creation failed (0x%08X), falling back to HIGH priority.", hr);
-        qDesc.Priority = D3D12_COMMAND_QUEUE_PRIORITY_HIGH;
-        hr = m_d3d12Device->CreateCommandQueue(&qDesc, IID_PPV_ARGS(&m_cmdQueue));
-    }
-
-    if (FAILED(hr))
-    {
-        DLSS_Log("[D3D12Interop] ERROR: CreateCommandQueue failed: 0x%08X", hr);
-        return false;
     }
 
     // --- GPU zaman damgasi altyapisi (teshis) ---
@@ -191,9 +230,6 @@ bool D3D12Interop::Init(ID3D11Device* d3d11Dev, ID3D11DeviceContext* d3d11Ctx, i
 
     if (!m_tsHeap)
         DLSS_Log("[D3D12Interop] NOT: GPU zaman damgasi sorgulari kullanilamiyor, gpu suresi olculemeyecek.");
-
-    DLSS_Log("[D3D12Interop] Command queue created with %s priority.",
-             (qDesc.Priority == D3D12_COMMAND_QUEUE_PRIORITY_GLOBAL_REALTIME) ? "GLOBAL_REALTIME" : "HIGH");
 
     // Create Command Allocators (triple-buffered)
     for (UINT i = 0; i < kCmdAllocCount; ++i)
@@ -1188,8 +1224,9 @@ void D3D12Interop::Cleanup()
         m_allocFenceValue[i] = 0;
     }
     m_allocIndex = 0;
-    m_cmdQueue.Reset();
-    m_d3d12Device.Reset();
+    // m_cmdQueue/m_d3d12Device KASITLI OLARAK sifirlanmiyor -- static,
+    // process-omurlu (bkz. header aciklamasi). Bir sonraki Init() ayni
+    // adapter/moda ihtiyac duyarsa EnsureDevice bunlari oldugu gibi kullanir.
 
     m_d3d11Ctx4.Reset();
     m_d3d11Dev5.Reset();

@@ -3,7 +3,13 @@ name: Release
 # "v*" bicimindeki bir git tag push edildiginde (orn. v0.6.0) tetiklenir:
 # 1) VLSS5.vcxproj'u Release|x64 derler,
 # 2) installer/VLSS5.iss'i o surumle Inno Setup ile derleyip VLSS5-Setup-<surum>.exe uretir,
-# 3) GitHub Release'i bu Setup.exe'yi asset olarak ekleyerek olusturur/gunceller.
+# 3) GitHub Release'i TASLAK (draft) olarak olusturur -- asset ekli, ama
+#    HENUZ YAYIMLANMAMIS. Tag push etmek artik dogrudan kullanicilara
+#    guncelleme cikmiyor -- GitHub'da Releases sayfasindan taslagi
+#    inceleyip/duzenleyip "Publish release"e SIZ basana kadar hicbir sey
+#    yayimlanmaz. (GitHub'in public /releases API'si draft'lari zaten
+#    DONDURMEZ -- UpdateChecker.cpp da ayrica draft'lari filtreler --
+#    yani taslak asamasinda hicbir kullanicinin VLSS5'i bunu gormez.)
 #
 # src/UpdateChecker.cpp bu asset'i (adindaki "Setup" ibaresinden) otomatik
 # bulup indirir ve sessizce calistirir -- yani bu workflow, uygulama
@@ -62,10 +68,11 @@ jobs:
           path: installer/VLSS5.iss
           options: /DMyAppVersion=${{ steps.version.outputs.version }}
 
-      - name: Create GitHub Release
+      - name: Create GitHub Release (draft)
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.version }}
           name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
+          draft: true
           files: installer/Output/VLSS5-Setup-${{ steps.version.outputs.version }}.exe

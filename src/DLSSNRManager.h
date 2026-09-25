@@ -188,23 +188,42 @@ private:
     ID3D12Device*       m_device = nullptr;
     ID3D12CommandQueue* m_queue  = nullptr;
 
-    // NGX Core pointers
-    HMODULE                                     m_hNgxCore = nullptr;
-    PFN_NVSDK_NGX_D3D12_Init_Ext                m_pfnInitExt = nullptr;
-    PFN_NVSDK_NGX_D3D12_GetCapabilityParameters m_pfnGetCaps = nullptr;
-    PFN_NVSDK_NGX_D3D12_AllocateParameters      m_pfnAllocParams = nullptr;
-    PFN_NVSDK_NGX_D3D12_DestroyParameters       m_pfnDestroyParams = nullptr;
+    // ---- process-omurlu, TUM DLSSNRManager ornekleri arasinda PAYLASILAN durum ----
+    // NEDEN static: her "Baslat/Durdur" oturumunda Renderer (dolayisiyla
+    // DLSSNRManager) SIFIRDAN bir nesne olarak yeniden kuruluyordu. Eskiden
+    // Cleanup() m_params'i yok ediyordu (m_hNgxCore/m_hForwarder DLL
+    // handle'lari zaten hicbir zaman FreeLibrary edilmiyordu -- NGX'in arka
+    // plan thread'leri yuzunden bu guvensiz, bkz. asagidaki not) -- bu da
+    // LoadNGXCore()'daki "zaten yuklu mu" korumasini (m_hNgxCore && m_params)
+    // her YENI ornekte anlamsiz kiliyordu (yeni ornegin m_params'i hep null
+    // baslar) ve NVSDK_NGX_D3D12_Init_Ext SÜREÇ ICINDE HALA CANLI olan NGX
+    // calisma zamanina karsi İKİNCİ/UCUNCU kez cagriliyordu -- muhtemelen 2.
+    // acilistaki fazladan donma/bozulmaya katkisi bu. D3D12Interop'un cihazi
+    // da artik ayni sebeple kalici oldugundan (bkz. D3D12Interop.h), Init_Ext'i
+    // GERCEKTEN o kalici cihaza karsi sadece BIR KEZ cagirip s_ngxDevice ile
+    // izliyoruz; farkli bir cihaza gecilirse (GPU tercihi degisti) yeniden
+    // cagiriyoruz.
+    //
+    // NOT: Ayni "hic Shutdown/FreeLibrary cagirma" deseni burada da geçerli --
+    // NVIDIA NGX arka plan thread'leri surdurdugunden bunlari kapatmak/bosaltmak
+    // 0xC0000005 cokmesine yol acabilir (bkz. DLSSManager.cpp'deki ayni not).
+    static ID3D12Device*                               s_ngxDevice;
+    static HMODULE                                     s_hNgxCore;
+    static PFN_NVSDK_NGX_D3D12_Init_Ext                s_pfnInitExt;
+    static PFN_NVSDK_NGX_D3D12_GetCapabilityParameters  s_pfnGetCaps;
+    static PFN_NVSDK_NGX_D3D12_AllocateParameters       s_pfnAllocParams;
+    static PFN_NVSDK_NGX_D3D12_DestroyParameters        s_pfnDestroyParams;
+    static void*                                        s_params;
 
-    void* m_params = nullptr;
-
-    // Forwarder pointers
-    HMODULE                        m_hForwarder = nullptr;
-    PFN_dlssnr_call_create         m_pfnCreate = nullptr;
-    PFN_dlssnr_call_evaluate       m_pfnEvaluate = nullptr;
-    PFN_dlssnr_call_release        m_pfnRelease = nullptr;
-    PFN_dlssnr_call_set_float_slot m_pfnSetFloatSlot = nullptr;
-    int*                           m_pLastInit = nullptr;
-    int*                           m_pLastCreate = nullptr;
+    // Forwarder pointers -- cihazdan bagimsiz (sadece DLL yukleme/GetProcAddress),
+    // bu yuzden herhangi bir cihaz karsilastirmasina gerek yok, bir kez yeter.
+    static HMODULE                        s_hForwarder;
+    static PFN_dlssnr_call_create         s_pfnCreate;
+    static PFN_dlssnr_call_evaluate       s_pfnEvaluate;
+    static PFN_dlssnr_call_release        s_pfnRelease;
+    static PFN_dlssnr_call_set_float_slot s_pfnSetFloatSlot;
+    static int*                           s_pLastInit;
+    static int*                           s_pLastCreate;
 
     // Aktif Feature Handle'lari -- gecis basina bir tane (indeks 0 = ilk gecis).
     static constexpr int kMaxPasses = 4;

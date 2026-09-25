@@ -100,7 +100,14 @@ private:
     int                               m_probeRingIndex = 0;
     int                               m_probeFramesPending = 0;
 
-    ComPtr<ID3D11ComputeShader>       m_opticalFlowCS;
+    // static: D3DCompile (OPTIMIZATION_LEVEL3, ic ice [unroll] dongulu block-matching
+    // shader'i) tek basina saniyeler surebiliyor -- her "Baslat/Durdur" oturumunda
+    // yeniden derlemek yerine, D3D11 cihazi zaten process omru boyunca kalici
+    // oldugundan (bkz. App.cpp/NvOFManager.h ayni deseni), derlenmis shader'i bir
+    // kez uretip process boyunca paylasiyoruz (bkz. proje notlari: "2. acilista
+    // ekran donuyor" -- NVOF donanim oturumunu paylasmak TEK BASINA yetmedi,
+    // asil suphelinin bu shader derlemeleri oldugu buradan anlasildi).
+    static ComPtr<ID3D11ComputeShader> s_opticalFlowCS;
     ComPtr<ID3D11Buffer>              m_constantBuffer;
     ComPtr<ID3D11SamplerState>        m_linearSampler;
 
@@ -114,7 +121,9 @@ private:
     // yakalar. Ayni 32x18 izgarayi (kProbeGridW/H) kullanir ama Probe'un
     // aksine HER karede calisir -- sahne kesmesi 300 karede birde degil,
     // herhangi bir karede olabilir.
-    ComPtr<ID3D11ComputeShader>       m_photoConfCS;
+    // static: ayni sebep (bkz. s_opticalFlowCS yorumu) -- bu shader daha kucuk
+    // ama yine de gereksiz her session'da yeniden derlenmesin.
+    static ComPtr<ID3D11ComputeShader> s_photoConfCS;
     ComPtr<ID3D11Buffer>              m_photoConfCB;
     ComPtr<ID3D11Texture2D>           m_confTexture;   // 32x18 R32_FLOAT UAV (GPU sonucu)
     ComPtr<ID3D11UnorderedAccessView> m_confUAV;

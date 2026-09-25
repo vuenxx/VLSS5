@@ -87,8 +87,28 @@ Name: "{group}\{cm:UninstallProgram,{#MyAppName}}"; Filename: "{uninstallexe}"
 Name: "{autodesktop}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"; Tasks: desktopicon
 
 [Run]
-; skipifsilent: sadece INTERAKTIF/ilk kurulumda "Programi Baslat" secenegi
-; gosterir. Sessiz GUNCELLEMELERDE bunun yerine yukaridaki RestartApplications
-; (Restart Manager) devreye girer -- CloseApplications'in kapattigi VLSS5.exe'yi
-; otomatik yeniden baslatir, boylece burada IKINCI bir baslatma OLMAZ.
-Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall skipifsilent
+; ONEMLI: skipifsilent BURADA YOK -- bilerek. Ilk tasarimda RestartApplications'a
+; (Restart Manager) guveniyorduk: CloseApplications calisan VLSS5.exe'yi kapatip
+; kurulum bitince kendisi yeniden baslatacakti. Ama Main.cpp'deki
+; LaunchSilentInstallAndExit, installer'i baslattiktan HEMEN SONRA kendi
+; penceresini (WM_CLOSE) kapatiyor -- yani Setup.exe RM taramasini yapana kadar
+; VLSS5.exe COKTAN kapanmis oluyor. RM'nin "kapattigi" hicbir sey OLMADIGI icin
+; RestartApplications'in yeniden baslatacagi da hicbir sey olmuyor -- guncelleme
+; sorunsuz tamamlaniyor ama uygulama bir daha ACILMIYORDU.
+;
+; Cozum: bu [Run] girdisini SESSIZ kurulumlarda da (skipifsilent OLMADAN)
+; calistiriyoruz -- boylece yeniden baslatma RM'nin bir seyi yakalayip
+; yakalamamasina BAGIMLI DEGIL, HER ZAMAN garantili calisiyor. Interaktif
+; kurulumda hala Bitir sayfasindaki (varsayilan isaretli) checkbox olarak
+; gorunur, kullanici isterse kaldirabilir.
+;
+; runascurrentuser: "postinstall" bayragi TEK BASINA kullanildiginda Inno'nun
+; ORTUK varsayilani "runasoriginaluser"dir (uygulamayi kurulumdan ONCEKI,
+; YUKSELTILMEMIS kullanici olarak baslatmaya calisir -- bkz.
+; jrsoftware.org/ishelp/topic_runsection.htm). VLSS5.exe'nin KENDI manifestosu
+; RequireAdministrator istedigi icin bu, "gerekli yukseltme"
+; (ERROR_ELEVATION_REQUIRED) hatasiyla SESSIZCE BASARISIZ oluyordu. runascurrentuser
+; bunu ezip VLSS5.exe'yi Setup'in ZATEN SAHIP OLDUGU (admin) kimlik bilgileriyle
+; baslatir -- Main.cpp'deki LaunchSilentInstallAndExit'in CreateProcessW ile
+; ayni elevate-parent'tan cocuk surec baslatma mantigi.
+Filename: "{app}\{#MyAppExeName}"; Description: "{cm:LaunchProgram,{#MyAppName}}"; Flags: nowait postinstall runascurrentuser

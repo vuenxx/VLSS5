@@ -5,6 +5,22 @@
 #include <shlwapi.h>
 #pragma comment(lib, "shlwapi.lib")
 
+// bkz. DLSSNRManager.h'deki aciklama: process-omurlu, oturumlar arasi paylasilan NGX/forwarder durumu.
+ID3D12Device*                               DLSSNRManager::s_ngxDevice = nullptr;
+HMODULE                                     DLSSNRManager::s_hNgxCore = nullptr;
+PFN_NVSDK_NGX_D3D12_Init_Ext                DLSSNRManager::s_pfnInitExt = nullptr;
+PFN_NVSDK_NGX_D3D12_GetCapabilityParameters  DLSSNRManager::s_pfnGetCaps = nullptr;
+PFN_NVSDK_NGX_D3D12_AllocateParameters       DLSSNRManager::s_pfnAllocParams = nullptr;
+PFN_NVSDK_NGX_D3D12_DestroyParameters        DLSSNRManager::s_pfnDestroyParams = nullptr;
+void*                                        DLSSNRManager::s_params = nullptr;
+HMODULE                        DLSSNRManager::s_hForwarder = nullptr;
+PFN_dlssnr_call_create         DLSSNRManager::s_pfnCreate = nullptr;
+PFN_dlssnr_call_evaluate       DLSSNRManager::s_pfnEvaluate = nullptr;
+PFN_dlssnr_call_release        DLSSNRManager::s_pfnRelease = nullptr;
+PFN_dlssnr_call_set_float_slot DLSSNRManager::s_pfnSetFloatSlot = nullptr;
+int*                           DLSSNRManager::s_pLastInit = nullptr;
+int*                           DLSSNRManager::s_pLastCreate = nullptr;
+
 bool DLSSNRManager::Init(ID3D12Device* device, ID3D12CommandQueue* queue, int width, int height)
 {
     Cleanup();
@@ -111,81 +127,92 @@ bool DLSSNRManager::Init(ID3D12Device* device, ID3D12CommandQueue* queue, int wi
 
 bool DLSSNRManager::LoadNGXCore()
 {
-    if (m_hNgxCore && m_params) return true;
+    // Zaten bu AYNI cihaza karsi kurulmus bir NGX context'imiz varsa (bkz.
+    // header'daki uzun aciklama), Init_Ext'i TEKRAR cagirmadan oldugu gibi
+    // kullan. D3D12Interop'un cihazi artik process-omurlu oldugundan bu,
+    // normal kosullarda HER ZAMAN ikinci ve sonraki oturumlarda tetiklenir.
+    if (s_hNgxCore && s_params && s_ngxDevice == m_device) return true;
 
-    // 1. Try local application directory first
-    wchar_t exeDir[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
-    PathRemoveFileSpecW(exeDir);
-
-    wchar_t localDll[MAX_PATH] = {};
-    PathCombineW(localDll, exeDir, L"_nvngx.dll");
-
-    if (GetFileAttributesW(localDll) != INVALID_FILE_ATTRIBUTES)
+    // DLL/entry point cozumlemesi cihazdan BAGIMSIZ -- zaten yapildiysa atla.
+    if (!s_hNgxCore)
     {
-        DLSS_Log("[DLSS-NR] Loading NGX Core from local: %ls", localDll);
-        m_hNgxCore = LoadLibraryW(localDll);
-        if (m_hNgxCore && !GetProcAddress(m_hNgxCore, "NVSDK_NGX_D3D12_Init_Ext"))
+        // 1. Try local application directory first
+        wchar_t exeDir[MAX_PATH] = {};
+        GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
+        PathRemoveFileSpecW(exeDir);
+
+        wchar_t localDll[MAX_PATH] = {};
+        PathCombineW(localDll, exeDir, L"_nvngx.dll");
+
+        if (GetFileAttributesW(localDll) != INVALID_FILE_ATTRIBUTES)
         {
-            DLSS_Log("[DLSS-NR] Warning: Local _nvngx.dll is missing D3D12 entry points, falling back to DriverStore.");
-            FreeLibrary(m_hNgxCore);
-            m_hNgxCore = nullptr;
+            DLSS_Log("[DLSS-NR] Loading NGX Core from local: %ls", localDll);
+            s_hNgxCore = LoadLibraryW(localDll);
+            if (s_hNgxCore && !GetProcAddress(s_hNgxCore, "NVSDK_NGX_D3D12_Init_Ext"))
+            {
+                DLSS_Log("[DLSS-NR] Warning: Local _nvngx.dll is missing D3D12 entry points, falling back to DriverStore.");
+                FreeLibrary(s_hNgxCore);
+                s_hNgxCore = nullptr;
+            }
+        }
+
+        // 2. Try DriverStore (Registry or dynamic scan)
+        if (!s_hNgxCore)
+        {
+            wchar_t driverPath[MAX_PATH] = {};
+            if (FindNvidiaDriverStorePath(driverPath, MAX_PATH))
+            {
+                wchar_t ngxDllPath[MAX_PATH] = {};
+                PathCombineW(ngxDllPath, driverPath, L"_nvngx.dll");
+                DLSS_Log("[DLSS-NR] Loading NGX Core from DriverStore: %ls", ngxDllPath);
+                s_hNgxCore = LoadLibraryW(ngxDllPath);
+            }
+        }
+
+        // 3. Fallback: standard LoadLibrary search
+        if (!s_hNgxCore)
+        {
+            DLSS_Log("[DLSS-NR] Searching _nvngx.dll via standard LoadLibrary...");
+            s_hNgxCore = LoadLibraryW(L"_nvngx.dll");
+        }
+
+        if (!s_hNgxCore)
+        {
+            DLSS_Log("[DLSS-NR] ERROR: Cannot load _nvngx.dll! LastError=%lu", GetLastError());
+            return false;
+        }
+
+        s_pfnInitExt = (PFN_NVSDK_NGX_D3D12_Init_Ext)GetProcAddress(s_hNgxCore, "NVSDK_NGX_D3D12_Init_Ext");
+        s_pfnGetCaps = (PFN_NVSDK_NGX_D3D12_GetCapabilityParameters)GetProcAddress(s_hNgxCore, "NVSDK_NGX_D3D12_GetCapabilityParameters");
+        s_pfnAllocParams = (PFN_NVSDK_NGX_D3D12_AllocateParameters)GetProcAddress(s_hNgxCore, "NVSDK_NGX_D3D12_AllocateParameters");
+        s_pfnDestroyParams = (PFN_NVSDK_NGX_D3D12_DestroyParameters)GetProcAddress(s_hNgxCore, "NVSDK_NGX_D3D12_DestroyParameters");
+
+        if (!s_pfnInitExt || !s_pfnGetCaps)
+        {
+            DLSS_Log("[DLSS-NR] ERROR: Missing required NGX D3D12 entry points!");
+            return false;
         }
     }
 
-    // 2. Try DriverStore (Registry or dynamic scan)
-    if (!m_hNgxCore)
-    {
-        wchar_t driverPath[MAX_PATH] = {};
-        if (FindNvidiaDriverStorePath(driverPath, MAX_PATH))
-        {
-            wchar_t ngxDllPath[MAX_PATH] = {};
-            PathCombineW(ngxDllPath, driverPath, L"_nvngx.dll");
-            DLSS_Log("[DLSS-NR] Loading NGX Core from DriverStore: %ls", ngxDllPath);
-            m_hNgxCore = LoadLibraryW(ngxDllPath);
-        }
-    }
-
-    // 3. Fallback: standard LoadLibrary search
-    if (!m_hNgxCore)
-    {
-        DLSS_Log("[DLSS-NR] Searching _nvngx.dll via standard LoadLibrary...");
-        m_hNgxCore = LoadLibraryW(L"_nvngx.dll");
-    }
-
-    if (!m_hNgxCore)
-    {
-        DLSS_Log("[DLSS-NR] ERROR: Cannot load _nvngx.dll! LastError=%lu", GetLastError());
-        return false;
-    }
-
-    m_pfnInitExt = (PFN_NVSDK_NGX_D3D12_Init_Ext)GetProcAddress(m_hNgxCore, "NVSDK_NGX_D3D12_Init_Ext");
-    m_pfnGetCaps = (PFN_NVSDK_NGX_D3D12_GetCapabilityParameters)GetProcAddress(m_hNgxCore, "NVSDK_NGX_D3D12_GetCapabilityParameters");
-    m_pfnAllocParams = (PFN_NVSDK_NGX_D3D12_AllocateParameters)GetProcAddress(m_hNgxCore, "NVSDK_NGX_D3D12_AllocateParameters");
-    m_pfnDestroyParams = (PFN_NVSDK_NGX_D3D12_DestroyParameters)GetProcAddress(m_hNgxCore, "NVSDK_NGX_D3D12_DestroyParameters");
-
-    if (!m_pfnInitExt || !m_pfnGetCaps)
-    {
-        DLSS_Log("[DLSS-NR] ERROR: Missing required NGX D3D12 entry points!");
-        return false;
-    }
-
-    int initRes = m_pfnInitExt(0x24480451ull, m_dataPath.c_str(), m_device, 0x0000015, nullptr);
+    // Init_Ext ise CIHAZA BAGLI -- yalnizca cihaz gercekten degistiyse (ya da
+    // ilk cagriysa) yeniden cagiriyoruz (bkz. fonksiyon basindaki erken donus).
+    int initRes = s_pfnInitExt(0x24480451ull, m_dataPath.c_str(), m_device, 0x0000015, nullptr);
     DLSS_Log("[DLSS-NR] NVSDK_NGX_D3D12_Init_Ext returned: 0x%08X", initRes);
 
-    int capRes = m_pfnGetCaps(&m_params);
-    DLSS_Log("[DLSS-NR] GetCapabilityParameters returned: 0x%08X, params=%p", capRes, m_params);
-    if (!m_params && m_pfnAllocParams)
+    int capRes = s_pfnGetCaps(&s_params);
+    DLSS_Log("[DLSS-NR] GetCapabilityParameters returned: 0x%08X, params=%p", capRes, s_params);
+    if (!s_params && s_pfnAllocParams)
     {
-        m_pfnAllocParams(&m_params);
+        s_pfnAllocParams(&s_params);
     }
 
-    return (m_params != nullptr);
+    s_ngxDevice = m_device;
+    return (s_params != nullptr);
 }
 
 bool DLSSNRManager::LoadForwarder()
 {
-    if (m_hForwarder && m_pfnCreate && m_pfnEvaluate) return true;
+    if (s_hForwarder && s_pfnCreate && s_pfnEvaluate) return true;
 
     // Check if forwarder DLL is in app directory
     wchar_t exePath[MAX_PATH] = {};
@@ -195,36 +222,36 @@ bool DLSSNRManager::LoadForwarder()
 
     std::wstring fwdPath = std::wstring(exePath) + L"nvngx.dll_dlssnr.dll";
 
-    m_hForwarder = LoadLibraryW(fwdPath.c_str());
-    if (!m_hForwarder)
+    s_hForwarder = LoadLibraryW(fwdPath.c_str());
+    if (!s_hForwarder)
     {
-        m_hForwarder = LoadLibraryW(L"nvngx.dll_dlssnr.dll");
+        s_hForwarder = LoadLibraryW(L"nvngx.dll_dlssnr.dll");
     }
-    if (!m_hForwarder)
+    if (!s_hForwarder)
     {
         DLSS_Log("[DLSS-NR] ERROR: Failed to load %ls! LastError=%lu", fwdPath.c_str(), GetLastError());
         return false;
     }
 
-    m_pfnCreate        = (PFN_dlssnr_call_create)GetProcAddress(m_hForwarder, "dlssnr_call_create");
-    m_pfnEvaluate      = (PFN_dlssnr_call_evaluate)GetProcAddress(m_hForwarder, "dlssnr_call_evaluate");
-    m_pfnRelease       = (PFN_dlssnr_call_release)GetProcAddress(m_hForwarder, "dlssnr_call_release");
-    m_pfnSetFloatSlot  = (PFN_dlssnr_call_set_float_slot)GetProcAddress(m_hForwarder, "dlssnr_call_set_float_slot");
-    m_pLastInit        = (int*)GetProcAddress(m_hForwarder, "dlssnr_call_last_init");
-    m_pLastCreate      = (int*)GetProcAddress(m_hForwarder, "dlssnr_call_last_create");
+    s_pfnCreate        = (PFN_dlssnr_call_create)GetProcAddress(s_hForwarder, "dlssnr_call_create");
+    s_pfnEvaluate      = (PFN_dlssnr_call_evaluate)GetProcAddress(s_hForwarder, "dlssnr_call_evaluate");
+    s_pfnRelease       = (PFN_dlssnr_call_release)GetProcAddress(s_hForwarder, "dlssnr_call_release");
+    s_pfnSetFloatSlot  = (PFN_dlssnr_call_set_float_slot)GetProcAddress(s_hForwarder, "dlssnr_call_set_float_slot");
+    s_pLastInit        = (int*)GetProcAddress(s_hForwarder, "dlssnr_call_last_init");
+    s_pLastCreate      = (int*)GetProcAddress(s_hForwarder, "dlssnr_call_last_create");
 
-    bool ok = (m_pfnCreate && m_pfnEvaluate && m_pfnRelease);
+    bool ok = (s_pfnCreate && s_pfnEvaluate && s_pfnRelease);
     DLSS_Log("[DLSS-NR] Forwarder loaded (create=%p, evaluate=%p, release=%p)",
-        m_pfnCreate, m_pfnEvaluate, m_pfnRelease);
+        s_pfnCreate, s_pfnEvaluate, s_pfnRelease);
     return ok;
 }
 
 void DLSSNRManager::DiscoverAndSetFloatSlot()
 {
-    if (!m_params || !m_pfnSetFloatSlot) return;
+    if (!s_params || !s_pfnSetFloatSlot) return;
 
-    NVSDK_NGX_Parameter* ngxParams = reinterpret_cast<NVSDK_NGX_Parameter*>(m_params);
-    void** vt = *reinterpret_cast<void***>(m_params);
+    NVSDK_NGX_Parameter* ngxParams = reinterpret_cast<NVSDK_NGX_Parameter*>(s_params);
+    void** vt = *reinterpret_cast<void***>(s_params);
     using PFN_SetFloat = void(__thiscall*)(void*, const char*, float);
 
     const float probe = 0.3125f; // exact binary float
@@ -233,7 +260,7 @@ void DLSSNRManager::DiscoverAndSetFloatSlot()
     for (int slot = 0; slot < 8; ++slot)
     {
         float readBack = -999.0f;
-        reinterpret_cast<PFN_SetFloat>(vt[slot])(m_params, "DLSSNR.Probe", probe);
+        reinterpret_cast<PFN_SetFloat>(vt[slot])(s_params, "DLSSNR.Probe", probe);
         unsigned int res = ngxParams->Get("DLSSNR.Probe", &readBack);
         if (res == 1 && readBack == probe)
         {
@@ -245,12 +272,12 @@ void DLSSNRManager::DiscoverAndSetFloatSlot()
 
     if (discoveredSlot >= 0)
     {
-        m_pfnSetFloatSlot(discoveredSlot);
+        s_pfnSetFloatSlot(discoveredSlot);
     }
     else
     {
         DLSS_Log("[DLSS-NR] WARNING: Failed to probe float slot dynamically, defaulting to slot 6");
-        m_pfnSetFloatSlot(6);
+        s_pfnSetFloatSlot(6);
     }
 }
 
@@ -375,7 +402,7 @@ bool DLSSNRManager::CreateFeature()
 {
     ReleaseFeature();
 
-    if (!m_pfnCreate || !m_device || !m_params) return false;
+    if (!s_pfnCreate || !m_device || !s_params) return false;
 
     const int passes = (m_passCount < 1) ? 1 : ((m_passCount > kMaxPasses) ? kMaxPasses : m_passCount);
 
@@ -405,12 +432,12 @@ bool DLSSNRManager::CreateFeature()
     bool allOk = true;
     for (int i = 0; i < passes; ++i)
     {
-        m_features[i] = m_pfnCreate(
+        m_features[i] = s_pfnCreate(
             m_snippetPath.c_str(),
             m_dataPath.c_str(),
             m_device,
             cmdList.Get(),
-            m_params,
+            s_params,
             m_workWidth,
             m_workHeight,
             m_preset,
@@ -444,8 +471,8 @@ bool DLSSNRManager::CreateFeature()
     WaitForSingleObject(hEvent, 2000);
     CloseHandle(hEvent);
 
-    int lastInit = m_pLastInit ? *m_pLastInit : 0;
-    int lastCreate = m_pLastCreate ? *m_pLastCreate : 0;
+    int lastInit = s_pLastInit ? *s_pLastInit : 0;
+    int lastCreate = s_pLastCreate ? *s_pLastCreate : 0;
     DLSS_Log("[DLSS-NR] Feature Creation result: passes=%d, handle[0]=%p, lastInit=0x%08X, lastCreate=0x%08X",
         passes, m_features[0], lastInit, lastCreate);
 
@@ -474,7 +501,7 @@ void DLSSNRManager::ReleaseFeature()
     for (int i = 0; i < kMaxPasses; ++i)
         if (m_features[i]) { any = true; break; }
 
-    if (!any || !m_pfnRelease) return;
+    if (!any || !s_pfnRelease) return;
 
     // Tek bir fence beklemesi tum handle'lari kapsar: hepsi ayni kuyruga is
     // yazdi, kuyruk bosaldiginda hicbiri kullanimda degil.
@@ -496,7 +523,7 @@ void DLSSNRManager::ReleaseFeature()
     {
         if (m_features[i])
         {
-            m_pfnRelease(m_features[i]);
+            s_pfnRelease(m_features[i]);
             m_features[i] = nullptr;
         }
     }
@@ -531,7 +558,11 @@ bool DLSSNRManager::Resize(int width, int height)
 
 void DLSSNRManager::Cleanup()
 {
-    if (!m_hForwarder && !m_hNgxCore && !m_features[0] && !m_params)
+    // NOT: s_hForwarder/s_hNgxCore/s_params ARTIK BU KOSULDA KONTROL EDILMIYOR --
+    // static, process-omurlu (bkz. header aciklamasi), bir onceki oturumdan
+    // beri hep dolu kalirlar. Bu ornegin GERCEKTEN bir seyi init edip
+    // etmedigini m_features[0]/m_device (instance-seviyesi) ile anliyoruz.
+    if (!m_features[0] && !m_device)
     {
         return;
     }
@@ -546,13 +577,12 @@ void DLSSNRManager::Cleanup()
     m_chainWidth  = 0;
     m_chainHeight = 0;
 
-    if (m_params && m_pfnDestroyParams)
-    {
-        m_pfnDestroyParams(m_params);
-        m_params = nullptr;
-    }
+    // s_params KASITLI OLARAK yok edilmiyor -- static, process-omurlu (bkz.
+    // header aciklamasi ve LoadNGXCore). Bir sonraki Init() ayni cihaza karsi
+    // ihtiyac duyarsa Init_Ext/GetCapabilityParameters'i tekrar cagirmadan
+    // oldugu gibi kullanir.
 
-    // NOTE: Do NOT call FreeLibrary on m_hNgxCore (_nvngx.dll) or m_hForwarder!
+    // NOTE: Do NOT call FreeLibrary on s_hNgxCore (_nvngx.dll) or s_hForwarder!
     // NVIDIA NGX maintains driver background threads and process-wide hooks.
     // Freeing _nvngx.dll causes 0xC0000005 access violations (_nvngx.dll_unloaded).
     // Keep modules loaded for process lifetime.
@@ -573,7 +603,18 @@ void DLSSNRManager::SetEnabled(bool v)
     {
         m_firstFrame = true;
         m_consecutiveFailures = 0;
-        if (m_device && m_queue)
+
+        // NOT: App::StartOverlayCommon her oturumda Init()'i cagirdiktan HEMEN
+        // sonra SetEnabled(true)'yu da cagiriyor (kullanicinin F10 ile DLSS'i
+        // KAPATIP sonra tekrar ACTIGI durumda feature'i geri kurmak icin var).
+        // Ama Init() zaten feature'i BASARIYLA kurmus bitmisse (m_features[0]
+        // gecerli), burada TEKRAR CreateFeature() cagirmak tamamen gereksiz --
+        // her oturum baslangicinda ekstra ~500ms harcayip feature'i bosuna iki
+        // kez kuruyorduk (loglarla dogrulandi: "initialized successfully"
+        // hemen ardindan "Re-creating feature..."). Sadece feature GERCEKTEN
+        // yoksa (once devre disi birakilip simdi tekrar acildiginda) yeniden
+        // kuruyoruz.
+        if (m_device && m_queue && !m_features[0])
         {
             DLSS_Log("[DLSS-NR] DLSS 5 enabled via SetEnabled: Re-creating feature to restore connection...");
             CreateFeature();
@@ -612,7 +653,7 @@ bool DLSSNRManager::Evaluate(
         }
     }
 
-    if (!m_features[0] || !m_pfnEvaluate)
+    if (!m_features[0] || !s_pfnEvaluate)
     {
         m_isEvaluating = false;
         return false;
@@ -822,10 +863,10 @@ bool DLSSNRManager::EvaluateSinglePass(
     // loglarla dogrulandi (bkz. Evaluate #887-896). Onceki duzeltme
     // (Renderer.cpp'deki D3D12Interop/MotionVectorManager senkronu) bu
     // fonksiyonun kendisini kapsamiyordu; asil kaynak buradaydi.
-    int res = m_pfnEvaluate(
+    int res = s_pfnEvaluate(
         cmdList,
         feature,
-        m_params,
+        s_params,
         inputColor,
         m_depthTex.Get(),
         activeMotion,

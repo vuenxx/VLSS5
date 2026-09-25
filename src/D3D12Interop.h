@@ -82,6 +82,14 @@ private:
     bool CreateDownscaleResources();
     bool CreateFences();
 
+    // D3D12 cihazi + komut kuyrugunu, hedef adapter/cross-adapter modu bir
+    // onceki basariyla kurulmus static durumla AYNIYSA sifirdan kurmadan
+    // yeniden kullanir (bkz. m_d3d12Device/m_cmdQueue'nun static olma sebebi
+    // asagida). Farkliysa (kullanici GPU tercihini degistirdi, ya da ilk
+    // cagri) eskisini birakip sifirdan kurar. chosenAdapter/crossAdapter
+    // ciktisini iceren cagiran (Init) buna gore devam eder.
+    bool EnsureDevice(IDXGIAdapter* chosenAdapter, bool crossAdapter);
+
     // --- Cross-adapter kopru ---
     // A = yakalama/sunum GPU'su (D3D11 burada), B = DLSS GPU'su (m_d3d12Device).
     bool InitCrossAdapterDevice(IDXGIAdapter* captureAdapter);
@@ -108,9 +116,24 @@ private:
     ComPtr<ID3D11Device5>        m_d3d11Dev5;
     ComPtr<ID3D11DeviceContext4> m_d3d11Ctx4;
 
-    // D3D12 core
-    ComPtr<ID3D12Device>               m_d3d12Device;
-    ComPtr<ID3D12CommandQueue>         m_cmdQueue;
+    // D3D12 core.
+    // static: process-omurlu, oturumlar arasi paylasilan D3D12 cihazi/komut
+    // kuyrugu (bkz. NvOFManager.h/MotionVectorManager.h'deki ayni desen).
+    // NEDEN: DLSSNRManager, NVSDK_NGX_D3D12_Init_Ext'i bu cihaza karsi
+    // cagiriyor. Eskiden bu cihaz her "Baslat/Durdur" oturumunda YIKILIP
+    // SIFIRDAN kuruluyordu -- yani NGX'in surec icinde HALA canli olan (hic
+    // kapatilmayan, bkz. DLSSNRManager.h) durumu, HER SEFERINDE FARKLI bir
+    // cihaza karsi ikinci/ucuncu kez Init_Ext'e maruz kaliyordu. Bunun 2.
+    // acilistaki ekstra donma/bozulmaya katkisi oldugu supheleniliyor. D3D11
+    // cihazi zaten App::InitD3D() tarafindan boyle (process-omurlu) yonetiliyor;
+    // ayni deseni burada da uyguluyoruz. Yalnizca hedef adapter/cross-adapter
+    // modu GERCEKTEN degisirse (kullanici GPU tercihini degistirdi) yikilip
+    // yeniden kurulur (bkz. EnsureDevice).
+    static ComPtr<ID3D12Device>        m_d3d12Device;
+    static ComPtr<ID3D12CommandQueue>  m_cmdQueue;
+    static LUID                        s_deviceAdapterLuid;
+    static bool                        s_deviceCrossAdapter;
+    static bool                        s_deviceValid;
     static constexpr UINT              kCmdAllocCount = 3;
     ComPtr<ID3D12CommandAllocator>     m_cmdAlloc[kCmdAllocCount];
     UINT                               m_allocIndex = 0;

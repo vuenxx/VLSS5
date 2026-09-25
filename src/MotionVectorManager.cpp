@@ -2,10 +2,15 @@
 #include "ConfigManager.h"
 #include <algorithm>
 
+// bkz. MotionVectorManager.h'deki aciklama: process-omurlu, oturumlar arasi paylasilan
+// derlenmis shader'lar.
+ComPtr<ID3D11ComputeShader> MotionVectorManager::s_opticalFlowCS;
+ComPtr<ID3D11ComputeShader> MotionVectorManager::s_photoConfCS;
+
 // ---------------------------------------------------------------------------
 // Compute Shader for Optical Flow & Dynamic UI Reactive Mask
 // ---------------------------------------------------------------------------
-static const char* s_opticalFlowCS = R"HLSL(
+static const char* kOpticalFlowCSSource = R"HLSL(
 Texture2D<float4>   g_CurrentFrame   : register(t0);
 Texture2D<float4>   g_PrevFrame      : register(t1);
 SamplerState        g_Sampler        : register(s0);
@@ -216,7 +221,7 @@ void CSMain(
 // al, ortalamayi degil. Izgara 32x18 (kProbeGridW/H ile ayni, degerler
 // burada literal -- HLSL derleme zamaninda C++ sabitine erisemiyor).
 // ---------------------------------------------------------------------------
-static const char* s_photoConfCS = R"HLSL(
+static const char* kPhotoConfCSSource = R"HLSL(
 Texture2D<float4>   g_CurrentFrame   : register(t0);
 Texture2D<float4>   g_PrevFrame      : register(t1);
 Texture2D<float2>   g_MotionVectors  : register(t2);
@@ -379,8 +384,9 @@ void MotionVectorManager::Cleanup()
     }
     m_useHardwareNvOF = false;
 
-    m_opticalFlowCS.Reset();
-    m_photoConfCS.Reset();
+    // NOT: s_opticalFlowCS/s_photoConfCS KASITLI OLARAK sifirlanmiyor -- static,
+    // process-omurlu (bkz. header aciklamasi). Sadece bu ornege ait (session'a
+    // ozel, ucuz) sabit tampon burada dusuruluyor.
     m_photoConfCB.Reset();
     m_constantBuffer.Reset();
     m_linearSampler.Reset();
@@ -526,10 +532,12 @@ bool MotionVectorManager::CreateResources(ID3D11Device* device, int width, int h
 // ---------------------------------------------------------------------------
 bool MotionVectorManager::CompileShaders(ID3D11Device* device)
 {
+    if (s_opticalFlowCS) return true;
+
     ComPtr<ID3DBlob> blob, errBlob;
 
     HRESULT hr = D3DCompile(
-        s_opticalFlowCS, strlen(s_opticalFlowCS),
+        kOpticalFlowCSSource, strlen(kOpticalFlowCSSource),
         "OpticalFlowCS", nullptr, nullptr,
         "CSMain", "cs_5_0",
         D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
@@ -543,7 +551,7 @@ bool MotionVectorManager::CompileShaders(ID3D11Device* device)
     }
 
     hr = device->CreateComputeShader(
-        blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &m_opticalFlowCS);
+        blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &s_opticalFlowCS);
 
     return SUCCEEDED(hr);
 }
@@ -553,25 +561,26 @@ bool MotionVectorManager::CompileShaders(ID3D11Device* device)
 // ---------------------------------------------------------------------------
 bool MotionVectorManager::CompilePhotoConfidenceShader(ID3D11Device* device)
 {
-    if (m_photoConfCS && m_photoConfCB) return true;
-
-    ComPtr<ID3DBlob> blob, errBlob;
-    HRESULT hr = D3DCompile(
-        s_photoConfCS, strlen(s_photoConfCS),
-        "PhotoConfidenceCS", nullptr, nullptr,
-        "CSPhotoConfidence", "cs_5_0",
-        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
-        &blob, &errBlob);
-
-    if (FAILED(hr))
+    if (!s_photoConfCS)
     {
-        if (errBlob)
-            OutputDebugStringA(static_cast<char*>(errBlob->GetBufferPointer()));
-        return false;
-    }
+        ComPtr<ID3DBlob> blob, errBlob;
+        HRESULT hr = D3DCompile(
+            kPhotoConfCSSource, strlen(kPhotoConfCSSource),
+            "PhotoConfidenceCS", nullptr, nullptr,
+            "CSPhotoConfidence", "cs_5_0",
+            D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+            &blob, &errBlob);
 
-    hr = device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &m_photoConfCS);
-    if (FAILED(hr)) return false;
+        if (FAILED(hr))
+        {
+            if (errBlob)
+                OutputDebugStringA(static_cast<char*>(errBlob->GetBufferPointer()));
+            return false;
+        }
+
+        hr = device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &s_photoConfCS);
+        if (FAILED(hr)) return false;
+    }
 
     if (!m_photoConfCB)
     {
@@ -579,7 +588,7 @@ bool MotionVectorManager::CompilePhotoConfidenceShader(ID3D11Device* device)
         bd.ByteWidth = 16; // float2 g_frameSize + float2 padding, 16-byte cbuffer aligned
         bd.Usage     = D3D11_USAGE_DEFAULT;
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        hr = device->CreateBuffer(&bd, nullptr, &m_photoConfCB);
+        HRESULT hr = device->CreateBuffer(&bd, nullptr, &m_photoConfCB);
         if (FAILED(hr)) return false;
     }
 
@@ -711,7 +720,7 @@ void MotionVectorManager::UpdatePhotoConfidence(
     ID3D11ShaderResourceView* currentFrameSRV,
     ID3D11Texture2D* mvTex)
 {
-    if (!ctx || !currentFrameSRV || !mvTex || !m_photoConfCS || !m_photoConfCB || !m_confUAV || !m_prevFrameSRV)
+    if (!ctx || !currentFrameSRV || !mvTex || !s_photoConfCS || !m_photoConfCB || !m_confUAV || !m_prevFrameSRV)
         return;
 
     // Hardware NvOF yolunda hareket vektorleri D3D12Interop'un paylasimli
@@ -743,7 +752,7 @@ void MotionVectorManager::UpdatePhotoConfidence(
     struct { float w, h, pad0, pad1; } cb = { (float)m_width, (float)m_height, 0.0f, 0.0f };
     ctx->UpdateSubresource(m_photoConfCB.Get(), 0, nullptr, &cb, 0, 0);
 
-    ctx->CSSetShader(m_photoConfCS.Get(), nullptr, 0);
+    ctx->CSSetShader(s_photoConfCS.Get(), nullptr, 0);
     ctx->CSSetConstantBuffers(0, 1, m_photoConfCB.GetAddressOf());
 
     ID3D11ShaderResourceView* srvs[3] = { currentFrameSRV, m_prevFrameSRV.Get(), mvSRV };
@@ -818,7 +827,7 @@ bool MotionVectorManager::ProcessFrame(
     ID3D11UnorderedAccessView* targetMvUAV,
     ID3D11Texture2D* targetMvTex)
 {
-    if (!ctx || !currentFrameSRV || !m_opticalFlowCS) return false;
+    if (!ctx || !currentFrameSRV || !s_opticalFlowCS) return false;
 
     ID3D11UnorderedAccessView* activeMvUAV = targetMvUAV ? targetMvUAV : m_mvUAV.Get();
     if (!activeMvUAV) return false;
@@ -867,7 +876,7 @@ bool MotionVectorManager::ProcessFrame(
         ctx->UpdateSubresource(m_constantBuffer.Get(), 0, nullptr, &cb, 0, 0);
 
         // Bind resources to compute shader
-        ctx->CSSetShader(m_opticalFlowCS.Get(), nullptr, 0);
+        ctx->CSSetShader(s_opticalFlowCS.Get(), nullptr, 0);
         ctx->CSSetConstantBuffers(0, 1, m_constantBuffer.GetAddressOf());
         ctx->CSSetSamplers(0, 1, m_linearSampler.GetAddressOf());
 
