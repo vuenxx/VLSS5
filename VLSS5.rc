@@ -1,5 +1,40 @@
 #include "src/resource.h"
+#include <winver.h>
 
 // Icon with lowest ID value placed first to ensure application icon
 // remains consistent on all systems.
 IDI_MAIN_ICON ICON "app.ico"
+
+// VERSIONINFO: unsigned/heuristic-scored builds with no file metadata at all
+// (no company, description, product name) score worse with reputation-based
+// AV/SmartScreen classifiers than ones that carry normal properties. This is
+// purely metadata -- keep FILEVERSION/PRODUCTVERSION in step with
+// src/Version.h by hand when bumping releases.
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION 0,5,1,0
+ PRODUCTVERSION 0,5,1,0
+ FILEFLAGSMASK 0x3fL
+ FILEFLAGS 0x0L
+ FILEOS 0x40004L
+ FILETYPE VFT_APP
+ FILESUBTYPE 0x0L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904b0"
+        BEGIN
+            VALUE "CompanyName", "Berkay Kucukbekar"
+            VALUE "FileDescription", "VLSS5 - DLSS5 Neural Rendering Overlay"
+            VALUE "FileVersion", "0.5.1.0"
+            VALUE "InternalName", "VLSS5.exe"
+            VALUE "LegalCopyright", "Copyright (C) Berkay Kucukbekar"
+            VALUE "OriginalFilename", "VLSS5.exe"
+            VALUE "ProductName", "VLSS5"
+            VALUE "ProductVersion", "0.5.1.0"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

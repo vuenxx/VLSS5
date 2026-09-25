@@ -40,10 +40,11 @@ namespace UpdateChecker
     // GitHub Releases API'den en son 'count' surumu ceker (varsayilan 5).
     FetchResult FetchLatestReleases(int count = 5);
 
-    // fileName (uzantisiyla) installer/VLSS5.iss'in urettigi "VLSS5-Setup-*.exe"
-    // deseniyle eslesiyor mu? Eslesirse indirilen dosya sessizce/otomatik
-    // kurulabilir (bkz. Main.cpp LaunchSilentInstallAndExit); eslesmezse
-    // (orn. eski surumlerin .rar asset'i) sadece varsayilan programla acilir.
+    // fileName (uzantisiyla) .github/workflows/release.yml'in urettigi
+    // "VLSS5-X.Y.Z-portable.zip" deseniyle eslesiyor mu? Eslesirse indirilen
+    // dosya sessizce/otomatik kurulabilir (bkz. Main.cpp
+    // LaunchPortableUpdateAndExit); eslesmezse (orn. eski surumlerin
+    // Setup.exe/.rar asset'i) sadece varsayilan programla acilir.
     bool IsAutoInstallableAsset(const std::wstring& fileName);
 
     // Bir release'in asset listesinden OTOMATIK KURULUMA en uygun olani secer:
@@ -65,4 +66,11 @@ namespace UpdateChecker
     // url'deki dosyayi outPath'e indirir. Basarisizlikta false doner ve error doldurulur.
     bool DownloadFile(const std::wstring& url, const std::wstring& outPath,
                        const ProgressCallback& onProgress, std::wstring& error);
+
+    // filePath'in SHA256'sini kucuk harfli hex string olarak outHex'e yazar.
+    // Otomatik kurulacak bir installer CALISTIRILMADAN ONCE, indirilen dosyanin
+    // release'de yayimlanan checksum'la eslesip eslesmedigini dogrulamak icin
+    // (bkz. Main.cpp StartUpdatesDownload) -- bozuk/degistirilmis bir indirmeyi
+    // sessizce/yukseltilmis calistirmamak adina.
+    bool ComputeSha256Hex(const std::wstring& filePath, std::wstring& outHex, std::wstring& error);
 }

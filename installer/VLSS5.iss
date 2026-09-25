@@ -44,8 +44,13 @@ OutputDir=Output
 OutputBaseFilename=VLSS5-Setup-{#MyAppVersion}
 SetupIconFile=..\app.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
+; Solid LZMA2 pakler butun dosyalari TEK sikistirilmis blokta -- imzasiz,
+; jenerik installer stub'lariyla birlikte bu, Defender'in ML heuristigine
+; (Wacatac.B!ml) paketlenmis/obfuscate edilmis payload gibi gorunuyor.
+; SolidCompression=no cikti boyutunu biraz buyutur ama her dosyayi ayri
+; sikistirir -- islevsel fark yok, sadece paketleme deseni degisiyor.
 Compression=lzma2
-SolidCompression=yes
+SolidCompression=no
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible

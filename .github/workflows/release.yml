@@ -2,7 +2,8 @@ name: Release
 
 # "v*" bicimindeki bir git tag push edildiginde (orn. v0.6.0) tetiklenir:
 # 1) VLSS5.vcxproj'u Release|x64 derler,
-# 2) installer/VLSS5.iss'i o surumle Inno Setup ile derleyip VLSS5-Setup-<surum>.exe uretir,
+# 2) VLSS5.exe + web/* + redist/nvngx.dll_dlssnr.dll'i bir "portable" klasorde
+#    toplayip VLSS5-<surum>-portable.zip olarak sikistirir,
 # 3) GitHub Release'i TASLAK (draft) olarak olusturur -- asset ekli, ama
 #    HENUZ YAYIMLANMAMIS. Tag push etmek artik dogrudan kullanicilara
 #    guncelleme cikmiyor -- GitHub'da Releases sayfasindan taslagi
@@ -11,11 +12,30 @@ name: Release
 #    DONDURMEZ -- UpdateChecker.cpp da ayrica draft'lari filtreler --
 #    yani taslak asamasinda hicbir kullanicinin VLSS5'i bunu gormez.)
 #
-# src/UpdateChecker.cpp bu asset'i (adindaki "Setup" ibaresinden) otomatik
-# bulup indirir ve sessizce calistirir -- yani bu workflow, uygulama
-# icindeki "Güncellemeler" sekmesinin otomatik guncelleme yapabilmesinin
-# on kosulu. Once src/Version.h'deki VLSS5_VERSION_STRING'i de ayni
-# surume guncelleyip commit'leyin, SONRA tag'i push edin.
+# NEDEN ARTIK Inno Setup YOK: bir Inno Setup installer.exe'si -- imzasiz,
+# admin isteyen, sessiz/otomatik kurulum destekleyen, calisan bir process'i
+# kapatip yeniden baslatan self-extracting bir exe -- Windows Defender'in ML
+# heuristigine (Wacatac.B!ml) tam olarak "dropper" gibi gorunuyor; installer.exe
+# defalarca flag yedi, VLSS5.exe'nin kendisi yemedi. Duz bir ZIP arsivi bu
+# heuristik kategorinin tamamen disinda: opak/self-extracting bir binary degil,
+# sadece bir arsiv formati. installer/VLSS5.iss dosyasi repoda duruyor (isterseniz
+# elle/ayri bir "klasik kurulum" secenegi icin) ama bu pipeline ARTIK ONU
+# KULLANMIYOR.
+#
+# src/UpdateChecker.cpp bu asset'i (adindaki "portable" ibaresinden, bkz.
+# IsAutoInstallableAsset) otomatik bulup indirir, SHA256 checksum'ini (asagida
+# uretilen .sha256 asset'i) dogrular, sonra ZIP'i acip dosyalarin uzerine
+# yazar (bkz. Main.cpp LaunchPortableUpdateAndExit) -- yani bu workflow,
+# uygulama icindeki "Güncellemeler" sekmesinin otomatik guncelleme
+# yapabilmesinin on kosulu. Once src/Version.h'deki VLSS5_VERSION_STRING'i de
+# ayni surume guncelleyip commit'leyin, SONRA tag'i push edin.
+#
+# ONEMLI GECIS NOTU: eski (bu degisiklikten once cikmis) VLSS5 surumleri
+# hala Setup.exe asset'i arayan eski otomatik guncelleme mantigini kullanir.
+# Onlarin bu yeni surume gecebilmesi icin BIR SEFERLIK bir gecis release'inde
+# HEM eski Setup.exe'yi (installer/VLSS5.iss ile elle/ayri derlenip) HEM bu
+# workflow'un urettigi portable ZIP'i aynı release'e eklemeniz gerekir --
+# aksi halde eski istemciler yeni surumu goremez/otomatik kuramaz.
 on:
   push:
     tags:
@@ -62,11 +82,35 @@ jobs:
       - name: Build VLSS5 (Release|x64)
         run: msbuild VLSS5.vcxproj /p:Configuration=Release /p:Platform=x64 /m /nologo
 
-      - name: Compile installer (Inno Setup)
-        uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
-        with:
-          path: installer/VLSS5.iss
-          options: /DMyAppVersion=${{ steps.version.outputs.version }}
+      # Kurulu dosyalarla BIREBIR ayni set -- eskiden installer/VLSS5.iss
+      # [Files] bolumunde neler paketleniyorduysa (bkz. git tarihi) simdi
+      # burada aynisi. LaunchPortableUpdateAndExit'in robocopy'si bu klasoru
+      # oldugu gibi kurulu dizinin uzerine kopyalar; vlss5_config.ini,
+      # vlss5_logs.log ve crashreporter\ buraya HICBIR ZAMAN dahil edilmez
+      # (kullanici verisi -- guncellemede dokunulmamali).
+      - name: Stage portable package
+        shell: pwsh
+        run: |
+          $staging = "dist/VLSS5"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item "x64/Release/VLSS5.exe" -Destination $staging
+          Copy-Item "x64/Release/web" -Destination "$staging/web" -Recurse
+          if (Test-Path "redist/nvngx.dll_dlssnr.dll") {
+            Copy-Item "redist/nvngx.dll_dlssnr.dll" -Destination $staging
+          }
+          if (Test-Path "beni oku.txt") {
+            Copy-Item "beni oku.txt" -Destination $staging
+          }
+          Get-ChildItem -Recurse $staging
+
+      - name: Create portable ZIP
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $zip = "dist/VLSS5-$version-portable.zip"
+          Compress-Archive -Path "dist/VLSS5/*" -DestinationPath $zip -CompressionLevel Optimal
+          $hash = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLower()
+          Set-Content -Path "$zip.sha256" -Encoding ascii -Value $hash -NoNewline
 
       - name: Create GitHub Release (draft)
         uses: softprops/action-gh-release@v2
@@ -75,4 +119,6 @@ jobs:
           name: v${{ steps.version.outputs.version }}
           generate_release_notes: true
           draft: true
-          files: installer/Output/VLSS5-Setup-${{ steps.version.outputs.version }}.exe
+          files: |
+            dist/VLSS5-${{ steps.version.outputs.version }}-portable.zip
+            dist/VLSS5-${{ steps.version.outputs.version }}-portable.zip.sha256

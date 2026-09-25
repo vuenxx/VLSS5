@@ -1,9 +1,11 @@
 #include "UpdateChecker.h"
 #include "../third_party/json/json.hpp"
 #include <winhttp.h>
+#include <bcrypt.h>
 #include <vector>
 
 #pragma comment(lib, "winhttp.lib")
+#pragma comment(lib, "bcrypt.lib")
 
 using json = nlohmann::json;
 
@@ -76,6 +78,17 @@ namespace
                              WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &size, WINHTTP_NO_HEADER_INDEX);
         return statusCode;
     }
+
+    struct BCryptAlgGuard
+    {
+        BCRYPT_ALG_HANDLE h = nullptr;
+        ~BCryptAlgGuard() { if (h) BCryptCloseAlgorithmProvider(h, 0); }
+    };
+    struct BCryptHashGuard
+    {
+        BCRYPT_HASH_HANDLE h = nullptr;
+        ~BCryptHashGuard() { if (h) BCryptDestroyHash(h); }
+    };
 }
 
 namespace UpdateChecker
@@ -195,16 +208,15 @@ FetchResult FetchLatestReleases(int count)
 
 bool IsAutoInstallableAsset(const std::wstring& fileName)
 {
-    // "VLSS5-Setup-0.6.0.exe" gibi -- installer/VLSS5.iss'teki
-    // OutputBaseFilename ile ayni desen. Tam eslesme yerine kaba bir icerik
-    // kontrolu yapiyoruz ki .iss'teki isimlendirme kucuk bir sekilde
-    // degisirse (orn. surum eki) kirilmasin.
+    // "VLSS5-0.6.0-portable.zip" gibi -- release.yml'deki paketleme adimiyla
+    // ayni desen. Tam eslesme yerine kaba bir icerik kontrolu yapiyoruz ki
+    // isimlendirme kucuk bir sekilde degisirse (orn. surum eki) kirilmasin.
     std::wstring lower = fileName;
     for (auto& ch : lower) ch = towlower(ch);
 
-    bool endsWithExe = lower.size() >= 4 && lower.compare(lower.size() - 4, 4, L".exe") == 0;
-    bool hasSetup    = lower.find(L"setup") != std::wstring::npos;
-    return endsWithExe && hasSetup;
+    bool endsWithZip   = lower.size() >= 4 && lower.compare(lower.size() - 4, 4, L".zip") == 0;
+    bool hasPortable   = lower.find(L"portable") != std::wstring::npos;
+    return endsWithZip && hasPortable;
 }
 
 const ReleaseAsset* PickBestAsset(const ReleaseInfo& release)
@@ -375,6 +387,63 @@ bool DownloadFile(const std::wstring& url, const std::wstring& outPath,
         DeleteFileW(outPath.c_str());
         return false;
     }
+    return true;
+}
+
+bool ComputeSha256Hex(const std::wstring& filePath, std::wstring& outHex, std::wstring& error)
+{
+    outHex.clear();
+
+    HANDLE hFile = CreateFileW(filePath.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr,
+        OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        error = L"Dosya açılamadı: " + filePath;
+        return false;
+    }
+
+    BCryptAlgGuard alg;
+    if (BCryptOpenAlgorithmProvider(&alg.h, BCRYPT_SHA256_ALGORITHM, nullptr, 0) != 0)
+    {
+        CloseHandle(hFile);
+        error = L"SHA256 sağlayıcısı açılamadı";
+        return false;
+    }
+
+    BCryptHashGuard hash;
+    if (BCryptCreateHash(alg.h, &hash.h, nullptr, 0, nullptr, 0, 0) != 0)
+    {
+        CloseHandle(hFile);
+        error = L"SHA256 hash nesnesi oluşturulamadı";
+        return false;
+    }
+
+    std::vector<unsigned char> buffer(1 << 16);
+    for (;;)
+    {
+        DWORD read = 0;
+        if (!ReadFile(hFile, buffer.data(), (DWORD)buffer.size(), &read, nullptr))
+        {
+            CloseHandle(hFile);
+            error = L"Dosya okunamadı: " + filePath;
+            return false;
+        }
+        if (read == 0) break;
+        BCryptHashData(hash.h, buffer.data(), read, 0);
+    }
+    CloseHandle(hFile);
+
+    unsigned char digest[32] = {};
+    if (BCryptFinishHash(hash.h, digest, sizeof(digest), 0) != 0)
+    {
+        error = L"SHA256 hesabı tamamlanamadı";
+        return false;
+    }
+
+    wchar_t hex[65] = {};
+    for (int i = 0; i < 32; ++i)
+        swprintf_s(hex + i * 2, 3, L"%02x", digest[i]);
+    outHex.assign(hex, 64);
     return true;
 }
 

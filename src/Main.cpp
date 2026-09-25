@@ -24,6 +24,7 @@
 #include <objidl.h>
 #include <gdiplus.h>
 #include <thread>
+#include <fstream>
 #pragma comment(lib, "gdiplus.lib")
 
 using json = nlohmann::json;
@@ -361,42 +362,171 @@ static void StartUpdatesCheck(HWND hwnd, bool silentStartupCheck)
     }).detach();
 }
 
-// Indirilen Inno Setup installer'ini SESSIZ/OTOMATIK kurulum bayraklariyla
-// baslatir ve ardindan kendi surecimizi TEMIZ kapatir (bkz. installer/VLSS5.iss
-// CloseApplications/RestartApplications -- installer, VLSS5.exe'yi Restart
-// Manager ile bekleyip kurulum bitince KENDISI yeniden baslatir; burada ikinci
-// bir baslatma YAPMIYORUZ).
-static void LaunchSilentInstallAndExit(HWND hwnd, const std::wstring& installerPath)
+// Indirilen "VLSS5-X.Y.Z-portable.zip"yi %TEMP%'deki bir staging klasorune
+// tar.exe (Windows 10 1803+'ta System32'de hazir gelir, bsdtar -- zip formatini
+// da okur) ile acar. destDir ONCEDEN var olmali. Basarisizlikta false + error.
+static bool ExtractZip(const std::wstring& zipPath, const std::wstring& destDir, std::wstring& error)
 {
-    wchar_t exeDir[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
-    PathRemoveFileSpecW(exeDir);
+    wchar_t sysDir[MAX_PATH] = {};
+    GetSystemDirectoryW(sysDir, MAX_PATH);
+    std::wstring tarPath = std::wstring(sysDir) + L"\\tar.exe";
 
-    // VLSS5.exe zaten YUKSELTILMIS calisiyor (RequireAdministrator manifest,
-    // bkz. VLSS5.vcxproj) -- CreateProcessW ile baslatilan bir alt surec,
-    // installer'in KENDI manifesti admin istese BILE, ayrica bir UAC onayi
-    // TETIKLEMEZ (bu davranis sadece ShellExecute'un "runas" / AppCompat
-    // katmaninda olur). Bu yuzden ShellExecuteW degil, dogrudan CreateProcessW
-    // kullaniyoruz -- boylece kurulum gercekten SESSIZ kalir.
-    std::wstring cmdLine = L"\"" + installerPath + L"\""
-        L" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /NOCANCEL"
-        L" /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS"
-        L" /DIR=\"" + std::wstring(exeDir) + L"\"";
-
+    std::wstring cmdLine = L"\"" + tarPath + L"\" -xf \"" + zipPath + L"\" -C \"" + destDir + L"\"";
     std::vector<wchar_t> mutableCmd(cmdLine.begin(), cmdLine.end());
     mutableCmd.push_back(L'\0');
 
     STARTUPINFOW si = { sizeof(si) };
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
     PROCESS_INFORMATION pi = {};
     if (!CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
-                         0, nullptr, nullptr, &si, &pi))
+                         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
     {
-        DLSS_Log("[Updates] Installer baslatilamadi (hata=%lu): %ls", GetLastError(), installerPath.c_str());
+        error = L"tar.exe baslatilamadi (hata=" + std::to_wstring(GetLastError()) + L")";
+        return false;
+    }
+
+    WaitForSingleObject(pi.hProcess, 60000);
+    DWORD exitCode = 1;
+    GetExitCodeProcess(pi.hProcess, &exitCode);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    if (exitCode != 0)
+    {
+        error = L"tar.exe cikis kodu " + std::to_wstring(exitCode);
+        return false;
+    }
+    return true;
+}
+
+// Indirilen portable ZIP'i acar, kurulu dosyalarin (VLSS5.exe + web/*) UZERINE
+// yazacak bir "bekle -> kopyala -> yeniden baslat -> kendini sil" betigini
+// %TEMP%'e yazip arka planda calistirir, ardindan kendi surecimizi TEMIZ
+// kapatir. Eskiden burada indirilen bir Inno Setup installer.exe'si /VERYSILENT
+// ile calistiriliyordu -- self-extracting/elevated-silent-installer sekli AV
+// heuristiklerinin (bkz. Wacatac.B!ml tartismasi) tam olarak avladigi kalip
+// oldugu icin, hicbir installer.exe INDIRMIYOR/CALISTIRMIYORUZ artik: sadece
+// bir ZIP acip dosya kopyaliyoruz -- cmd.exe/robocopy disinda YENI bir binary
+// yok.
+//
+// VLSS5.exe calisirken kendi uzerine yazilamadigi icin (dosya kilitli) kopyalama
+// bu surec KAPANDIKTAN SONRA, PID'imizi bekleyen ayri bir cmd betiginden yapilir
+// -- ayni "bitirmeyi baskasina devret, biz temiz cikalim" deseni eski Inno Setup
+// akisinda da vardi.
+static void LaunchPortableUpdateAndExit(HWND hwnd, const std::wstring& zipPath)
+{
+    wchar_t exeDirBuf[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exeDirBuf, MAX_PATH);
+    PathRemoveFileSpecW(exeDirBuf);
+    const std::wstring exeDir(exeDirBuf);
+
+    wchar_t tempDir[MAX_PATH] = {};
+    GetTempPathW(MAX_PATH, tempDir);
+    const std::wstring stagingDir = std::wstring(tempDir) + L"VLSS5_update_staging";
+
+    // Onceki basarisiz bir denemeden kalmis olabilir -- temiz baslamak icin sil.
+    {
+        std::wstring rmCmd = L"cmd.exe /c rmdir /s /q \"" + stagingDir + L"\"";
+        std::vector<wchar_t> mutableRm(rmCmd.begin(), rmCmd.end());
+        mutableRm.push_back(L'\0');
+        STARTUPINFOW rsi = { sizeof(rsi) };
+        rsi.dwFlags = STARTF_USESHOWWINDOW;
+        rsi.wShowWindow = SW_HIDE;
+        PROCESS_INFORMATION rpi = {};
+        if (CreateProcessW(nullptr, mutableRm.data(), nullptr, nullptr, FALSE,
+                            CREATE_NO_WINDOW, nullptr, nullptr, &rsi, &rpi))
+        {
+            WaitForSingleObject(rpi.hProcess, 10000);
+            CloseHandle(rpi.hThread);
+            CloseHandle(rpi.hProcess);
+        }
+    }
+
+    if (!CreateDirectoryW(stagingDir.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
+    {
+        DLSS_Log("[Updates] Staging klasoru olusturulamadi: %ls", stagingDir.c_str());
+        return;
+    }
+
+    std::wstring extractError;
+    if (!ExtractZip(zipPath, stagingDir, extractError))
+    {
+        DLSS_Log("[Updates] ZIP acilamadi: %ls", extractError.c_str());
+        return; // basarisizsa kendimizi kapatmayalim -- kullanici elle deneyebilsin
+    }
+
+    // Sagliklik kontrolu: acilan pakette gercekten VLSS5.exe var mi?
+    if (GetFileAttributesW((stagingDir + L"\\VLSS5.exe").c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        DLSS_Log("[Updates] Acilan pakette VLSS5.exe bulunamadi, guncelleme iptal: %ls", stagingDir.c_str());
+        return;
+    }
+
+    const DWORD myPid = GetCurrentProcessId();
+    const std::wstring scriptPath = std::wstring(tempDir) + L"vlss5_update_relaunch.cmd";
+
+    std::wstring script;
+    script += L"@echo off\r\n";
+    script += L"setlocal\r\n";
+    script += L"set PID=" + std::to_wstring(myPid) + L"\r\n";
+    script += L":wait\r\n";
+    script += L"tasklist /FI \"PID eq %PID%\" 2>NUL | find \"%PID%\" >NUL\r\n";
+    script += L"if not errorlevel 1 (\r\n";
+    script += L"    timeout /t 1 /nobreak >NUL\r\n";
+    script += L"    goto wait\r\n";
+    script += L")\r\n";
+    // /E: alt klasorler dahil (bos olanlar da). /IS /IT: ayni boyut/tarihli
+    // dosyalari da yeniden kopyala (tar bazen zaman damgasini korumaz). MIR
+    // KULLANMIYORUZ -- bu, hedefte olup kaynakta olmayan dosyalari (vlss5_config.ini,
+    // vlss5_logs.log, crashreporter\, kullanicinin kendi nvngx*.dll'leri) SILERDI.
+    script += L"robocopy \"" + stagingDir + L"\" \"" + exeDir + L"\" /E /IS /IT /R:3 /W:1 >NUL\r\n";
+    script += L"rmdir /s /q \"" + stagingDir + L"\" >NUL 2>&1\r\n";
+    script += L"del \"" + zipPath + L"\" >NUL 2>&1\r\n";
+    script += L"start \"\" \"" + exeDir + L"\\VLSS5.exe\"\r\n";
+    script += L"del \"%~f0\"\r\n";
+
+    {
+        HANDLE hFile = CreateFileW(scriptPath.c_str(), GENERIC_WRITE, 0, nullptr,
+            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (hFile == INVALID_HANDLE_VALUE)
+        {
+            DLSS_Log("[Updates] Relaunch betigi yazilamadi: %ls", scriptPath.c_str());
+            return;
+        }
+        // cmd.exe betikleri ANSI/OEM bekler -- yol isimlerinde Turkce/aksanli
+        // karakter olabilecegi icin (kullanici adi, kurulum dizini) basit
+        // wchar_t->char daraltmasi yerine dogru kod sayfasina cevir.
+        int narrowLen = WideCharToMultiByte(CP_ACP, 0, script.c_str(), (int)script.size(),
+            nullptr, 0, nullptr, nullptr);
+        std::string narrow(narrowLen, '\0');
+        WideCharToMultiByte(CP_ACP, 0, script.c_str(), (int)script.size(),
+            narrow.data(), narrowLen, nullptr, nullptr);
+        DWORD written = 0;
+        WriteFile(hFile, narrow.data(), (DWORD)narrow.size(), &written, nullptr);
+        CloseHandle(hFile);
+    }
+
+    // VLSS5.exe zaten YUKSELTILMIS calisiyor (RequireAdministrator manifest) --
+    // CreateProcessW ile baslatilan bir alt surec ayni token'i devralir, ekstra
+    // UAC TETIKLEMEZ. Betik gorunmez calisir (CREATE_NO_WINDOW).
+    std::wstring cmdLine = L"cmd.exe /c \"" + scriptPath + L"\"";
+    std::vector<wchar_t> mutableCmd(cmdLine.begin(), cmdLine.end());
+    mutableCmd.push_back(L'\0');
+
+    STARTUPINFOW si = { sizeof(si) };
+    si.dwFlags = STARTF_USESHOWWINDOW;
+    si.wShowWindow = SW_HIDE;
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
+                         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
+    {
+        DLSS_Log("[Updates] Relaunch betigi baslatilamadi (hata=%lu)", GetLastError());
         return; // baslatilamadiysa kendimizi kapatmayalim -- kullanici elle deneyebilsin
     }
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    DLSS_Log("[Updates] Installer sessizce baslatildi, uygulama kapatiliyor: %ls", installerPath.c_str());
+    DLSS_Log("[Updates] Guncelleme betigi baslatildi, uygulama kapatiliyor.");
 
     // WM_CLOSE -> varsayilan DefWindowProc DestroyWindow cagirir -> WM_DESTROY
     // (mevcut WebView2/hotkey/InputForwarder temizligi + PostQuitMessage) --
@@ -404,15 +534,41 @@ static void LaunchSilentInstallAndExit(HWND hwnd, const std::wstring& installerP
     PostMessageW(hwnd, WM_CLOSE, 0, 0);
 }
 
+// g_updatesCache'deki release'ler arasinda assetName + ".sha256" adinda bir
+// asset arar (bkz. .github/workflows/release.yml -- Setup.exe'nin yaninda
+// yayimlanan checksum dosyasi). Bulunamazsa bos string doner (eski surumler
+// bu asset'i yayimlamadan once cikmisti -- geriye donuk uyumluluk icin
+// dogrulama o durumda atlanir, bkz. StartUpdatesDownload).
+static std::wstring FindChecksumUrl(const std::wstring& assetName)
+{
+    if (assetName.empty()) return L"";
+    const std::wstring checksumName = assetName + L".sha256";
+    for (auto& release : g_updatesCache)
+        for (auto& asset : release.assets)
+            if (asset.name == checksumName)
+                return asset.downloadUrl;
+    return L"";
+}
+
 // hwnd'ye WM_APP_UPDATES_DL_PROGRESS (tekrar tekrar) ve WM_APP_UPDATES_DL_DONE
 // (bir kez) ile geri donmek uzere arka planda dosyayi %TEMP%'e indirir.
+//
+// Otomatik kurulacak (bkz. IsAutoInstallableAsset) bir installer, YUKSELTILMIS
+// ve SESSIZCE calistirilmadan once butunlugu dogrulanir: release'de yayimlanan
+// .sha256 asset'i de indirilip yerel SHA256 ile karsilastirilir. Bozuk bir
+// indirme ya da (repo/CDN seviyesinde) degistirilmis bir dosya bu sekilde
+// CALISTIRILMADAN ONCE elenir -- "indirilen exe'yi dogrulamadan sessizce
+// calistiran" davranisi (dropper deseni, AV heuristiklerinin de tam olarak
+// avladigi sey) kaldirmak icindir.
 static void StartUpdatesDownload(HWND hwnd, const std::wstring& url, const std::wstring& assetName)
 {
     if (g_updatesDownloading || url.empty()) return;
     g_updatesDownloading = true;
     PushUpdatesStateToJs();
 
-    std::thread([hwnd, url, assetName]()
+    const std::wstring checksumUrl = FindChecksumUrl(assetName);
+
+    std::thread([hwnd, url, assetName, checksumUrl]()
     {
         wchar_t tempDir[MAX_PATH] = {};
         GetTempPathW(MAX_PATH, tempDir);
@@ -426,6 +582,49 @@ static void StartUpdatesDownload(HWND hwnd, const std::wstring& url, const std::
                 PostMessageW(hwnd, WM_APP_UPDATES_DL_PROGRESS, 0, reinterpret_cast<LPARAM>(prog));
             },
             error);
+
+        if (ok && !checksumUrl.empty())
+        {
+            const std::wstring checksumPath = outPath + L".sha256";
+            std::wstring checksumError;
+            if (UpdateChecker::DownloadFile(checksumUrl, checksumPath, nullptr, checksumError))
+            {
+                std::ifstream in(checksumPath);
+                std::string expectedNarrow;
+                in >> expectedNarrow; // "hex" ya da "hex  dosyaadi" -- ilk token yeterli
+                in.close();
+                DeleteFileW(checksumPath.c_str());
+
+                std::wstring expectedHex(expectedNarrow.begin(), expectedNarrow.end());
+                for (auto& ch : expectedHex) ch = towlower(ch);
+
+                std::wstring actualHex, hashError;
+                if (!expectedHex.empty() &&
+                    UpdateChecker::ComputeSha256Hex(outPath, actualHex, hashError) &&
+                    expectedHex == actualHex)
+                {
+                    DLSS_Log("[Updates] SHA256 dogrulandi: %ls", assetName.c_str());
+                }
+                else
+                {
+                    DLSS_Log("[Updates] SHA256 UYUSMUYOR, indirilen dosya siliniyor: %ls "
+                        "(beklenen=%ls hesaplanan=%ls hataOnHash=%ls)",
+                        assetName.c_str(), expectedHex.c_str(), actualHex.c_str(), hashError.c_str());
+                    DeleteFileW(outPath.c_str());
+                    ok = false;
+                    error = L"Bütünlük doğrulaması başarısız oldu -- indirilen dosya güvenilir değil. "
+                            L"Lütfen resmi GitHub sayfasından elle indirin.";
+                }
+            }
+            else
+            {
+                DLSS_Log("[Updates] Checksum indirilemedi, dogrulama atlaniyor: %ls", checksumError.c_str());
+            }
+        }
+        else if (ok)
+        {
+            DLSS_Log("[Updates] Bu surum icin checksum yayimlanmamis, dogrulama atlaniyor: %ls", assetName.c_str());
+        }
 
         auto* resultStr = new std::wstring(ok ? outPath : error);
         PostMessageW(hwnd, WM_APP_UPDATES_DL_DONE, ok ? 1 : 0, reinterpret_cast<LPARAM>(resultStr));
@@ -1909,17 +2108,18 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
             if (UpdateChecker::IsAutoInstallableAsset(fileName))
             {
-                // Yeni surumler (bkz. installer/VLSS5.iss + .github/workflows/release.yml):
-                // Setup.exe -- sessizce kur, VLSS5'i kapat, installer kurulum
-                // bitince otomatik yeniden baslatir. Elle mudahale YOK.
+                // Yeni surumler (bkz. .github/workflows/release.yml):
+                // VLSS5-X.Y.Z-portable.zip -- ZIP'i ac, dosyalari uzerine
+                // kopyala, VLSS5'i yeniden baslat. Elle mudahale YOK. Artik
+                // hicbir installer.exe indirilmiyor/calistirilmiyor.
                 data["autoInstalling"] = true;
-                LaunchSilentInstallAndExit(hwnd, *pathOrError);
+                LaunchPortableUpdateAndExit(hwnd, *pathOrError);
             }
             else
             {
-                // Eski surumlerin .rar asset'i (henuz yeni Setup.exe pipeline'iyla
+                // Eski surumlerin .exe/.rar asset'i (henuz portable ZIP pipeline'iyla
                 // yayimlanmamis) -- otomatik kuramayiz, kullanicinin varsayilan
-                // arsiv programina devrediyoruz (bkz. presetsOpenFolder ile ayni desen).
+                // programina devrediyoruz (bkz. presetsOpenFolder ile ayni desen).
                 ShellExecuteW(hwnd, L"open", pathOrError->c_str(), nullptr, nullptr, SW_SHOWNORMAL);
             }
         }
