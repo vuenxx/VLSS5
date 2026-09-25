@@ -11,15 +11,18 @@
 *.VC.db
 *.VC.opendb
 
-# Build output directories
-x64/
-x86/
-Win32/
-ARM/
-ARM64/
-Debug/
-Release/
-ref/
+# Build output directories -- KOK dizine SABITLENMIS (bassiz "x64/" gibi
+# bir kural, third_party\webview2\x64\ (WebView2 SDK .lib/.dll dosyalari)
+# gibi ALAKASIZ alt klasorleri de yanlislikla yutuyordu -- bu yuzden CI'da
+# "WebView2LoaderStatic.lib bulunamadi" link hatasi aliniyordu).
+/x64/
+/x86/
+/Win32/
+/ARM/
+/ARM64/
+/Debug/
+/Release/
+/ref/
 
 
 # Project intermediate build folders
@@ -73,6 +76,11 @@ src/VersionGenerated.h
 # >100MB, telifli) HALA ignore edilir -- kullanici tarafindan ayrica temin
 # edilmesi gerekir.
 !redist/nvngx.dll_dlssnr.dll
+
+# WebView2Loader.dll: Microsoft WebView2 SDK'sinin resmi runtime yukleyicisi --
+# uygulamayla birlikte dagitilmasi zaten AMACLANMIS (bkz. third_party/webview2) --
+# *.dll kuralinin istisnasi, CI'nin derleyebilmesi icin gerekli.
+!third_party/webview2/x64/WebView2Loader.dll
 
 # Runtime configuration & session logs
 vlss5_config.ini
