@@ -1,0 +1,747 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://vlss5.shared/style.css">
+<style>
+  /* Ana pencerenin GERÇEK bir OS başlık çubuğu var (WS_OVERLAPPEDWINDOW) --
+     shared/style.css'in borderless-popup varsayımı olan dış çerçeve/radius
+     burada istenmiyor (DWM zaten kendi köşe yuvarlamasını uyguluyor). */
+  html, body {
+    border: none;
+    border-radius: 0;
+    height: 100vh;
+    overflow: hidden;
+  }
+
+  body { display: flex; flex-direction: column; }
+
+  .mainHeader {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 12px 20px;
+    background: var(--card);
+    border-bottom: 3px solid var(--neon);
+    flex-shrink: 0;
+  }
+  .mainHeader .logo { width: 42px; height: 42px; flex-shrink: 0; }
+  .mainHeader .titles { flex-shrink: 0; }
+  .mainHeader .titles .title {
+    font-size: 20px; font-weight: 700; color: #fff; line-height: 1.1;
+  }
+  .mainHeader .titles .subtitle {
+    font-size: 12px; color: var(--text-dim); margin-top: 2px;
+  }
+  .headerNav {
+    flex: 1;
+    display: flex;
+    justify-content: center;
+  }
+  .headerNavInner {
+    display: flex;
+    gap: 4px;
+    background: #141414;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 4px;
+  }
+  .navLink {
+    padding: 8px 22px;
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--text-dim);
+    border: 1px solid transparent;
+    border-radius: 7px;
+    cursor: pointer;
+  }
+  .navLink:hover { color: var(--text); }
+  .navLink.active {
+    color: var(--neon);
+    background: #0c150c;
+    border-color: var(--neon);
+  }
+
+  .hotkeyPill {
+    padding: 8px 14px;
+    background: #141414;
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    font-size: 11px;
+    color: #a5afbe;
+    white-space: nowrap;
+    flex-shrink: 0;
+  }
+
+  /* ------------------------------------------------------------------ */
+  /* Faz 3: iki kolonlu govde -- sol hedef listesi, sag sekmeli panel.   */
+  /* ------------------------------------------------------------------ */
+  .mainBody {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .leftCol {
+    width: 420px;
+    flex-shrink: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;
+  }
+
+  .rightCol {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;
+  }
+
+  .card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 14px 16px;
+  }
+
+  .card .section-title { margin: 0 0 10px 0; }
+
+  .targetCard { flex: 1; min-height: 0; display: flex; flex-direction: column; }
+  .targetList { flex: 1; min-height: 0; height: auto; margin-bottom: 10px; }
+
+  .list-item { display: flex; align-items: center; gap: 8px; }
+  .list-item.monitor { }
+  .list-item.monitor-sep { border-bottom: 1px solid #ffffff55; }
+  .list-item.selected { background: var(--neon); color: #0c120a; font-weight: 700; }
+  .item-icon { width: 18px; height: 18px; flex-shrink: 0; object-fit: contain; }
+  .item-icon-glyph { display: flex; align-items: center; justify-content: center; font-size: 14px; }
+
+  .targetToggles {
+    display: flex;
+    flex-direction: column;
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
+  }
+  .targetToggles .toggle-row { padding: 5px 0; }
+
+  .startBtn {
+    flex-shrink: 0;
+    padding: 13px;
+    border: none;
+    border-radius: 10px;
+    font-size: 18px;
+    font-weight: 700;
+    cursor: pointer;
+    background: var(--neon);
+    color: #06210c;
+  }
+  .startBtn:hover { background: var(--neon-dark); }
+  .startBtn.running { background: #e83e3e; color: #f2f7fc; }
+  .startBtn.running:hover { background: #be2c2c; }
+  .startBtn:disabled { background: #2a2a2a; color: var(--text-dim); cursor: not-allowed; }
+  .startBtn:disabled:hover { background: #2a2a2a; }
+
+  .statusBar {
+    flex-shrink: 0;
+    text-align: left;
+    font-size: 12px;
+    color: var(--text);
+    padding: 2px 4px 4px 16px;
+  }
+
+  .gpuRow { margin-bottom: 12px; }
+  .gpuRow:last-child { margin-bottom: 0; }
+  .gpuRow .inline { display: flex; gap: 8px; align-items: center; }
+  .gpuRow .inline select { flex: 1; }
+  .helpBtn {
+    width: 26px; height: 26px; flex-shrink: 0;
+    border-radius: 6px; border: 1px solid var(--border);
+    background: #1a1a1a; color: var(--text-dim);
+    cursor: pointer; font-weight: 700;
+  }
+  .helpBtn:hover { border-color: var(--neon); color: var(--neon); }
+
+  .view { display: flex; flex: 1; min-height: 0; gap: 14px; padding: 14px 16px; overflow: hidden; }
+  .view.hidden { display: none; }
+
+  .rightColHome {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    min-height: 0;
+  }
+
+  /* nvngx_dlssnr.dll durum isigi -- BASLAT'in solunda, sag altta (bkz.
+     web/main/app.js). Kucuk ama rahat bir surukle-birak hedefi olacak kadar
+     genis bir "pill" -- yesil/kirmizi nokta + kisa etiket, detay tooltip'te. */
+  .dllStatusPill {
+    width: 340px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 10px 14px;
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    background: #0a0a0a;
+    font-size: 12px;
+    color: var(--text-dim);
+    text-align: center;
+    flex-shrink: 0;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .dllStatusDot {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--danger);
+    box-shadow: 0 0 6px var(--danger);
+    flex-shrink: 0;
+    transition: background .15s ease, box-shadow .15s ease;
+  }
+  .dllStatusPill.ready { border-color: var(--neon); }
+  .dllStatusPill.ready .dllStatusDot { background: var(--neon); box-shadow: 0 0 6px var(--neon); }
+  .dllStatusPill.dragover { border-color: var(--neon); background: #0c150c; }
+  .homeBottom {
+    margin-top: auto;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-end;
+    gap: 8px;
+  }
+  .homeBottom .startBtn { width: 340px; }
+
+  .settingsView { flex-direction: column; }
+
+  /* Sekme seridi */
+  .tabStrip {
+    display: flex;
+    gap: 4px;
+    flex-shrink: 0;
+  }
+  .tabBtn {
+    flex: 1;
+    text-align: center;
+    padding: 10px 6px;
+    font-size: 12px;
+    font-weight: 700;
+    border-radius: 8px 8px 0 0;
+    background: #141414;
+    border: 1px solid var(--border);
+    border-bottom: none;
+    color: var(--text-dim);
+    cursor: pointer;
+  }
+  .tabBtn:hover { color: var(--text); }
+  .tabBtn.active {
+    background: var(--card);
+    color: var(--neon);
+    border-color: var(--neon);
+  }
+
+  .tabContent {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-top: none;
+    border-radius: 0 0 10px 10px;
+    padding: 14px 16px;
+  }
+  .tabPanel.hidden { display: none; }
+  .tabPanel .section-title:first-child { margin-top: 0; }
+
+  /* Yakalama surerken "Gorüntü Ayarları (Varsayılan)" sekmesi kilitli --
+     degisiklikler native tarafta zaten reddediliyor, burada gorsel olarak
+     da gosteriyoruz (bkz. Main.cpp settingsSetConfig/settingsLoadPreset). */
+  #tabPanel-settings.capturing-locked { opacity: .45; pointer-events: none; position: relative; }
+  #tabPanel-settings .lockedBanner { display: none; }
+  #tabPanel-settings.capturing-locked .lockedBanner {
+    display: block;
+    color: var(--amber);
+    font-size: 12px;
+    font-weight: 700;
+    margin-bottom: 12px;
+  }
+
+  /* Ayarlar sekmesi: genis ana pencerede tek kolon cok bosluklu kaliyordu --
+     iki kolonlu sik bir grid'e sarilir (sadece bu sekmede, popup Settings
+     penceresi ve web/shared/style.css'in kendi tek-kolon varsayimi degismez). */
+  .stgGrid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    column-gap: 32px;
+    align-content: start;
+  }
+  .stgGrid .full { grid-column: 1 / -1; }
+  .stgGrid .row { margin-bottom: 10px; }
+  .stgGrid .toggle-row { margin-bottom: 6px; }
+
+  /* Bolumlendirilmis kart panelleri -- zemin (siyah) ile kontrolleri ayirir. */
+  .settingsCard {
+    background: #131313;
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    margin-bottom: 12px;
+  }
+
+  /* Tek satir slider: solda etiket, ortada ince cubuk, sagda deger rozeti. */
+  .sliderRow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 6px;
+  }
+  .sliderRow .sliderLabel {
+    flex: 0 0 168px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .sliderRow .sliderLabel .sub,
+  .toggle-row .label .sub {
+    font-size: 10px;
+    font-weight: 400;
+    color: var(--text-dim);
+    margin-left: 2px;
+  }
+  .sliderRow input[type=range] {
+    flex: 1;
+    min-width: 0;
+    height: 3px;
+  }
+  .sliderRow input[type=range]::-webkit-slider-thumb {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+  }
+  .sliderRow .valBadge {
+    flex: 0 0 auto;
+    min-width: 46px;
+    text-align: center;
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--neon);
+    background: #0c150c;
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 3px 6px;
+  }
+
+  .toggle-row .label { font-size: 12px; }
+
+  /* Genel Ayarlar sekmesi: RTSS/On Ayarlar/Tuslar icin akordiyon bolumler. */
+  .accordion {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    margin-bottom: 10px;
+    overflow: hidden;
+    background: #131313;
+  }
+  .accordionHeader {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 12px 16px;
+    cursor: pointer;
+    font-weight: 700;
+    font-size: 13px;
+    color: var(--text);
+  }
+  .accordionHeader:hover { color: var(--neon); }
+  .accordionHeader .chev {
+    color: var(--text-dim);
+    transition: transform .15s ease;
+    font-size: 12px;
+  }
+  .accordion.open .accordionHeader .chev { transform: rotate(180deg); color: var(--neon); }
+  .accordion.open .accordionHeader { border-bottom: 1px solid var(--border); }
+  .accordionBody { padding: 14px 16px; }
+  .accordionBody.collapsed { display: none; }
+
+  /* ------------------------------------------------------------------ */
+  /* GUNCELLEMELER gorunumu                                              */
+  /* ------------------------------------------------------------------ */
+  .updatesView { flex-direction: column; overflow-y: auto; }
+
+  .updatesTopCard { flex-shrink: 0; }
+  .updatesVersionRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 12px;
+  }
+  .updatesCurrentLabel {
+    font-size: 11px;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }
+  .updatesCurrentVersion { font-size: 22px; font-weight: 700; color: var(--neon); }
+
+  .updatesStatusBanner {
+    font-size: 12px;
+    padding: 9px 12px;
+    border-radius: 6px;
+    margin-bottom: 12px;
+    background: #141414;
+    border: 1px solid var(--border);
+    color: var(--text-dim);
+    min-height: 14px;
+  }
+  .updatesStatusBanner.newer {
+    color: #06210c;
+    background: var(--neon);
+    border-color: var(--neon);
+    font-weight: 700;
+  }
+  .updatesStatusBanner.error {
+    color: #fff;
+    background: #3c1f1f;
+    border-color: var(--danger);
+  }
+
+  .updatesHistoryCard {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    margin-top: 10px;
+  }
+  .updReleaseList { flex: 1; min-height: 0; overflow-y: auto; margin-top: 4px; }
+
+  .updReleaseItem {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 14px;
+    margin-bottom: 10px;
+    background: #131313;
+  }
+  .updReleaseHeader { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; }
+  .updReleaseTag { font-weight: 700; color: var(--neon); font-size: 14px; flex-shrink: 0; }
+  .updReleaseDate { color: var(--text-dim); font-size: 11px; flex-shrink: 0; }
+  .updReleaseBadge {
+    font-size: 10px;
+    padding: 2px 6px;
+    border-radius: 4px;
+    background: #2a2a2a;
+    color: var(--amber);
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+  .updReleaseBody { font-size: 12px; color: var(--text); line-height: 1.55; }
+  .updReleaseBody h1, .updReleaseBody h2, .updReleaseBody h3 {
+    font-size: 13px; color: var(--neon); margin: 10px 0 6px;
+  }
+  .updReleaseBody h1:first-child, .updReleaseBody h2:first-child, .updReleaseBody h3:first-child { margin-top: 0; }
+  .updReleaseBody p { margin: 6px 0; }
+  .updReleaseBody ul, .updReleaseBody ol { margin: 6px 0; padding-left: 20px; }
+  .updReleaseBody li { margin: 2px 0; }
+  .updReleaseBody a { color: var(--neon); }
+  .updReleaseBody code {
+    background: #000; padding: 1px 5px; border-radius: 3px; font-size: 11px;
+  }
+  .updReleaseBody hr { border: none; border-top: 1px solid var(--border); margin: 10px 0; }
+
+  .updatesUpdateBtn { background: var(--neon); color: #06210c; padding: 8px 16px; font-size: 12px; }
+  .updatesUpdateBtn:hover { background: var(--neon-dark); }
+  .updatesUpdateBtn.hidden { display: none; }
+</style>
+</head>
+<body>
+  <div class="mainHeader">
+    <img class="logo" src="app.ico" alt="VLSS5">
+    <div class="titles">
+      <div class="title">VLSS5</div>
+      <div class="subtitle">Youtube: @vuenxxmx</div>
+    </div>
+    <div class="headerNav">
+      <div class="headerNavInner">
+        <div class="navLink active" id="navBtn-home" data-view="home">Ana Sayfa</div>
+        <div class="navLink" id="navBtn-updates" data-view="updates">Güncellemeler</div>
+        <div class="navLink" id="navBtn-settings" data-view="settings">Ayarlar</div>
+      </div>
+    </div>
+    <div class="hotkeyPill" id="hotkeyPill">[Alt] Odak | [F] FPS | [V] VLSS5 | [Alt+S] Başlat</div>
+  </div>
+
+  <div class="mainBody">
+    <!-- ================= ANA SAYFA GORUNUMU ================= -->
+    <div class="view" id="view-home">
+      <!-- SOL KOLON: hedef secimi (artik tum yuksekligi kaplar) -->
+      <div class="leftCol">
+        <div class="card targetCard">
+          <div class="section-title">HEDEF UYGULAMA SEÇİMİ</div>
+          <div class="list-box targetList" id="targetList"></div>
+          <button class="secondary" id="btnRefresh" style="width:100%">Yenile &#8635;</button>
+        </div>
+      </div>
+
+      <!-- SAG KOLON: GPU secimleri + toggle'lar + BASLAT (sag altta) -->
+      <div class="rightColHome">
+        <div class="card">
+          <div class="row gpuRow">
+            <label class="field-title">Ekran / Yakalama GPU:</label>
+            <div class="inline">
+              <select id="gpuSelect"></select>
+              <button class="helpBtn" id="btnGpuHelp">?</button>
+            </div>
+          </div>
+          <div class="row gpuRow">
+            <label class="field-title">DLSS Hesaplama GPU:</label>
+            <div class="inline">
+              <select id="dlssGpuSelect"></select>
+              <button class="helpBtn" id="btnDlssGpuHelp">?</button>
+            </div>
+          </div>
+          <div class="row gpuRow" style="margin-bottom:0">
+            <label class="field-title">Yakalama Yöntemi:</label>
+            <div class="inline">
+              <select id="backendSelect" disabled></select>
+              <button class="helpBtn" id="btnBackendHelp">?</button>
+            </div>
+          </div>
+
+          <div class="targetToggles">
+            <div class="toggle-row" id="rowVsync">
+              <div class="label">VSync</div>
+              <div class="switch" id="swVsync"><div class="knob"></div></div>
+            </div>
+            <div class="toggle-row" id="rowFps">
+              <div class="label">FPS Göstergesi</div>
+              <div class="switch" id="swFps"><div class="knob"></div></div>
+            </div>
+            <div class="toggle-row" id="rowDlss">
+              <div class="label">VLSS5 (Nöral)</div>
+              <div class="switch" id="swDlss"><div class="knob"></div></div>
+            </div>
+            <div class="toggle-row" id="rowFullscreen">
+              <div class="label">Tam Ekran Yap</div>
+              <div class="switch" id="swFullscreen"><div class="knob"></div></div>
+            </div>
+          </div>
+        </div>
+
+        <div class="homeBottom">
+          <div class="dllStatusPill" id="dllStatusPill" title="nvngx_dlssnr.dll — üzerine sürükleyip bırakabilirsiniz">
+            <span class="dllStatusDot" id="dllStatusDot"></span>
+            <span class="dllStatusPillText" id="dllStatusPillText">nvngx_dlssnr.dll</span>
+          </div>
+          <button class="startBtn" id="btnStart">BAŞLAT &#10148;</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= AYARLAR GORUNUMU (alt sekmeli) ================= -->
+    <div class="view settingsView hidden" id="view-settings">
+      <div class="tabStrip">
+        <div class="tabBtn active" id="tabBtn-general" data-tab="general">Genel Ayarlar</div>
+        <div class="tabBtn" id="tabBtn-settings" data-tab="settings">Görüntü Ayarları (Varsayılan)</div>
+      </div>
+
+      <div class="tabContent">
+        <!-- ---------------- GENEL AYARLAR sekmesi: RTSS/On Ayarlar/Tuslar akordiyon ---------------- -->
+        <div class="tabPanel" id="tabPanel-general">
+          <div class="accordion">
+            <div class="accordionHeader" data-acc="rtss">
+              <span>RTSS Ayarları</span><span class="chev">&#9662;</span>
+            </div>
+            <div class="accordionBody collapsed" id="accBody-rtss">
+              <div class="row">
+                <label class="field-title">RTSS Klasörü:</label>
+                <button class="secondary" id="rtssBtnBrowse">Klasör Seç</button>
+                <div class="path-display" id="rtssDirPath"></div>
+              </div>
+
+              <div class="row">
+                <label class="field-title">Profiller:</label>
+                <div style="display:flex; gap:10px;">
+                  <select id="rtssProfileList" style="flex:1"></select>
+                  <button class="secondary" id="rtssBtnRefresh">Yenile</button>
+                </div>
+              </div>
+
+              <button class="danger" id="rtssBtnDelete" style="width:100%">Profili Sil</button>
+            </div>
+          </div>
+
+          <div class="accordion">
+            <div class="accordionHeader" data-acc="presets">
+              <span>Ön Ayarlar</span><span class="chev">&#9662;</span>
+            </div>
+            <div class="accordionBody collapsed" id="accBody-presets">
+              <div class="list-box" id="presetsListBox"></div>
+              <div class="empty-msg" id="presetsEmptyMsg" style="display:none">
+                Henüz kaydedilmiş ön ayar yok.<br>Insert menüsündeki KAYDET ile ekleyebilirsiniz.
+              </div>
+              <div class="btn-row">
+                <button class="secondary" id="presetsBtnOpenFolder">Klasörü Aç</button>
+                <button class="danger" id="presetsBtnDelete">Sil</button>
+              </div>
+            </div>
+          </div>
+
+          <div class="accordion">
+            <div class="accordionHeader" data-acc="hotkeys">
+              <span>Tuşları Değiştir</span><span class="chev">&#9662;</span>
+            </div>
+            <div class="accordionBody collapsed" id="accBody-hotkeys">
+              <div class="hotkey-row"><div class="label">Uygulamayı Başlat:</div><button class="rebind" id="hkBtnStart"></button></div>
+              <div class="hotkey-row"><div class="label">VLSS5 Ayarları:</div><button class="rebind" id="hkBtnSettings"></button></div>
+              <div class="hotkey-row"><div class="label">Oyuna Odaklan:</div><button class="rebind" id="hkBtnFocus"></button></div>
+              <div class="hotkey-row"><div class="label">FPS Göstergesi:</div><button class="rebind" id="hkBtnFps"></button></div>
+              <div class="hotkey-row"><div class="label">VLSS5 Aç/Kapat:</div><button class="rebind" id="hkBtnVlss"></button></div>
+              <div class="hotkey-row"><div class="label">FPS Kalibrasyonu:</div><button class="rebind" id="hkBtnCalib"></button></div>
+              <div class="hotkey-row"><div class="label">GPU Uyarısını Kapat:</div><button class="rebind" id="hkBtnDismissWarning"></button></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- ---------------- AYARLAR sekmesi (bkz. web/settings) ---------------- -->
+        <div class="tabPanel hidden" id="tabPanel-settings">
+          <div class="lockedBanner">⚠ Yakalama sürerken Varsayılan Ayarlar değiştirilemez.</div>
+          <div class="row" style="margin-bottom:12px">
+            <label class="field-title">Şuradan kullan:</label>
+            <select id="stgPresetSourceList"></select>
+          </div>
+
+          <div class="settingsCard">
+            <div class="section-title" style="margin-top:0">GÖRÜNTÜ KALİTESİ</div>
+            <div class="stgGrid">
+              <div class="row">
+                <label class="field-title">Görsel Stil (Style):</label>
+                <select id="stgStyle">
+                  <option value="0">Standard (Keskin)</option>
+                  <option value="1">Natural (Doğal)</option>
+                  <option value="2">Cinematic (Film)</option>
+                </select>
+              </div>
+              <div class="row">
+                <label class="field-title">Model Varyantı (Preset):</label>
+                <select id="stgPreset">
+                  <option value="0">Default (Önerilen)</option>
+                  <option value="1">Preset 1</option>
+                  <option value="2">Preset 2</option>
+                  <option value="3">Preset 3</option>
+                </select>
+              </div>
+
+              <div class="sliderRow">
+                <span class="sliderLabel">Nöral Şiddet <span class="sub">(Intensity)</span></span>
+                <input type="range" id="stgIntensity" min="0" max="100" value="100">
+                <span class="valBadge" id="stgIntensityVal">1.00x</span>
+              </div>
+              <div class="sliderRow">
+                <span class="sliderLabel">Etki Yoğunluğu <span class="sub">(Boost)</span></span>
+                <input type="range" id="stgBoost" min="100" max="250" value="100">
+                <span class="valBadge" id="stgBoostVal">1.00x</span>
+              </div>
+              <div class="sliderRow">
+                <span class="sliderLabel">Yüzey Detayı <span class="sub">(Structure)</span></span>
+                <input type="range" id="stgStructure" min="0" max="200" value="100">
+                <span class="valBadge" id="stgStructureVal">1.00x</span>
+              </div>
+              <div class="sliderRow">
+                <span class="sliderLabel">Mikro Kontrast <span class="sub">(Tone)</span></span>
+                <input type="range" id="stgTone" min="0" max="200" value="100">
+                <span class="valBadge" id="stgToneVal">1.00x</span>
+              </div>
+              <div class="sliderRow">
+                <span class="sliderLabel">Ten Doku Ayarı <span class="sub">(Skin)</span></span>
+                <input type="range" id="stgSkin" min="0" max="300" value="0">
+                <span class="valBadge" id="stgSkinVal">Otomatik</span>
+              </div>
+              <div class="sliderRow">
+                <span class="sliderLabel">Model Çözünürlüğü <span class="sub">(Performans)</span></span>
+                <input type="range" id="stgResScale" min="50" max="100" value="100">
+                <span class="valBadge" id="stgResScaleVal">%100</span>
+              </div>
+
+              <div class="toggle-row" id="stgRowAutoMask">
+                <div class="label">Otomatik Ten Tespiti <span class="sub">(Auto Skin Mask)</span></div>
+                <div class="switch" id="stgSwAutoMask"><div class="knob"></div></div>
+              </div>
+              <div class="toggle-row" id="stgRowOpticalFlow">
+                <div class="label">Optik Akış Takibi <span class="sub">(Motion Vectors)</span></div>
+                <div class="switch" id="stgSwOpticalFlow"><div class="knob"></div></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="settingsCard">
+            <div class="section-title experimental" style="margin-top:0">DENEYSEL AYARLAR</div>
+            <div class="stgGrid">
+              <div class="sliderRow">
+                <span class="sliderLabel">Geçiş Sayısı <span class="sub">(Multipass)</span></span>
+                <input type="range" id="stgPassCount" min="1" max="4" value="1">
+                <span class="valBadge" id="stgPassCountVal">1</span>
+              </div>
+              <div class="sliderRow">
+                <span class="sliderLabel">Geçiş Zayıflaması <span class="sub">(Falloff)</span></span>
+                <input type="range" id="stgPassFalloff" min="25" max="100" value="100">
+                <span class="valBadge" id="stgPassFalloffVal">1.00x</span>
+              </div>
+
+              <div class="toggle-row" id="stgRowSplit">
+                <div class="label">Bölünmüş Ekran <span class="sub">(Split)</span></div>
+                <div class="switch" id="stgSwSplit"><div class="knob"></div></div>
+              </div>
+              <div class="sliderRow" id="stgRowSplitPos" style="display:none">
+                <span class="sliderLabel">Bölünme Çizgisi <span class="sub">(Sol/Sağ)</span></span>
+                <input type="range" id="stgSplitPos" min="0" max="100" value="50">
+                <span class="valBadge" id="stgSplitPosVal">%50</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+
+    <!-- ================= GUNCELLEMELER GORUNUMU ================= -->
+    <div class="view updatesView hidden" id="view-updates">
+      <div class="card updatesTopCard">
+        <div class="updatesVersionRow">
+          <div>
+            <div class="updatesCurrentLabel">Mevcut Sürüm</div>
+            <div class="updatesCurrentVersion" id="updCurrentVersion">v?</div>
+          </div>
+          <div style="display:flex; gap:8px;">
+            <button class="secondary" id="updBtnCheck">Güncelleme Kontrol Et</button>
+            <button class="primary updatesUpdateBtn hidden" id="updBtnUpdateNow" style="width:auto; margin-top:0;">Şimdi Güncelle</button>
+          </div>
+        </div>
+        <div class="updatesStatusBanner" id="updStatusBanner"></div>
+        <div class="toggle-row" id="updRowAutoCheck">
+          <div class="label">Otomatik Güncelleme Kontrolü <span class="sub">(Her açılışta kontrol et)</span></div>
+          <div class="switch" id="updSwAutoCheck"><div class="knob"></div></div>
+        </div>
+      </div>
+
+      <div class="card updatesHistoryCard">
+        <div class="section-title" style="margin-top:0">SÜRÜM GEÇMİŞİ</div>
+        <div class="updReleaseList" id="updReleaseList"></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="statusBar" id="statusText">Hedef uygulamayı seçin veya istediğiniz penceredeyken ALT+S basın.</div>
+
+  <script src="https://vlss5.shared/ipc.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

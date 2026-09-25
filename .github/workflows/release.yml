@@ -1,0 +1,71 @@
+name: Release
+
+# "v*" bicimindeki bir git tag push edildiginde (orn. v0.6.0) tetiklenir:
+# 1) VLSS5.vcxproj'u Release|x64 derler,
+# 2) installer/VLSS5.iss'i o surumle Inno Setup ile derleyip VLSS5-Setup-<surum>.exe uretir,
+# 3) GitHub Release'i bu Setup.exe'yi asset olarak ekleyerek olusturur/gunceller.
+#
+# src/UpdateChecker.cpp bu asset'i (adindaki "Setup" ibaresinden) otomatik
+# bulup indirir ve sessizce calistirir -- yani bu workflow, uygulama
+# icindeki "Güncellemeler" sekmesinin otomatik guncelleme yapabilmesinin
+# on kosulu. Once src/Version.h'deki VLSS5_VERSION_STRING'i de ayni
+# surume guncelleyip commit'leyin, SONRA tag'i push edin.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Surum numarasi (orn. 0.6.0) -- workflow_dispatch ile elle tetiklemede gerekli"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            # "refs/tags/v0.6.0" -> "0.6.0"
+            tag="${GITHUB_REF_NAME}"
+            echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Write version header
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.version }}"
+          $content = '#define VLSS5_VERSION_STRING L"' + $version + '"'
+          Set-Content -Path "src/VersionGenerated.h" -Encoding utf8 -Value $content
+          Get-Content "src/VersionGenerated.h"
+
+      - name: Setup MSBuild
+        uses: microsoft/setup-msbuild@v2
+
+      - name: Build VLSS5 (Release|x64)
+        run: msbuild VLSS5.vcxproj /p:Configuration=Release /p:Platform=x64 /m /nologo
+
+      - name: Compile installer (Inno Setup)
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
+        with:
+          path: installer/VLSS5.iss
+          options: /DMyAppVersion=${{ steps.version.outputs.version }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }}
+          generate_release_notes: true
+          files: installer/Output/VLSS5-Setup-${{ steps.version.outputs.version }}.exe

@@ -26,6 +26,21 @@ public:
 
     std::wstring GetProfilesDir() const;
 
+    // RTSS'in "RTSSSharedMemoryV2" paylasimli bellegini okuyup, verilen process'in
+    // RTSS'in OYUNUN ICINE hook'layarak dogrudan olctugu, EKRAN YAKALAMADAN (WGC/DXGI'dan)
+    // tamamen bagimsiz gercek kare hizini dondurur. Bunun gerekli olma sebebi: bizim
+    // topmost/opak overlay'imiz hedefin TAM USTUNDE oldugundan, DWM composition tabanli
+    // her olcum (WGC FrameArrived, DXGI Duplication) kendi render hizimizla kirleniyor --
+    // RTSS ise Present() cagrisini oyunun D3D katmaninda, compositor'dan ONCE yakaladigi
+    // icin bu kirlenmeden tamamen bagimsiz. Basarisiz olursa (RTSS kapali/hook yok/pid
+    // bulunamadi) -1 doner; cagiran taraf bu durumda kendi (yaklasik) olcumune dusmeli.
+    int GetLiveFps(unsigned long processId);
+
 private:
     RTSSManager() = default;
+
+    bool EnsureSharedMemoryMapped();
+
+    void* m_rtssMapping = nullptr; // HANDLE (file mapping)
+    void* m_rtssView    = nullptr; // mapped LPRTSS_SHARED_MEMORY
 };

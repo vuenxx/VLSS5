@@ -141,6 +141,12 @@ void ConfigManager::Load()
     m_config.temporalStabilizer = (GetPrivateProfileIntW(sec, L"TemporalStabilizer", 0, ini.c_str()) != 0);
     m_config.opticalFlow        = (GetPrivateProfileIntW(sec, L"OpticalFlow", 1, ini.c_str()) != 0);
 
+    m_config.nrFlowQuality = GetPrivateProfileIntW(sec, L"NrFlowQuality", 0, ini.c_str());
+    if (m_config.nrFlowQuality < 0 || m_config.nrFlowQuality > 2) m_config.nrFlowQuality = 0;
+
+    m_config.nrFlowGrid = GetPrivateProfileIntW(sec, L"NrFlowGrid", 4, ini.c_str());
+    if (m_config.nrFlowGrid != 1 && m_config.nrFlowGrid != 2 && m_config.nrFlowGrid != 4) m_config.nrFlowGrid = 4;
+
     GetPrivateProfileStringW(sec, L"BoostFactor", L"1.0", buf, _countof(buf), ini.c_str());
     m_config.boostFactor = static_cast<float>(_wtof(buf));
     if (m_config.boostFactor < 1.0f) m_config.boostFactor = 1.0f;
@@ -150,8 +156,17 @@ void ConfigManager::Load()
     if (m_config.overlayMode < 0) m_config.overlayMode = 0;
     if (m_config.overlayMode > 2) m_config.overlayMode = 2;
 
+    m_config.captureBackend = GetPrivateProfileIntW(sec, L"CaptureBackend", 0, ini.c_str());
+    if (m_config.captureBackend < 0) m_config.captureBackend = 0;
+    if (m_config.captureBackend > 1) m_config.captureBackend = 1;
+
     m_config.splitScreen = (GetPrivateProfileIntW(sec, L"SplitScreen", 0, ini.c_str()) != 0);
     m_config.fullscreenStretch = (GetPrivateProfileIntW(sec, L"FullscreenStretch", 0, ini.c_str()) != 0);
+    m_config.mouseMapping      = (GetPrivateProfileIntW(sec, L"MouseMapping", 1, ini.c_str()) != 0);
+    m_config.cursorLock        = (GetPrivateProfileIntW(sec, L"CursorLock", 1, ini.c_str()) != 0);
+    m_config.hideSystemCursor  = (GetPrivateProfileIntW(sec, L"HideSystemCursor", 1, ini.c_str()) != 0);
+    m_config.suppressRtssRunningWarning = (GetPrivateProfileIntW(sec, L"SuppressRtssRunningWarning", 0, ini.c_str()) != 0);
+    m_config.autoCheckUpdates = (GetPrivateProfileIntW(sec, L"AutoCheckUpdates", 1, ini.c_str()) != 0);
 
     GetPrivateProfileStringW(sec, L"SplitPos", L"0.5", buf, _countof(buf), ini.c_str());
     m_config.splitPos = static_cast<float>(_wtof(buf));
@@ -166,6 +181,7 @@ void ConfigManager::Load()
     m_config.vkFps         = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkFps", VK_F9, ini.c_str()));
     m_config.vkToggleVlss  = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkToggleVlss", VK_F10, ini.c_str()));
     m_config.vkCalib       = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkCalib", VK_F2, ini.c_str()));
+    m_config.vkDismissWarning = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkDismissWarning", VK_F3, ini.c_str()));
     m_config.vkStart       = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkStart", 'S', ini.c_str()));
     m_config.modStart      = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"ModStart", MOD_ALT, ini.c_str()));
 
@@ -295,10 +311,18 @@ void ConfigManager::Save()
     writeFloat(L"VLSS5", L"PassFalloff", m_config.passFalloff);
     writeInt(L"VLSS5", L"TemporalStabilizer", m_config.temporalStabilizer ? 1 : 0);
     writeInt(L"VLSS5", L"OpticalFlow", m_config.opticalFlow ? 1 : 0);
+    writeInt(L"VLSS5", L"NrFlowQuality", m_config.nrFlowQuality);
+    writeInt(L"VLSS5", L"NrFlowGrid", m_config.nrFlowGrid);
     writeFloat(L"VLSS5", L"BoostFactor", m_config.boostFactor);
     writeInt(L"VLSS5", L"OverlayMode", m_config.overlayMode);
+    writeInt(L"VLSS5", L"CaptureBackend", m_config.captureBackend);
     writeInt(L"VLSS5", L"SplitScreen", m_config.splitScreen ? 1 : 0);
     writeInt(L"VLSS5", L"FullscreenStretch", m_config.fullscreenStretch ? 1 : 0);
+    writeInt(L"VLSS5", L"MouseMapping", m_config.mouseMapping ? 1 : 0);
+    writeInt(L"VLSS5", L"CursorLock", m_config.cursorLock ? 1 : 0);
+    writeInt(L"VLSS5", L"HideSystemCursor", m_config.hideSystemCursor ? 1 : 0);
+    writeInt(L"VLSS5", L"SuppressRtssRunningWarning", m_config.suppressRtssRunningWarning ? 1 : 0);
+    writeInt(L"VLSS5", L"AutoCheckUpdates", m_config.autoCheckUpdates ? 1 : 0);
     writeFloat(L"VLSS5", L"SplitPos", m_config.splitPos);
 
     writeInt(L"Hotkeys", L"SettingsVk", static_cast<int>(m_config.settingsVk));
@@ -309,6 +333,7 @@ void ConfigManager::Save()
     writeInt(L"Hotkeys", L"VkFps", static_cast<int>(m_config.vkFps));
     writeInt(L"Hotkeys", L"VkToggleVlss", static_cast<int>(m_config.vkToggleVlss));
     writeInt(L"Hotkeys", L"VkCalib", static_cast<int>(m_config.vkCalib));
+    writeInt(L"Hotkeys", L"VkDismissWarning", static_cast<int>(m_config.vkDismissWarning));
     writeInt(L"Hotkeys", L"VkStart", static_cast<int>(m_config.vkStart));
     writeInt(L"Hotkeys", L"ModStart", static_cast<int>(m_config.modStart));
 

@@ -17,8 +17,11 @@ public:
     NvOFManager() = default;
     ~NvOFManager() { Cleanup(); }
 
-    // Initializes the hardware NVOF session and pre-registers GPU textures
-    bool Init(ID3D11Device* device, ID3D11DeviceContext* context, int width, int height);
+    // Initializes the hardware NVOF session and pre-registers GPU textures.
+    // gridSize: 1/2/4 (output vector grid). perfLevel: NV_OF_PERF_LEVEL_{SLOW,MEDIUM,FAST}.
+    // Gecersiz gridSize sessizce 4'e duser (NV_OF_OUTPUT_VECTOR_GRID_SIZE degerleriyle birebir eslesmeli).
+    bool Init(ID3D11Device* device, ID3D11DeviceContext* context, int width, int height,
+        int gridSize = 4, NV_OF_PERF_LEVEL perfLevel = NV_OF_PERF_LEVEL_FAST);
 
     // Recreates resources and updates NVOF registration on resolution change
     void Resize(ID3D11Device* device, ID3D11DeviceContext* context, int width, int height);
@@ -51,6 +54,13 @@ private:
     int  m_height      = 0;
     bool m_initialized = false;
 
+    // Son yapilandirilan kalite ayarlari. Cleanup() BUNLARI KASITLI OLARAK
+    // sifirlamaz: Resize() kendi cagrisinda gridSize/perfLevel almiyor ve
+    // gerektiginde Init()'i tekrar cagirir -- bu iki uye olmasa Resize sirasinda
+    // sessizce FAST/grid4 varsayilanlarina duserdik.
+    int              m_gridSize  = 4;
+    NV_OF_PERF_LEVEL m_perfLevel = NV_OF_PERF_LEVEL_FAST;
+
     // Library and function pointers
     HMODULE                       m_hNvOfDll = nullptr;
     NV_OF_D3D11_API_FUNCTION_LIST m_nvof     = { 0 };
@@ -69,4 +79,5 @@ private:
 
     // Format converter compute shader (S16.5 fixed-point -> R16G16_FLOAT pixels)
     ComPtr<ID3D11ComputeShader>   m_convertCS;
+    ComPtr<ID3D11Buffer>          m_convertParamsCB; // g_gridSize (ConvertCS'in dtid/gridSize bolmesi icin)
 };

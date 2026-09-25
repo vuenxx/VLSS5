@@ -23,6 +23,18 @@ struct Dlss5Config
     float passFalloff    = 1.0f;    // 0.25 - 1.0 (2..N. geçişlerde intensity çarpanı)
     bool  temporalStabilizer = false;// Gölge & hareket sabitleyici (Zorunlu reset bayrağı)
     bool  opticalFlow        = true; // Optik akış hareket vektörleri (GPU tabanlı gerçek zamanlı hareket takibi)
+
+    // NVIDIA Optical Flow (NvOF) arama menzili / kalite ayarı.
+    // Olculen: 82 fps kaynakta kareler arasi yer degisimi 12-55 px -- FAST'in
+    // menzili rahat yeter. 30 fps'te 141-185 px -- FAST'in menzilini asiyor ve
+    // NvOF hata vermeden YANLIS ESLESME donuyor. Varsayilan FAST: cogu durumda
+    // yeterli ve MEDIUM/SLOW bedava degil, olculmeden acilmaz.
+    // 0 = FAST (varsayilan), 1 = MEDIUM, 2 = SLOW
+    int   nrFlowQuality      = 0;
+    // NvOF cikti vektor izgara boyutu (piksel). Kucuk izgara = daha ince detay,
+    // daha fazla GPU maliyeti. 1 / 2 / 4 (varsayilan 4, NV_OF_OUTPUT_VECTOR_GRID_SIZE
+    // degerleriyle birebir eslesir).
+    int   nrFlowGrid         = 4;
     float boostFactor        = 1.0f; // 1.0 - 2.5 (Nöral Etki Yoğunluğu / Extrapolation Boost)
     bool  splitScreen        = false;// Bölünmüş Ekran (Karşılaştırma Modu)
 
@@ -47,6 +59,13 @@ struct Dlss5Config
     // Deneyecekler icin INI'deki [VLSS5] OverlayMode anahtari hala okunuyor.
     int   overlayMode        = 1;
 
+    // Yakalama backend'i. 0 = WGC (Windows.Graphics.Capture, varsayilan),
+    // 1 = DXGI Desktop Duplication (deneysel -- pencere modunda WGC'nin CreateForWindow
+    // yolundaki bulaniklastirmayi bypass eder, ama sadece monitor bazli calisir; pencere
+    // modunda hedef dikdortgene GPU-tarafi crop uygulanir). DuplicateOutput basarisiz
+    // olursa CaptureManager otomatik WGC'ye duser.
+    int   captureBackend     = 0;
+
 
 
     // Tam Ekran Yap: overlay hedef pencerenin degil, hedefin bulundugu MONITORUN
@@ -54,6 +73,28 @@ struct Dlss5Config
     // DLSS/MV yigini yakalama cozunurlugunde calismaya devam eder; gerdirme yalnizca
     // son gecerde (full-screen ucgen, lineer filtre) uygulanir.
     bool  fullscreenStretch  = false;
+
+    // ---- Fare (bkz. MouseMapper) ----
+    //
+    // Tam Ekran modunda goruntu monitore gerilir ama fare koordinati gerilmez:
+    // tiklanan ekran noktasi ile oyunun okudugu nokta arasinda olcek farki olusur.
+    // Bu bir tercih degil, duzeltilmesi gereken bir HATA oldugu icin varsayilan
+    // ACIK ve arayuzde anahtari yok. Yalnizca esleme ile catisan uc bir oyunla
+    // karsilasilirsa INI'den kapatilabilsin diye ayarlanabilir birakildi.
+    //
+    // Ucu de YALNIZCA overlay ile hedef dikdortgen farkliyken (yani Tam Ekran Yap
+    // acikken) devreye girer; klasik pencere modunda hicbiri calismaz.
+
+    // Ham fare girdisi overlay uzerinden izlenir ve gercek imlec her harekette
+    // hedef pencerenin ICINDEKI karsilik noktaya tasinir.
+    bool  mouseMapping       = true;
+    // Imleci hedef pencere dikdortgenine kilitle (ClipCursor): cok monitorlu
+    // kurulumlarda yanlislikla baska ekrana tiklamayi engeller.
+    bool  cursorLock         = true;
+    // Esleme acikken gercek imlec kucuk hedef dikdortgeninde durur ve yanlis yerde
+    // bir "hayalet" ok olarak gorunur. Sistem imlecleri gecici olarak bosaltilir
+    // (cikista geri yuklenir) ve overlay kendi imlecini dogru konumda cizer.
+    bool  hideSystemCursor   = true;
 
     float splitPos           = 0.5f; // 0.0 - 1.0 (Bölünme Çizgisi Konumu, varsayılan %50)
 
@@ -67,6 +108,9 @@ struct Dlss5Config
     UINT  vkFps         = VK_F9;
     UINT  vkToggleVlss  = VK_F10;
     UINT  vkCalib       = VK_F2;
+    // Yuksek GPU yuku uyarisini bu oturum boyunca tamamen kapatir. Kullanici
+    // kalibrasyon yapmak zorunda degil; sadece bu uyariyi susturmak isteyebilir.
+    UINT  vkDismissWarning = VK_F3;
     UINT  vkStart       = 'S';
     UINT  modStart      = MOD_ALT; // Modifiers for Start toggle
 
@@ -85,6 +129,13 @@ struct Dlss5Config
     
     // RTSS directory path
     std::wstring rtssDirectory = L"";
+
+    // "Bir daha gösterme" ile kapatilan RTSS calismiyor uyarisi (bkz. Main.cpp CheckRivaTunerRunning).
+    bool suppressRtssRunningWarning = false;
+
+    // Uygulama her acildiginda GitHub Releases'ten otomatik surum kontrolu
+    // yapsin mi (bkz. Main.cpp UpdateChecker cagrisi, "Güncellemeler" sekmesi).
+    bool autoCheckUpdates = true;
 
     std::wstring FormatHotkey() const;
     static std::wstring FormatKey(UINT vk, UINT mod = 0);

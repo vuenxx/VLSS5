@@ -46,12 +46,15 @@ public:
     void Cleanup();
     bool Resize(int width, int height);
 
-    // Evaluate DLSS 5 Neural Rendering on the given command list
+    // Evaluate DLSS 5 Neural Rendering on the given command list.
+    // forceReset: caganin (Renderer/MotionVectorManager) fotometrik guven gibi
+    // KENDI olcumune dayanarak temporal gecmisi kirmak istedigini bildirmesi icin.
     bool Evaluate(
         ID3D12GraphicsCommandList* cmdList,
         ID3D12Resource* inputColor,
         ID3D12Resource* outputRes,
-        ID3D12Resource* motionVectors = nullptr);
+        ID3D12Resource* motionVectors = nullptr,
+        bool forceReset = false);
 
     // Settings
     void  ApplyConfig(const struct Dlss5Config& cfg);
@@ -101,6 +104,18 @@ public:
     float GetResolutionScale()  const { return m_resolutionScale; }
     int   GetWorkWidth()        const { return m_workWidth;  }
     int   GetWorkHeight()       const { return m_workHeight; }
+
+    // GetWorkWidth/Height HEDEF (istenen) calisma cozunurlugudur; olcek
+    // slider'i degistirilir degistirilmez, feature/guide dokulari yeniden
+    // kurulmadan (400ms debounce, bkz. Evaluate()) ONCE guncellenir. Eger
+    // D3D12Interop/MotionVectorManager bu HEDEF boyuta gore hemen resize
+    // edilirse, feature hala ESKI boyutta kurulu oldugu icin Evaluate()
+    // NGX'e "bu WxH" der ama iceride gercek doku ESKI boyutta kalir --
+    // gecis penceresinde (400ms) ciktida gorsel bozulma/hayalet olusur.
+    // GetBuiltWorkWidth/Height, feature'in GERCEKTEN kurulu oldugu boyutu
+    // dondurur; caginin bunu kullanmasi bu yarisi tamamen ortadan kaldirir.
+    int   GetBuiltWorkWidth()   const { return m_builtWorkWidth;  }
+    int   GetBuiltWorkHeight()  const { return m_builtWorkHeight; }
     bool  IsTemporalStabilizer() const { return m_temporalStabilizer; }
     void  SetTemporalStabilizer(bool v) { m_temporalStabilizer = v; }
     bool  IsOpticalFlow()       const { return m_opticalFlow; }
@@ -135,6 +150,8 @@ private:
     int   m_height          = 0;
     int   m_workWidth       = 0;
     int   m_workHeight      = 0;
+    int   m_builtWorkWidth  = 0;
+    int   m_builtWorkHeight = 0;
     float m_resolutionScale = 1.0f;
 
     bool      m_enabled               = true;
@@ -154,6 +171,14 @@ private:
     bool      m_opticalFlow           = true;
     ULONGLONG m_lastConfigChangeTime  = 0;
     bool      m_firstFrame            = true;
+
+    // Evaluate cagrilari arasindaki QPC farki: sahne kesmesi / duraklama (alt-tab,
+    // yukleme ekrani, olum ekrani) yakalamayi uzun sure durdurur, NvOF o arada
+    // CALISMAZ ve geri donen kare ciftinde vektorler comp olur. Bu araligi
+    // Evaluate()'in GIRISINDE olcup mantikli aralik disindaysa temporal gecmisi
+    // burada kirmak yeterli. Esikler FramePacer.cpp'deki 0.5/200 ms ile ayni.
+    LARGE_INTEGER m_qpcFreq     = {};
+    LARGE_INTEGER m_lastEvalQpc = {};
 
     bool  m_isEvaluating    = false;
     int   m_lastEvalResult  = 0;

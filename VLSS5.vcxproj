@@ -70,7 +70,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
     <ClCompile>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>src;third_party\webview2\include;third_party\json;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;_WINDOWS;UNICODE;_UNICODE;_DEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <Optimization>Disabled</Optimization>
@@ -83,9 +83,13 @@
     <Link>
       <SubSystem>Windows</SubSystem>
       <GenerateDebugInformation>true</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;d3d12.lib;advapi32.lib;dxgi.lib;dwmapi.lib;windowsapp.lib;winmm.lib;d3dcompiler.lib;avrt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>third_party\webview2\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>d3d11.lib;d3d12.lib;advapi32.lib;dxgi.lib;dwmapi.lib;windowsapp.lib;winmm.lib;d3dcompiler.lib;avrt.lib;winhttp.lib;WebView2LoaderStatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y /E /I "$(ProjectDir)web" "$(OutDir)web\"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
 
   <!-- ======================================================= -->
@@ -94,7 +98,7 @@
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
       <LanguageStandard>stdcpp17</LanguageStandard>
-      <AdditionalIncludeDirectories>src;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>src;third_party\webview2\include;third_party\json;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>
       <PreprocessorDefinitions>WIN32;_WINDOWS;UNICODE;_UNICODE;NDEBUG;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <RuntimeLibrary>MultiThreadedDLL</RuntimeLibrary>
       <Optimization>MaxSpeed</Optimization>
@@ -110,9 +114,13 @@
       <EnableCOMDATFolding>true</EnableCOMDATFolding>
       <OptimizeReferences>true</OptimizeReferences>
       <GenerateDebugInformation>false</GenerateDebugInformation>
-      <AdditionalDependencies>d3d11.lib;d3d12.lib;advapi32.lib;dxgi.lib;dwmapi.lib;windowsapp.lib;winmm.lib;d3dcompiler.lib;avrt.lib;comctl32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalLibraryDirectories>third_party\webview2\x64;%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
+      <AdditionalDependencies>d3d11.lib;d3d12.lib;advapi32.lib;dxgi.lib;dwmapi.lib;windowsapp.lib;winmm.lib;d3dcompiler.lib;avrt.lib;comctl32.lib;winhttp.lib;WebView2LoaderStatic.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <UACExecutionLevel>RequireAdministrator</UACExecutionLevel>
     </Link>
+    <PostBuildEvent>
+      <Command>xcopy /Y /E /I "$(ProjectDir)web" "$(OutDir)web\"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
 
   <!-- ======================================================= -->
@@ -136,6 +144,13 @@
     <ClCompile Include="src\WindowEnumerator.cpp" />
     <ClCompile Include="src\NvOFManager.cpp" />
     <ClCompile Include="src\GpuSelector.cpp" />
+    <ClCompile Include="src\MouseMapper.cpp" />
+    <ClCompile Include="src\PresetsManager.cpp" />
+    <ClCompile Include="src\PresetsWindow.cpp" />
+    <ClCompile Include="src\ConfirmDialog.cpp" />
+    <ClCompile Include="src\CrashHandler.cpp" />
+    <ClCompile Include="src\WebViewHost.cpp" />
+    <ClCompile Include="src\UpdateChecker.cpp" />
   </ItemGroup>
 
   <!-- ======================================================= -->
@@ -159,6 +174,14 @@
     <ClInclude Include="src\WindowEnumerator.h" />
     <ClInclude Include="src\NvOFManager.h" />
     <ClInclude Include="src\GpuSelector.h" />
+    <ClInclude Include="src\MouseMapper.h" />
+    <ClInclude Include="src\PresetsManager.h" />
+    <ClInclude Include="src\PresetsWindow.h" />
+    <ClInclude Include="src\ConfirmDialog.h" />
+    <ClInclude Include="src\CrashHandler.h" />
+    <ClInclude Include="src\WebViewHost.h" />
+    <ClInclude Include="src\UpdateChecker.h" />
+    <ClInclude Include="src\Version.h" />
     <ClInclude Include="src\nvOpticalFlowCommon.h" />
     <ClInclude Include="src\nvOpticalFlowD3D11.h" />
     <ClInclude Include="src\resource.h" />

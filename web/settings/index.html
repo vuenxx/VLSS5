@@ -1,0 +1,105 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://vlss5.shared/style.css">
+</head>
+<body>
+  <div class="titlebar">
+    <div>
+      <div class="title">VLSS5 NÖRAL AYARLAR</div>
+      <div class="subtitle">VLSS5 Gelişmiş Canlı Yapılandırma Paneli</div>
+    </div>
+    <div class="titlebar-btns">
+      <div class="wbtn close" id="btnClose">&#10005;</div>
+    </div>
+  </div>
+  <div class="content">
+    <div class="row">
+      <label class="field-title">Şuradan kullan:</label>
+      <select id="presetSourceList"></select>
+    </div>
+
+    <div class="section-title">GÖRÜNTÜ KALİTESİ</div>
+
+    <div class="two-col">
+      <div>
+        <label class="field-title">Görsel Stil (Style):</label>
+        <select id="style">
+          <option value="0">Standard (Keskin)</option>
+          <option value="1">Natural (Doğal)</option>
+          <option value="2">Cinematic (Film)</option>
+        </select>
+      </div>
+      <div>
+        <label class="field-title">Model Varyantı (Preset):</label>
+        <select id="preset">
+          <option value="0">Default (Önerilen)</option>
+          <option value="1">Preset 1</option>
+          <option value="2">Preset 2</option>
+          <option value="3">Preset 3</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="row">
+      <div class="row-label"><span>Nöral Şiddet (Intensity):</span><span class="val" id="intensityVal">1.00x</span></div>
+      <input type="range" id="intensity" min="0" max="100" value="100">
+    </div>
+    <div class="row">
+      <div class="row-label"><span>Nöral Etki Yoğunluğu (Boost):</span><span class="val" id="boostVal">1.00x</span></div>
+      <input type="range" id="boost" min="100" max="250" value="100">
+    </div>
+    <div class="row">
+      <div class="row-label"><span>Yüzey Detayı (Local Structure):</span><span class="val" id="structureVal">1.00x</span></div>
+      <input type="range" id="structure" min="0" max="200" value="100">
+    </div>
+    <div class="row">
+      <div class="row-label"><span>Mikro Kontrast (Local Tone):</span><span class="val" id="toneVal">1.00x</span></div>
+      <input type="range" id="tone" min="0" max="200" value="100">
+    </div>
+    <div class="row">
+      <div class="row-label"><span>Ten Doku Ayarı (Skin Structure):</span><span class="val" id="skinVal">Otomatik</span></div>
+      <input type="range" id="skin" min="0" max="300" value="0">
+    </div>
+    <div class="row">
+      <div class="row-label"><span>Model Çözünürlüğü (Performans):</span><span class="val" id="resScaleVal">%100</span></div>
+      <input type="range" id="resScale" min="50" max="100" value="100">
+    </div>
+
+    <div class="toggle-row" id="rowAutoMask">
+      <div class="label">Otomatik Ten Tespiti (Auto Skin Mask)</div>
+      <div class="switch" id="swAutoMask"><div class="knob"></div></div>
+    </div>
+    <div class="toggle-row" id="rowOpticalFlow">
+      <div class="label">Optik Akış Hareket Takibi (Motion Vectors)</div>
+      <div class="switch" id="swOpticalFlow"><div class="knob"></div></div>
+    </div>
+
+    <div class="section-title experimental">DENEYSEL AYARLAR</div>
+
+    <div class="row">
+      <div class="row-label"><span>Geçiş Sayısı (Multipass):</span><span class="val" id="passCountVal">1 (Kapalı)</span></div>
+      <input type="range" id="passCount" min="1" max="4" value="1">
+    </div>
+    <div class="row">
+      <div class="row-label"><span>Geçiş Zayıflaması (Falloff):</span><span class="val" id="passFalloffVal">1.00x</span></div>
+      <input type="range" id="passFalloff" min="25" max="100" value="100">
+    </div>
+
+    <div class="toggle-row" id="rowSplit">
+      <div class="label">Bölünmüş Ekran (Karşılaştırma / Split)</div>
+      <div class="switch" id="swSplit"><div class="knob"></div></div>
+    </div>
+
+    <div class="row" id="rowSplitPos" style="display:none">
+      <div class="row-label"><span>Bölünme Çizgisi (Sol: Ham | Sağ: DLSS 5):</span><span class="val" id="splitPosVal">%50</span></div>
+      <input type="range" id="splitPos" min="0" max="100" value="50">
+    </div>
+
+  </div>
+
+  <script src="https://vlss5.shared/ipc.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

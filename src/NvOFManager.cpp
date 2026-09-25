@@ -11,6 +11,12 @@ static const char* s_convertCS = R"HLSL(
 Texture2D<int2>     g_RawMV  : register(t0);
 RWTexture2D<float2> g_OutMV  : register(u0);
 
+cbuffer ConvertParams : register(b0)
+{
+    uint  g_gridSize;
+    uint3 g_pad;
+};
+
 [numthreads(16, 16, 1)]
 void CSConvert(uint3 dtid : SV_DispatchThreadID)
 {
@@ -19,9 +25,9 @@ void CSConvert(uint3 dtid : SV_DispatchThreadID)
     if (dtid.x >= width || dtid.y >= height)
         return;
 
-    // NVOF GridSize=4 outputs one vector per 4x4 pixel block.
-    // Shift right by 2 (divide by 4) to get the corresponding 4x4 grid coordinate.
-    int2 raw = g_RawMV[dtid.xy >> 2];
+    // NVOF outputs one vector per g_gridSize x g_gridSize pixel block.
+    // gridSize artik yapilandirilabilir (1/2/4), o yuzden sabit >>2 yerine bolme.
+    int2 raw = g_RawMV[dtid.xy / g_gridSize];
 
     // NVOF outputs vectors in S16.5 fixed-point format (1 pixel = 32 raw integer units)
     // Convert to pixel float coordinates (divide by 32.0f)
@@ -97,7 +103,19 @@ bool NvOFManager::CompileConvertShader(ID3D11Device* device)
     }
 
     hr = device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &m_convertCS);
-    return SUCCEEDED(hr);
+    if (FAILED(hr)) return false;
+
+    if (!m_convertParamsCB)
+    {
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = 16; // uint g_gridSize + uint3 padding, 16-byte cbuffer aligned
+        bd.Usage     = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        hr = device->CreateBuffer(&bd, nullptr, &m_convertParamsCB);
+        if (FAILED(hr)) return false;
+    }
+
+    return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,9 +147,9 @@ bool NvOFManager::CreateAndRegisterResources(ID3D11Device* device, int width, in
     if (FAILED(hr)) return false;
 
     // 2. Raw NVOF hardware output texture (DXGI_FORMAT_R16G16_SINT, S16.5 format)
-    // For GridSize=4, NVOF produces an output grid of size ceil(width/4) x ceil(height/4)
-    uint32_t outWidth  = (static_cast<uint32_t>(width)  + 3) / 4;
-    uint32_t outHeight = (static_cast<uint32_t>(height) + 3) / 4;
+    // NVOF produces an output grid of size ceil(width/gridSize) x ceil(height/gridSize)
+    uint32_t outWidth  = (static_cast<uint32_t>(width)  + m_gridSize - 1) / m_gridSize;
+    uint32_t outHeight = (static_cast<uint32_t>(height) + m_gridSize - 1) / m_gridSize;
 
     D3D11_TEXTURE2D_DESC tdOut = {};
     tdOut.Width          = outWidth;
@@ -177,13 +195,13 @@ bool NvOFManager::CreateAndRegisterResources(ID3D11Device* device, int width, in
         return false;
     }
 
-    // 4. Initialize hardware optical flow session with GridSize=4 (OFA ASIC fast path, ~0.5ms)
+    // 4. Initialize hardware optical flow session (perfLevel/gridSize gelen yapilandirmadan)
     NV_OF_INIT_PARAMS initParams = { 0 };
     initParams.width             = static_cast<uint32_t>(width);
     initParams.height            = static_cast<uint32_t>(height);
     initParams.mode              = NV_OF_MODE_OPTICALFLOW;
-    initParams.perfLevel         = NV_OF_PERF_LEVEL_FAST;
-    initParams.outGridSize       = NV_OF_OUTPUT_VECTOR_GRID_SIZE_4; // 4x4 grid (6.5x faster than 1x1 on Ada/Ampere)
+    initParams.perfLevel         = m_perfLevel;
+    initParams.outGridSize       = static_cast<NV_OF_OUTPUT_VECTOR_GRID_SIZE>(m_gridSize);
     initParams.inputBufferFormat = NV_OF_BUFFER_FORMAT_ABGR8;       // Native DXGI_FORMAT_B8G8R8A8_UNORM
 
     st = m_nvof.nvOFInit(m_hOf, &initParams);
@@ -196,8 +214,8 @@ bool NvOFManager::CreateAndRegisterResources(ID3D11Device* device, int width, in
         return false;
     }
 
-    DLSS_Log("[NVOF] Hardware session initialized (%ux%u, GridSize=4 [%ux%u], Format=B8G8R8A8_UNORM, Fast OFA path)!",
-        width, height, outWidth, outHeight);
+    DLSS_Log("[NVOF] Hardware session initialized (%ux%u, GridSize=%d [%ux%u], PerfLevel=%d, Format=B8G8R8A8_UNORM)!",
+        width, height, m_gridSize, outWidth, outHeight, (int)m_perfLevel);
     return true;
 }
 
@@ -222,11 +240,17 @@ void NvOFManager::UnregisterResources()
 // ---------------------------------------------------------------------------
 // Init
 // ---------------------------------------------------------------------------
-bool NvOFManager::Init(ID3D11Device* device, ID3D11DeviceContext* context, int width, int height)
+bool NvOFManager::Init(ID3D11Device* device, ID3D11DeviceContext* context, int width, int height,
+    int gridSize, NV_OF_PERF_LEVEL perfLevel)
 {
     Cleanup();
 
     if (!device || !context || width <= 0 || height <= 0) return false;
+
+    // gridSize NV_OF_OUTPUT_VECTOR_GRID_SIZE degerleriyle (1/2/4) birebir eslesmek
+    // zorunda; gecersiz deger sessizce 4'e duser.
+    m_gridSize  = (gridSize == 1 || gridSize == 2 || gridSize == 4) ? gridSize : 4;
+    m_perfLevel = perfLevel;
 
     if (!LoadNVOFEntryPoints()) return false;
     if (!CompileConvertShader(device)) return false;
@@ -255,13 +279,21 @@ void NvOFManager::Resize(ID3D11Device* device, ID3D11DeviceContext* context, int
 {
     if (m_width == width && m_height == height && m_initialized) return;
 
-    if (!m_initialized || !m_hOf)
-    {
-        Init(device, context, width, height);
-        return;
-    }
-
-    CreateAndRegisterResources(device, width, height);
+    // ONEMLI: nvOFInit() AYNI, zaten calisan m_hOf handle'i uzerinde farkli
+    // bir boyutla TEKRAR cagrilamaz -- surucu CNvOFDeviceD3D11:Initialize'da
+    // E_FAIL (0x80004005) donuyor (loglarla dogrulandi: olcek slider'i %99'a
+    // her cekildiginde bu hata basiyor). Bu basarisizliktan sonra HER
+    // nvOFExecute cagrisi da basarisiz olmaya devam ediyor; MotionVectorManager
+    // bunu sessizce yazilim (8x8 groupshared block-matching) fallback'ine
+    // devrederek maskeliyor -- cok daha gurultulu/yanlis vektorler uretiyor,
+    // "hareket sirasinda golgeler yer degistiriyor" sikayetinin dogrudan
+    // kaynagi bu. Onceden CreateAndRegisterResources() SADECE kaynaklari
+    // yeniden olusturup ayni handle'da nvOFInit'i tekrarliyordu -- calismiyor.
+    // Gercek cozum: boyut GERCEKTEN degisince oturumu (m_hOf) tamamen yikip
+    // (Cleanup) sifirdan kurmak (Init). gridSize/perfLevel'i acikca koruyarak
+    // geciyoruz; Init() bunlari parametreden yazar, gecmezsek varsayilanlara
+    // (grid4/FAST) sessizce duser, oradaki secim kaybolur.
+    Init(device, context, width, height, m_gridSize, m_perfLevel);
 }
 
 // ---------------------------------------------------------------------------
@@ -278,6 +310,7 @@ void NvOFManager::Cleanup()
     }
 
     m_convertCS.Reset();
+    m_convertParamsCB.Reset();
 
     if (m_hNvOfDll)
     {
@@ -339,6 +372,13 @@ bool NvOFManager::ProcessFrame(
     // (D3D11 -> D3D12 Shared NT Handle target texture)
     if (m_convertCS && m_rawMvSRV)
     {
+        if (m_convertParamsCB)
+        {
+            uint32_t cb[4] = { static_cast<uint32_t>(m_gridSize), 0, 0, 0 };
+            context->UpdateSubresource(m_convertParamsCB.Get(), 0, nullptr, cb, 0, 0);
+            context->CSSetConstantBuffers(0, 1, m_convertParamsCB.GetAddressOf());
+        }
+
         context->CSSetShader(m_convertCS.Get(), nullptr, 0);
 
         ID3D11ShaderResourceView* srvs[1] = { m_rawMvSRV.Get() };

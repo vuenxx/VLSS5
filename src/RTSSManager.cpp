@@ -3,8 +3,49 @@
 #include "Common.h"
 #include <windows.h>
 #include <shlwapi.h>
+#include <cstdint>
 
 #pragma comment(lib, "shlwapi.lib")
+
+namespace
+{
+    // RTSS_SHARED_MEMORY'nin (RTSSSharedMemory.h, RTSS SDK) sabit basligi -- v2.x icin
+    // gecerli, alan sirasi/boyutlari RTSS'in kendi tanimiyla birebir aynidir.
+    #pragma pack(push, 8)
+    struct RtssSharedMemoryHeader
+    {
+        DWORD dwSignature;
+        DWORD dwVersion;
+        DWORD dwAppEntrySize;
+        DWORD dwAppArrOffset;
+        DWORD dwAppArrSize;
+        DWORD dwOSDEntrySize;
+        DWORD dwOSDArrOffset;
+        DWORD dwOSDArrSize;
+        DWORD dwOSDFrame;
+    };
+
+    // Gercek RTSS_SHARED_MEMORY_APP_ENTRY cok daha buyuk (dwStatFrameTimeBuf[1024] dahil
+    // bircok istatistik alani var) -- ama biz sadece basindaki alanlara ihtiyac duyuyoruz.
+    // Diziler arasi ATLAMA icin bu struct'in sizeof'u DEGIL, RTSS'in bize verdigi
+    // dwAppEntrySize kullaniliyor (bkz. RTSSManager::GetLiveFps) -- bu yuzden kirpilmis
+    // olmasi guvenli, ileride RTSS yeni alanlar eklese de bozulmaz.
+    struct RtssAppEntryHeader
+    {
+        DWORD dwProcessID;
+        char  szName[MAX_PATH];
+        DWORD dwFlags;
+        DWORD dwTime0;
+        DWORD dwTime1;
+        DWORD dwFrames;
+        DWORD dwFrameTime;
+    };
+    #pragma pack(pop)
+
+    // 'RTSS' multi-char literalinin MSVC'deki degeri (ilk karakter en yuksek bayt) --
+    // RTSS'in kendi header'i imzayi 'RTSS' olarak tanimliyor.
+    constexpr DWORD kRtssSignature = ('R' << 24) | ('T' << 16) | ('S' << 8) | 'S';
+}
 
 RTSSManager& RTSSManager::Get()
 {
@@ -154,4 +195,69 @@ void RTSSManager::NotifyRTSS()
     }
 
     if (s_pUpdateProfiles) s_pUpdateProfiles();
+}
+
+// -----------------------------------------------------------------------
+// EnsureSharedMemoryMapped / GetLiveFps
+//   bkz. RTSSManager.h -- RTSS'in "RTSSSharedMemoryV2" paylasimli bellegini okuyup
+//   ekran-yakalama katmanindan tamamen bagimsiz, gercek oyun kare hizini dondurur.
+// -----------------------------------------------------------------------
+bool RTSSManager::EnsureSharedMemoryMapped()
+{
+    if (m_rtssView) return true;
+
+    // RTSS kapaliyken/henuz acilmamiskan bu basarisiz olur -- normal, her cagrida
+    // tekrar denenir (RTSS calisirken acilip kapanabilir; sabit bir "basarisiz oldu,
+    // bir daha deneme" bayragi TUTMUYORUZ ki kullanici RTSS'i sonradan acarsa
+    // yeniden baglanabilsin).
+    HANDLE hMap = OpenFileMappingA(FILE_MAP_READ, FALSE, "RTSSSharedMemoryV2");
+    if (!hMap) return false;
+
+    void* view = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+    if (!view)
+    {
+        CloseHandle(hMap);
+        return false;
+    }
+
+    m_rtssMapping = hMap;
+    m_rtssView    = view;
+    return true;
+}
+
+int RTSSManager::GetLiveFps(unsigned long processId)
+{
+    if (!EnsureSharedMemoryMapped()) return -1;
+
+    const auto* header = static_cast<const RtssSharedMemoryHeader*>(m_rtssView);
+    if (header->dwSignature != kRtssSignature || (header->dwVersion & 0xFFFF0000u) < 0x00020000u)
+    {
+        // RTSS kapaniyor/yeniden baslatiliyor olabilir -- haritalamayi birak, bir
+        // sonraki cagrida EnsureSharedMemoryMapped zaten m_rtssView dolu oldugundan
+        // yeniden acmayacak; RTSS gercekten kapandiysa bu kontrol -1 dondurmeye
+        // devam eder (zararsiz, sadece capture-tabanli yaklasik degere dusulur).
+        return -1;
+    }
+
+    const auto* base   = static_cast<const uint8_t*>(m_rtssView);
+    const auto* appArr = base + header->dwAppArrOffset;
+
+    for (DWORD i = 0; i < header->dwAppArrSize; ++i)
+    {
+        const auto* entry = reinterpret_cast<const RtssAppEntryHeader*>(
+            appArr + static_cast<size_t>(i) * header->dwAppEntrySize);
+
+        if (entry->dwProcessID == 0) break; // bos slotlardan sonrasi da bostur
+        if (entry->dwProcessID != processId) continue;
+
+        if (entry->dwTime1 > entry->dwTime0 && entry->dwFrames > 0)
+        {
+            const double fps = 1000.0 * static_cast<double>(entry->dwFrames) /
+                                static_cast<double>(entry->dwTime1 - entry->dwTime0);
+            return static_cast<int>(fps + 0.5);
+        }
+        return -1; // RTSS bu process'i hook'lamis ama henuz olcum birikmemis
+    }
+
+    return -1; // RTSS bu process'i hic hook'lamamis (RTSS kapali ya da profil devre disi)
 }

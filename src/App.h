@@ -5,24 +5,37 @@
 #include "InputForwarder.h"
 #include "ConfigManager.h"
 #include "RTSSManager.h"
+#include "MouseMapper.h"
 
 // -----------------------------------------------------------------------
 // App — state machine that owns the overlay window and the render loop.
 // -----------------------------------------------------------------------
 // -----------------------------------------------------------------------
 enum class AppState { Menu, Capturing };
-enum class CalibState { Idle, InitUncap, CoarseUp, FineDown, Done };
+enum class CalibState { Idle, InitUncap, CoarseUp, AnchorWait, FineUp, Done };
 
 // FPS kalibrasyon sinirlari.
 // kCalibMinFps: aramanin TABANI. RTSS'te 0 = SINIRSIZ oldugundan hedefin 0'a
 // dusmesi oyunu tam hiza salar, desenkron kalicilasir ve arama eksiye kacardi
 // (bildirilen "-30 FPS" hatasi). Taban bunu yapisal olarak imkansiz kilar.
 static constexpr int kCalibMinFps     = 10;
-static constexpr int kCalibMaxSteps   = 60;   // mutlak adim tavani
-static constexpr int kCalibStepMs     = 3000; // her adimin olcum penceresi
+static constexpr int kCalibMaxSteps   = 150;  // mutlak adim tavani
+static constexpr int kCalibStepMs     = 1200; // her adimin olcum penceresi
 // Kaba tarama adimi. 10'dan baslayip 10'ar 10'ar cikiyoruz: her sonda GERCEKTEN
 // ulasilabilir bir hizi test eder ve kullanici ne olup bittigini ekranda takip edebilir.
 static constexpr int kCalibCoarseStep = 10;
+// FineUp'ta bir hedefi "dogrulanmis" saymadan once ust uste kac tik senkron
+// kalmasi gerektigi. 1 yetersizdi: tek sansli bir 1.2s'lik pencere gecici
+// senkron gorunup hemen ardindan kalici desenkrona dusebiliyordu (bildirilen
+// "94'e kilitlendi ama out kalici 87'de kaldi" hatasi).
+static constexpr int kCalibConfirmTicks = 2;
+// Senkron sayilmasi icin izin verilen azami |giris-cikis| farki. Sabit ve kucuk:
+// yuzdesel tolerans yuksek FPS'te gozle gorulen farklari bile "senkron" sayiyordu.
+static constexpr int kCalibSyncToleranceFps = 2;
+// Bulunan sinirdan kilitlerken cikarilan ek guvenlik payi. Arama sinira TAM
+// degdigi noktada kilitler; dogal FPS titremesi bu sinirin hemen otesine
+// tasarsa bile senkron kalsin diye biraz altina iniyoruz.
+static constexpr int kCalibSafetyMarginFps = 2;
 
 class App
 {
@@ -38,6 +51,11 @@ public:
     bool StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync = false, bool dlss = true, bool fps = true,
                       bool fullscreenStretch = false);
 
+    // Start WGC capture + overlay for an entire monitor ("Tum Ekran" mode) instead of one window.
+    // There is no target window here: border stripping, mouse remapping and target-focus
+    // auto-hide are all skipped — the overlay simply stays on until the user stops it.
+    bool StartOverlayDesktop(HWND menuHwnd, HMONITOR targetMonitor, bool vsync = false, bool dlss = true, bool fps = true);
+
     // Run the overlay render loop until Alt+S is pressed or the target window closes.
     // Blocks on the calling thread (nested Win32 modal loop).
     void Run();
@@ -45,12 +63,22 @@ public:
     AppState GetState() const { return m_state; }
     void RequestStop() { m_running = false; }
 
+    // Aktif yakalama hedefinin kimligi (Preset sistemi icin). Yakalama yoksa
+    // hepsi null/false doner -- StopOverlay() bunlari zaten sifirliyor.
+    HWND     GetTargetHwnd()    const { return m_targetHwnd; }
+    HMONITOR GetTargetMonitor() const { return m_targetMonitor; }
+    bool     IsDesktopMode()    const { return m_desktopMode; }
+
     // Update preferred GPU (resets D3D device if in menu so next capture uses new GPU)
     void SetPreferredGpu(const std::wstring& gpuName);
 
 private:
     // D3D11 device shared for the lifetime of the app.
     bool InitD3D();
+
+    // Shared body of StartOverlay/StartOverlayDesktop: assumes m_targetHwnd/m_desktopMode/
+    // m_targetMonitor/m_fullscreenStretch are already set by the caller.
+    bool StartOverlayCommon(bool vsync, bool dlss, bool fps);
 
     // Create the borderless topmost overlay HWND.
     bool CreateOverlayWindow(HWND targetHwnd);
@@ -78,6 +106,11 @@ private:
     // Poll the stop keybind each frame via GetAsyncKeyState (no hooks).
     void CheckStopKey();
 
+    // Fare eslemesi + imlec kilidini her kare guncelle (bkz. MouseMapper).
+    // Overlay gizliyken de cagrilir: kilidin ve bosaltilmis sistem imleclerinin
+    // geri alinmasi da bu yoldan gecer.
+    void UpdateMouseMapping();
+
     // ---- FPS kalibrasyonu ----
     void UpdateCalibration(const Dlss5Config& cfg);
     bool CalibApplyLimit(int fps);
@@ -100,6 +133,13 @@ private:
     // Tear down the overlay session and restore state.
     void StopOverlay();
 
+    // CaptureManager::IsSessionBroken() true donduğunde App::Run tarafından çağrılır: WGC
+    // oturumu kendi içinden koptu (pencere kapandı/taşındı, GPU/DPI değişti, ya da sıcak
+    // yoldaki bir WinRT çağrısı istisna fırlattı — bkz. CaptureManager.cpp notları). Aynı hedefe
+    // karşı sıfırdan bir yakalama denemesi yapar; başarısız olursa false döner (çağıran oturumu
+    // sonlandırmalı — overlay görünmez şekilde asılı kalmamalı).
+    bool RestartCapture();
+
     static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
     // ---- members ----
@@ -107,6 +147,11 @@ private:
     HWND      m_overlayHwnd = nullptr;
     HWND      m_targetHwnd  = nullptr;
     HWND      m_menuHwnd    = nullptr;
+
+    // "Tum Ekran" mode: capture an entire monitor instead of a specific window.
+    // When true, m_targetHwnd stays null and m_targetMonitor identifies the capture source.
+    bool      m_desktopMode    = false;
+    HMONITOR  m_targetMonitor  = nullptr;
 
     AppState  m_state            = AppState::Menu;
     bool      m_running          = false;
@@ -149,6 +194,7 @@ private:
 
     // Warning OSD & Calibration
     bool          m_warningDismissed      = false;
+    bool          m_prevDismissWarningDown = false;
     bool          m_prevCalibDown         = false;
     CalibState    m_calibState            = CalibState::Idle;
     int           m_calibTargetFps        = 0;
@@ -162,6 +208,8 @@ private:
                                                // Ince arama bunun altina inmez: zaten calistigini
                                                // biliyoruz, daha asagisi bilgi tasimaz.
     int           m_calibSteps            = 0; // adim sayaci (kacis emniyeti)
+    int           m_calibAnchorCandidate  = 0; // AnchorWait: ilk bozulma anindaki cikis FPS'i
+    int           m_calibConfirmCount     = 0; // FineUp: ust uste senkron tik sayaci
     int           m_calibSettleTicks      = 0; // limit degisiminden sonra atlanacak tik
     int           m_calibNotApplied       = 0; // "RTSS limiti uygulamiyor" ust uste sayaci
     std::wstring  m_calibMessage          = L"";
@@ -174,6 +222,13 @@ private:
 
     ComPtr<ID3D11Device>        m_device;
     ComPtr<ID3D11DeviceContext> m_context;
+
+    std::unique_ptr<MouseMapper>    m_mouseMapper;
+    // Hedef pencerenin DWM cerceve siniri. DwmGetWindowAttribute bir IPC cagrisidir,
+    // her kare sorulmaz; 200 ms'te bir tazelenir.
+    RECT      m_mouseTargetRect = {};
+    RECT      m_mouseRawRect    = {};   // GetWindowRect ile ucuz degisim tespiti
+    ULONGLONG m_mouseProbeTick  = 0;
 
     std::unique_ptr<CaptureManager> m_captureManager;
     std::unique_ptr<Renderer>       m_renderer;
@@ -208,7 +263,10 @@ private:
     std::atomic<const char*> m_currentStage{ "idle" };
     std::atomic<bool>        m_watchdogRunning{ false };
     HANDLE                   m_watchdogThread = nullptr;
+    HANDLE                   m_renderThreadHandle = nullptr; // Run() cagiran thread'in kopya handle'i (hang dump icin)
     LARGE_INTEGER            m_stageEnteredTime = {};
+    std::atomic<bool>        m_hangDumpWritten{ false };
+    std::atomic<bool>        m_hangTerminateTriggered{ false };
 
     static DWORD WINAPI WatchdogThreadProc(LPVOID param);
     void StartWatchdog();

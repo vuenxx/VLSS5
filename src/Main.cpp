@@ -6,13 +6,37 @@
 #include "SettingsWindow.h"
 #include "RtssWindow.h"
 #include "HotkeysWindow.h"
+#include "PresetsWindow.h"
 #include "RTSSManager.h"
+#include "CrashHandler.h"
+#include "WebViewHost.h"
+#include "ConfirmDialog.h"
+#include "PresetsManager.h"
+#include "UpdateChecker.h"
+#include "Version.h"
 #include "resource.h"
+#include "../third_party/json/json.hpp"
 #include <shlwapi.h>
 #include <shobjidl.h>
 #include <shellapi.h>
 #include <commctrl.h>
 #include <uxtheme.h>
+#include <objidl.h>
+#include <gdiplus.h>
+#include <thread>
+#pragma comment(lib, "gdiplus.lib")
+
+using json = nlohmann::json;
+
+// Common Controls v6 (side-by-side) manifest baglantisi. Bu olmadan uygulama
+// System32'deki eski v5 comctl32.dll'i yukler; bu surumde TaskDialogIndirect
+// export edilmedigi icin GetProcAddress hep NULL doner ve tum TaskDialog
+// cagrilari (dogrulama checkbox'i dahil) sessizce eski MessageBoxW'a duser.
+#pragma comment(linker, \
+    "\"/manifestdependency:type='win32' "                    \
+    "name='Microsoft.Windows.Common-Controls' "               \
+    "version='6.0.0.0' processorArchitecture='*' "             \
+    "publicKeyToken='6595b64144ccf1df' language='*'\"")
 #include <TlHelp32.h>
 #include <algorithm>
 #include <cwctype>
@@ -23,47 +47,24 @@
 // ---------------------------------------------------------------------------
 // Control IDs
 // ---------------------------------------------------------------------------
-#define IDC_WINDOWLIST        101
-#define IDC_BTN_START         102
-#define IDC_BTN_REFRESH       103
-#define IDC_LBL_STATUS        104
-#define IDC_LBL_KEYBIND       105   // Shows current keybind text
-#define IDC_BTN_KEYBIND       106   // "Değiştir" / "İptal"
-#define IDC_CHK_VSYNC         107   // VSync Toggle Checkbox
-#define IDC_CHK_FPS           108   // FPS Display Checkbox
-#define IDC_CHK_DLSS          109   // DLSS 5 Toggle Checkbox
-#define IDC_BTN_DLSS_SETTINGS 110   // DLSS 5 Settings Button
-#define IDC_COMBO_GPU         111   // GPU Selection ComboBox
-#define IDC_BTN_GPU_HELP      112   // GPU Help '?' Button
-#define IDC_CHK_FULLSCREEN    113   // Tam Ekran Yap (monitore gerdirme) Checkbox
-#define IDC_BTN_RTSS_SETTINGS 114
-#define IDC_BTN_HOTKEYS       115   // Hotkeys Button
-#define IDC_COMBO_DLSSGPU     116   // DLSS hesaplama GPU'su ComboBox
-#define IDC_BTN_DLSSGPU_HELP  117   // DLSS GPU Help '?' Button
 #define ID_GLOBAL_HOTKEY      201   // Global capture toggle hotkey
 #define IDT_HOTKEY_TIMER      301   // Fallback hotkey poller (50ms)
 
-// ---------------------------------------------------------------------------
-// Modern Theme Palette (Matches Mockup 1:1)
-// ---------------------------------------------------------------------------
-static const COLORREF COLOR_BG          = RGB(11, 15, 20);     // Deep midnight charcoal
-static const COLORREF COLOR_CARD_BG     = RGB(22, 28, 38);     // Elevated dark surface
-static const COLORREF COLOR_BORDER      = RGB(38, 48, 65);     // Subtle surface border
-static const COLORREF COLOR_LIME_ACCENT = RGB(162, 238, 56);   // Vibrant lime/neon green matching mockup
-static const COLORREF COLOR_LIME_HOVER  = RGB(180, 248, 75);   // Lighter lime hover
-static const COLORREF COLOR_LIME_DARK   = RGB(138, 208, 42);   // Pressed lime green
-static const COLORREF COLOR_DARK_TEXT   = RGB(12, 18, 10);     // Dark charcoal text on lime
-static const COLORREF COLOR_NEON_GREEN  = RGB(0, 240, 55);     // Electric neon green
-static const COLORREF COLOR_TEXT_MAIN   = RGB(242, 247, 252);  // Crisp white
-static const COLORREF COLOR_TEXT_MUTED  = RGB(139, 148, 158);  // Slate secondary text
-static const COLORREF COLOR_STOP_ACCENT = RGB(232, 62, 62);    // DURDUR button red
-static const COLORREF COLOR_STOP_DARK   = RGB(190, 44, 44);    // Pressed red
+// UpdateChecker arka plan thread'lerinin UI thread'ine geri bildirim mesajlari
+// (bkz. WM_APP+4 icin yorum -- reentrant WebView2 COM cagrisi sorunuyla ayni
+// gerekceyle: agir/asenkron isler her zaman mesaj dongusune dondukten sonra islenir).
+#define WM_APP_UPDATES_FETCH_DONE      (WM_APP + 5) // lParam = UpdateChecker::FetchResult*, wParam = 1 ise sessiz (startup) kontrol
+#define WM_APP_UPDATES_DL_PROGRESS     (WM_APP + 6) // lParam = UpdateChecker::DownloadProgress*
+#define WM_APP_UPDATES_DL_DONE         (WM_APP + 7) // lParam = std::wstring* (basariliysa dosya yolu, degilse hata metni), wParam = basari (1/0)
 
 // ---------------------------------------------------------------------------
 // Globals
 // ---------------------------------------------------------------------------
 static std::unique_ptr<App>    g_app;
 static std::vector<WindowInfo> g_windows;
+// g_windows ile PARALEL, ayni index'e sahip HICON->PNG data-URI onbellegi.
+// Web listesi her hedefin simgesini burdan okur (PopulateList doldurur).
+static std::vector<std::string> g_windowIcons;
 
 struct GpuAdapterInfo
 {
@@ -73,41 +74,18 @@ struct GpuAdapterInfo
 static std::vector<GpuAdapterInfo> g_gpuList;
 
 static HWND                    g_mainHwnd        = nullptr;
-static HWND                    g_listBox         = nullptr;
-static HWND                    g_lblStatus       = nullptr;
-static HWND                    g_lblGpu          = nullptr;
-static HWND                    g_comboGpu        = nullptr;
-static HWND                    g_btnGpuHelp      = nullptr;
-static HWND                    g_tipGpuHelp      = nullptr;
-static HWND                    g_lblDlssGpu      = nullptr;
-static HWND                    g_comboDlssGpu    = nullptr;
-static HWND                    g_btnDlssGpuHelp  = nullptr;
-static HWND                    g_tipDlssGpuHelp  = nullptr;
-static HWND                    g_lblKeybindTitle = nullptr;
-static HWND                    g_lblKeybind      = nullptr;
-static HWND                    g_btnKeybind      = nullptr;
-static HWND                    g_btnDlssSettings = nullptr;
-static HWND                    g_chkVSync        = nullptr;
-static HWND                    g_chkFps          = nullptr;
-static HWND                    g_chkDlss         = nullptr;
-static HWND                    g_chkFullscreen   = nullptr;
-static HWND                    g_btnRefresh      = nullptr;
-static HWND                    g_btnStart        = nullptr;
 
-static HWND                    g_btnRtssSettings = nullptr;
-static HWND                    g_btnHotkeys      = nullptr;
+// Ana pencerenin istemci alanini kaplayan gomulu WebView2 kontrolu (Faz 2).
+static std::unique_ptr<WebViewHost> g_mainWebView;
 
-static HFONT                   g_fontNormal   = nullptr;
-static HFONT                   g_fontTitle    = nullptr;
-static HFONT                   g_fontSubtitle = nullptr;
-static HFONT                   g_fontBold     = nullptr;
-static HFONT                   g_fontSmall    = nullptr;
-
-static HBRUSH                  g_brBg         = nullptr;
-static HBRUSH                  g_brCard       = nullptr;
-static HBRUSH                  g_brBorder     = nullptr;
-static HBRUSH                  g_brNeon       = nullptr;
-static HICON                   g_hLogoHeader  = nullptr;
+// Eskiden ListBox_GetCurSel/CB_GETCURSEL ile okunan secimler artik JS
+// tarafindan "selectTarget"/"setGpu"/"setDlssGpu" komutlariyla bildirilip
+// burada native tarafta ayna tutuluyor (TriggerCaptureToggle/BASLAT akisi
+// bunlara native taraftan erisebilsin diye).
+static int                     g_selectedTargetIndex   = -1;
+static int                     g_selectedGpuIndex      = 0;
+static int                     g_selectedDlssGpuIndex  = 0;
+static std::wstring            g_statusText = L"Hedef uygulamayı seçin veya istediğiniz penceredeyken ALT+S basın.";
 
 static bool                    g_vsyncEnabled = false;
 static bool                    g_fpsEnabled   = true;
@@ -115,39 +93,491 @@ static bool                    g_dlssEnabled  = true;
 // Kalici: ConfigManager uzerinden yuklenir/kaydedilir.
 static bool                    g_fullscreenStretch = false;
 
+// Faz 3: ana pencere sekmelerinin ("Ön Ayarlar") en son native'e gonderdigi
+// on ayar listesinin onbellegi -- PresetsWindow::s_cache ile AYNI amacla
+// (silme onay dialogunda displayName gostermek icin), ama tamamen AYRI
+// (SettingsWindow/PresetsWindow'un statik hallerine dokunulmuyor).
+static std::vector<PresetEntry> g_presetsTabCache;
+
+// ---------------------------------------------------------------------------
+// "Güncellemeler" sekmesi -- bkz. UpdateChecker.h/.cpp. Ag cagrilari her zaman
+// bir arka plan thread'inde yapilir, sonuclar WM_APP_UPDATES_* mesajlariyla
+// UI thread'ine (WndProc) geri doner (bkz. WM_APP+4 reentrancy notu).
+// ---------------------------------------------------------------------------
+static bool                                    g_updatesChecking    = false;
+static bool                                    g_updatesDownloading = false;
+static bool                                    g_updatesHasNewer    = false;
+static std::wstring                            g_updatesLatestTag;
+static std::wstring                            g_updatesLastError;
+static std::vector<UpdateChecker::ReleaseInfo> g_updatesCache;
+
+// ---------------------------------------------------------------------------
+// nvngx_dlssnr.dll surukle-birak yukleme durumu (bkz. dllStatusBar, Main.cpp
+// "nvngxDropBegin/Chunk/End"). Tek seferde tek transfer varsayimi yeterli --
+// JS tarafi zaten kendi "uploading" bayragiyla ikinci bir surumeyi engelliyor.
+// ---------------------------------------------------------------------------
+static HANDLE        g_nvngxUploadFile         = INVALID_HANDLE_VALUE;
+static std::wstring  g_nvngxUploadTempPath;
+static uint64_t      g_nvngxUploadExpectedSize = 0;
+static uint64_t      g_nvngxUploadReceivedSize = 0;
+static int           g_nvngxUploadNextSeq      = 0;
+
+// ---------------------------------------------------------------------------
+// UTF-8 helpers (JSON string alanlari icin) -- Faz 1'deki 4 pencerede oldugu
+// gibi burada da AYRI kopyalanir, ortak bir header'a cikarilmaz.
+// ---------------------------------------------------------------------------
+static std::string ToUtf8(const std::wstring& w)
+{
+    if (w.empty()) return {};
+    int len = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, nullptr, 0, nullptr, nullptr);
+    std::string out(len > 0 ? len - 1 : 0, '\0');
+    if (len > 0) WideCharToMultiByte(CP_UTF8, 0, w.c_str(), -1, out.data(), len, nullptr, nullptr);
+    return out;
+}
+static std::wstring FromUtf8(const std::string& s)
+{
+    if (s.empty()) return {};
+    int len = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    std::wstring out(len > 0 ? len - 1 : 0, L'\0');
+    if (len > 0) MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, out.data(), len);
+    return out;
+}
+
+// nvngx_dlssnr.dll (telifli NGX model agirliklari) -- kullanici tarafindan
+// Ana Sayfa'daki durum/surukle-birak cubugundan eklenir (bkz. dllStatusBar,
+// "nvngxDropBegin/Chunk/End"). Yoksa BASLAT hem JS'te hem burada engellenir.
+static std::wstring GetNvngxDlssnrPath()
+{
+    wchar_t exePath[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+    PathRemoveFileSpecW(exePath);
+    wchar_t full[MAX_PATH] = {};
+    PathCombineW(full, exePath, L"nvngx_dlssnr.dll");
+    return full;
+}
+
+static bool NvngxDlssnrExists()
+{
+    return GetFileAttributesW(GetNvngxDlssnrPath().c_str()) != INVALID_FILE_ATTRIBUTES;
+}
+
+static std::wstring ExeDirWebFolder(const wchar_t* subfolder)
+{
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    std::wstring dir = path;
+    size_t slash = dir.find_last_of(L"\\/");
+    if (slash != std::wstring::npos) dir = dir.substr(0, slash);
+    return dir + L"\\web\\" + subfolder;
+}
+
+// IsOverlayRunning'in gercek tanimi asagida ("Hotkey & Capture Management"
+// bolumunde), ContainsCaseInsensitive'in gercek tanimi asagida ("Helpers"
+// bolumunde) -- BuildStateJson ikisinden once tanimlaniyor, bu yuzden ileri
+// bildirim gerekiyor.
+static bool IsOverlayRunning();
+static bool ContainsCaseInsensitive(const std::wstring& str, const std::wstring& search);
+
+// ---------------------------------------------------------------------------
+// Native -> JS state push
+// ---------------------------------------------------------------------------
+static json BuildStateJson()
+{
+    json data;
+
+    json targets = json::array();
+    for (size_t i = 0; i < g_windows.size(); ++i)
+    {
+        json t;
+        t["id"]        = static_cast<int>(i);
+        t["label"]     = ToUtf8(g_windows[i].title);
+        t["isMonitor"] = (g_windows[i].monitor != nullptr);
+        t["icon"]      = (i < g_windowIcons.size()) ? g_windowIcons[i] : std::string();
+        targets.push_back(t);
+    }
+    data["targets"]          = targets;
+    data["selectedTargetId"] = g_selectedTargetIndex;
+
+    json gpuList = json::array();
+    for (auto& g : g_gpuList)
+        gpuList.push_back(ToUtf8(g.displayName));
+    data["gpuList"]     = gpuList;
+    data["selectedGpu"] = g_selectedGpuIndex;
+
+    json dlssGpuList = json::array();
+    for (size_t idx = 0; idx < g_gpuList.size(); ++idx)
+    {
+        std::wstring label = g_gpuList[idx].displayName;
+        if (idx > 0 && !ContainsCaseInsensitive(g_gpuList[idx].name, L"RTX"))
+            label += L"  — DLSS yok";
+        dlssGpuList.push_back(ToUtf8(label));
+    }
+    data["dlssGpuList"]     = dlssGpuList;
+    data["selectedDlssGpu"] = g_selectedDlssGpuIndex;
+
+    // Yakalama Yontemi: bkz. WM_CREATE'teki eski yorum -- WGC her zaman
+    // varsayilan ve TEK secenek, combo kilitli/devre disi gosterilir.
+    data["captureBackendList"]     = json::array({ ToUtf8(L"WGC (Varsayılan)") });
+    data["selectedCaptureBackend"] = 0;
+    data["captureBackendLocked"]   = true;
+
+    data["vsync"]             = g_vsyncEnabled;
+    data["fps"]               = g_fpsEnabled;
+    data["dlss"]              = g_dlssEnabled;
+    data["fullscreenStretch"] = g_fullscreenStretch;
+
+    bool running = IsOverlayRunning();
+    data["isCapturing"]        = running;
+    data["settingsBtnEnabled"] = !running;
+    data["nvngxDlssnrReady"]   = NvngxDlssnrExists();
+
+    auto& c = ConfigManager::Get().Config();
+    json hotkeyLabels;
+    hotkeyLabels["focus"]      = ToUtf8(Dlss5Config::FormatKey(c.vkFocus));
+    hotkeyLabels["fps"]        = ToUtf8(Dlss5Config::FormatKey(c.vkFps));
+    hotkeyLabels["toggleVlss"] = ToUtf8(Dlss5Config::FormatKey(c.vkToggleVlss));
+    hotkeyLabels["start"]      = ToUtf8(Dlss5Config::FormatKey(c.vkStart, c.modStart));
+    data["hotkeyLabels"] = hotkeyLabels;
+
+    data["statusText"] = ToUtf8(g_statusText);
+
+    return data;
+}
+
+static void PushStateToJs()
+{
+    if (!g_mainWebView) return;
+    json msg;
+    msg["type"] = "state";
+    msg["data"] = BuildStateJson();
+    g_mainWebView->PostJson(FromUtf8(msg.dump()));
+}
+
+// ---------------------------------------------------------------------------
+// Faz 3: "Tuşları Değiştir" sekmesi -- HotkeysWindow.cpp'deki PushHotkeysToJs
+// ile AYNI mantik (bkz. plan mimari karari: kod tekrari > riskli paylasim).
+// s_host'a degil g_mainWebView'e postalar.
+// ---------------------------------------------------------------------------
+static json BuildHotkeyLabelsJson()
+{
+    auto& cfg = ConfigManager::Get().Config();
+    json labels;
+    labels["0"] = ToUtf8(Dlss5Config::FormatKey(cfg.settingsVk, cfg.settingsMod));
+    labels["2"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkFocus));
+    labels["3"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkFps));
+    labels["4"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkToggleVlss));
+    labels["5"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkCalib));
+    labels["6"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkStart, cfg.modStart));
+    labels["7"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkDismissWarning));
+    return labels;
+}
+
+static void PushHotkeysTabListToJs()
+{
+    if (!g_mainWebView) return;
+    json msg;
+    msg["type"] = "hotkeysList";
+    msg["data"] = BuildHotkeyLabelsJson();
+    g_mainWebView->PostJson(FromUtf8(msg.dump()));
+}
+
+// ---------------------------------------------------------------------------
+// "Güncellemeler" sekmesi (bkz. UpdateChecker.h/.cpp) -- cmd/type "updates"
+// onekiyle, diger sekmelerle (RTSS/Ön Ayarlar/Tuşlar) AYNI IPC deseni.
+// ---------------------------------------------------------------------------
+static void PushUpdatesStateToJs()
+{
+    if (!g_mainWebView) return;
+
+    json data;
+    data["currentVersion"] = ToUtf8(VLSS5_VERSION_STRING);
+    data["autoCheck"]      = ConfigManager::Get().Config().autoCheckUpdates;
+    data["checking"]       = g_updatesChecking;
+    data["downloading"]    = g_updatesDownloading;
+    data["hasUpdate"]      = g_updatesHasNewer;
+    data["latestTag"]      = ToUtf8(g_updatesLatestTag);
+    data["error"]          = ToUtf8(g_updatesLastError);
+
+    json releases = json::array();
+    for (auto& r : g_updatesCache)
+    {
+        json item;
+        item["tag"]         = ToUtf8(r.tag);
+        item["name"]        = ToUtf8(r.name);
+        item["bodyHtml"]    = ToUtf8(r.bodyHtml);
+        item["publishedAt"] = ToUtf8(r.publishedAt);
+        item["htmlUrl"]     = ToUtf8(r.htmlUrl);
+        item["prerelease"]  = r.prerelease;
+
+        json assets = json::array();
+        for (auto& a : r.assets)
+        {
+            json aj;
+            aj["name"] = ToUtf8(a.name);
+            aj["url"]  = ToUtf8(a.downloadUrl);
+            aj["size"] = a.size;
+            assets.push_back(aj);
+        }
+        item["assets"] = assets;
+
+        releases.push_back(item);
+    }
+    data["releases"] = releases;
+
+    json msg;
+    msg["type"] = "updatesState";
+    msg["data"] = data;
+    g_mainWebView->PostJson(FromUtf8(msg.dump()));
+}
+
+// hwnd'ye WM_APP_UPDATES_FETCH_DONE ile geri donmek uzere arka planda GitHub
+// Releases'i ceker. silentStartupCheck=true ise (uygulama acilisindaki otomatik
+// kontrol) ve yeni bir surum bulunursa, sonuc geldiginde kullaniciya
+// indirme/kurulum onay dialogu gosterilir (bkz. WM_APP_UPDATES_FETCH_DONE isleyicisi).
+static void StartUpdatesCheck(HWND hwnd, bool silentStartupCheck)
+{
+    if (g_updatesChecking) return;
+    g_updatesChecking = true;
+    g_updatesLastError.clear();
+    PushUpdatesStateToJs();
+
+    std::thread([hwnd, silentStartupCheck]()
+    {
+        auto* result = new UpdateChecker::FetchResult(UpdateChecker::FetchLatestReleases(5));
+        PostMessageW(hwnd, WM_APP_UPDATES_FETCH_DONE, silentStartupCheck ? 1 : 0, reinterpret_cast<LPARAM>(result));
+    }).detach();
+}
+
+// Indirilen Inno Setup installer'ini SESSIZ/OTOMATIK kurulum bayraklariyla
+// baslatir ve ardindan kendi surecimizi TEMIZ kapatir (bkz. installer/VLSS5.iss
+// CloseApplications/RestartApplications -- installer, VLSS5.exe'yi Restart
+// Manager ile bekleyip kurulum bitince KENDISI yeniden baslatir; burada ikinci
+// bir baslatma YAPMIYORUZ).
+static void LaunchSilentInstallAndExit(HWND hwnd, const std::wstring& installerPath)
+{
+    wchar_t exeDir[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
+    PathRemoveFileSpecW(exeDir);
+
+    // VLSS5.exe zaten YUKSELTILMIS calisiyor (RequireAdministrator manifest,
+    // bkz. VLSS5.vcxproj) -- CreateProcessW ile baslatilan bir alt surec,
+    // installer'in KENDI manifesti admin istese BILE, ayrica bir UAC onayi
+    // TETIKLEMEZ (bu davranis sadece ShellExecute'un "runas" / AppCompat
+    // katmaninda olur). Bu yuzden ShellExecuteW degil, dogrudan CreateProcessW
+    // kullaniyoruz -- boylece kurulum gercekten SESSIZ kalir.
+    std::wstring cmdLine = L"\"" + installerPath + L"\""
+        L" /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /SP- /NOCANCEL"
+        L" /CLOSEAPPLICATIONS /RESTARTAPPLICATIONS"
+        L" /DIR=\"" + std::wstring(exeDir) + L"\"";
+
+    std::vector<wchar_t> mutableCmd(cmdLine.begin(), cmdLine.end());
+    mutableCmd.push_back(L'\0');
+
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
+                         0, nullptr, nullptr, &si, &pi))
+    {
+        DLSS_Log("[Updates] Installer baslatilamadi (hata=%lu): %ls", GetLastError(), installerPath.c_str());
+        return; // baslatilamadiysa kendimizi kapatmayalim -- kullanici elle deneyebilsin
+    }
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    DLSS_Log("[Updates] Installer sessizce baslatildi, uygulama kapatiliyor: %ls", installerPath.c_str());
+
+    // WM_CLOSE -> varsayilan DefWindowProc DestroyWindow cagirir -> WM_DESTROY
+    // (mevcut WebView2/hotkey/InputForwarder temizligi + PostQuitMessage) --
+    // pencerenin X butonuna basilmasiyla AYNI, zaten var olan temiz kapanis yolu.
+    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+}
+
+// hwnd'ye WM_APP_UPDATES_DL_PROGRESS (tekrar tekrar) ve WM_APP_UPDATES_DL_DONE
+// (bir kez) ile geri donmek uzere arka planda dosyayi %TEMP%'e indirir.
+static void StartUpdatesDownload(HWND hwnd, const std::wstring& url, const std::wstring& assetName)
+{
+    if (g_updatesDownloading || url.empty()) return;
+    g_updatesDownloading = true;
+    PushUpdatesStateToJs();
+
+    std::thread([hwnd, url, assetName]()
+    {
+        wchar_t tempDir[MAX_PATH] = {};
+        GetTempPathW(MAX_PATH, tempDir);
+        std::wstring outPath = std::wstring(tempDir) + (assetName.empty() ? L"VLSS5_update.bin" : assetName);
+
+        std::wstring error;
+        bool ok = UpdateChecker::DownloadFile(url, outPath,
+            [hwnd](const UpdateChecker::DownloadProgress& p)
+            {
+                auto* prog = new UpdateChecker::DownloadProgress(p);
+                PostMessageW(hwnd, WM_APP_UPDATES_DL_PROGRESS, 0, reinterpret_cast<LPARAM>(prog));
+            },
+            error);
+
+        auto* resultStr = new std::wstring(ok ? outPath : error);
+        PostMessageW(hwnd, WM_APP_UPDATES_DL_DONE, ok ? 1 : 0, reinterpret_cast<LPARAM>(resultStr));
+    }).detach();
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 static void SetStatus(const wchar_t* text)
 {
-    if (g_lblStatus)
-    {
-        SetWindowTextW(g_lblStatus, text);
-        InvalidateRect(g_lblStatus, nullptr, TRUE);
-    }
+    g_statusText = text;
+    PushStateToJs();
 }
 
-static void UpdateKeybindLabel()
+// HICON -> "data:image/png;base64,..." donusumu (hedef listesindeki pencere
+// simgelerini HTML'e tasimak icin). GDI+ ile PNG'ye kodlanir (alpha kanali
+// duzgun korunur), sonra elle base64'lenir. Basarisizlikta bos string doner --
+// JS tarafi bunu jenerik bir glyph'e duser.
+static int GetEncoderClsid(const WCHAR* mimeType, CLSID* clsid)
 {
-    if (g_lblKeybind)
+    UINT num = 0, size = 0;
+    Gdiplus::GetImageEncodersSize(&num, &size);
+    if (size == 0) return -1;
+
+    std::vector<BYTE> buf(size);
+    auto* codecInfo = reinterpret_cast<Gdiplus::ImageCodecInfo*>(buf.data());
+    Gdiplus::GetImageEncoders(num, size, codecInfo);
+
+    for (UINT i = 0; i < num; ++i)
     {
-        SetWindowTextW(g_lblKeybind,
-            InputForwarder::Config().FormatDisplay().c_str());
-        InvalidateRect(g_lblKeybind, nullptr, TRUE);
+        if (wcscmp(codecInfo[i].MimeType, mimeType) == 0)
+        {
+            *clsid = codecInfo[i].Clsid;
+            return static_cast<int>(i);
+        }
     }
+    return -1;
+}
+
+static std::string Base64Encode(const std::vector<BYTE>& data)
+{
+    static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((data.size() + 2) / 3) * 4);
+
+    size_t i = 0;
+    while (i + 3 <= data.size())
+    {
+        unsigned v = (data[i] << 16) | (data[i + 1] << 8) | data[i + 2];
+        out += tbl[(v >> 18) & 0x3F];
+        out += tbl[(v >> 12) & 0x3F];
+        out += tbl[(v >> 6) & 0x3F];
+        out += tbl[v & 0x3F];
+        i += 3;
+    }
+    size_t rem = data.size() - i;
+    if (rem == 1)
+    {
+        unsigned v = data[i] << 16;
+        out += tbl[(v >> 18) & 0x3F];
+        out += tbl[(v >> 12) & 0x3F];
+        out += "==";
+    }
+    else if (rem == 2)
+    {
+        unsigned v = (data[i] << 16) | (data[i + 1] << 8);
+        out += tbl[(v >> 18) & 0x3F];
+        out += tbl[(v >> 12) & 0x3F];
+        out += tbl[(v >> 6) & 0x3F];
+        out += "=";
+    }
+    return out;
+}
+
+// nvngx_dlssnr.dll surukle-birak yuklemesi icin ters yon -- JS tarafi dosya
+// parcalarini base64 ile gonderiyor (bkz. "nvngxDropChunk"), burada cozulup
+// diske yaziliyor. Base64Encode'un (yukarida, ikon data-URI'leri icin) TERSI.
+static std::vector<BYTE> Base64Decode(const std::string& in)
+{
+    static int table[256];
+    static bool tableInit = false;
+    if (!tableInit)
+    {
+        std::fill(std::begin(table), std::end(table), -1);
+        static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        for (int i = 0; i < 64; ++i) table[static_cast<unsigned char>(tbl[i])] = i;
+        tableInit = true;
+    }
+
+    std::vector<BYTE> out;
+    out.reserve((in.size() / 4) * 3);
+
+    int val = 0, bits = -8;
+    for (unsigned char c : in)
+    {
+        if (c == '=') break;
+        if (table[c] == -1) continue; // satir sonu vb. guvenli sekilde atlanir
+
+        val = (val << 6) + table[c];
+        bits += 6;
+        if (bits >= 0)
+        {
+            out.push_back(static_cast<BYTE>((val >> bits) & 0xFF));
+            bits -= 8;
+        }
+    }
+    return out;
+}
+
+static std::string IconToDataUri(HICON hIcon)
+{
+    if (!hIcon) return {};
+
+    Gdiplus::Bitmap bmp(hIcon);
+    if (bmp.GetLastStatus() != Gdiplus::Ok) return {};
+
+    IStream* stream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream)) || !stream)
+        return {};
+
+    CLSID pngClsid;
+    if (GetEncoderClsid(L"image/png", &pngClsid) < 0)
+    {
+        stream->Release();
+        return {};
+    }
+
+    bool ok = (bmp.Save(stream, &pngClsid) == Gdiplus::Ok);
+
+    std::vector<BYTE> bytes;
+    if (ok)
+    {
+        HGLOBAL hMem = nullptr;
+        if (SUCCEEDED(GetHGlobalFromStream(stream, &hMem)) && hMem)
+        {
+            SIZE_T size = GlobalSize(hMem);
+            void* pMem = GlobalLock(hMem);
+            if (pMem && size > 0)
+            {
+                bytes.resize(size);
+                memcpy(bytes.data(), pMem, size);
+            }
+            GlobalUnlock(hMem);
+        }
+    }
+    stream->Release();
+
+    if (bytes.empty()) return {};
+    return "data:image/png;base64," + Base64Encode(bytes);
 }
 
 static void PopulateList(HWND menuHwnd)
 {
-    g_windows = WindowEnumerator::GetWindows(menuHwnd);
-    SendMessageW(g_listBox, LB_RESETCONTENT, 0, 0);
+    // "Tum Ekran" seçenekleri listenin başına eklenir, ardından açık pencereler gelir.
+    g_windows = WindowEnumerator::GetMonitors();
+    auto windows = WindowEnumerator::GetWindows(menuHwnd);
+    g_windows.insert(g_windows.end(), windows.begin(), windows.end());
+
+    g_windowIcons.clear();
+    g_windowIcons.reserve(g_windows.size());
     for (auto& w : g_windows)
-    {
-        SendMessageW(g_listBox, LB_ADDSTRING, 0,
-            reinterpret_cast<LPARAM>(w.title.c_str()));
-    }
-    if (!g_windows.empty())
-        SendMessageW(g_listBox, LB_SETCURSEL, 0, 0);
+        g_windowIcons.push_back(IconToDataUri(w.icon));
+
+    g_selectedTargetIndex = g_windows.empty() ? -1 : 0;
 }
 
 static bool ContainsCaseInsensitive(const std::wstring& str, const std::wstring& search)
@@ -163,44 +593,9 @@ static bool ContainsCaseInsensitive(const std::wstring& str, const std::wstring&
     return (it != str.end());
 }
 
-static HWND CreateButtonTooltip(HWND hParent, HWND hTarget, const wchar_t* text)
-{
-    HWND hTip = CreateWindowExW(
-        WS_EX_TOPMOST,
-        TOOLTIPS_CLASS,
-        nullptr,
-        WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP | TTS_BALLOON,
-        CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT,
-        hParent, nullptr, GetModuleHandleW(nullptr), nullptr);
-
-    if (!hTip) return nullptr;
-
-    SetWindowPos(hTip, HWND_TOPMOST, 0, 0, 0, 0,
-        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
-
-    TOOLINFOW ti = {};
-    ti.cbSize   = sizeof(TOOLINFOW);
-    ti.uFlags   = TTF_SUBCLASS | TTF_IDISHWND;
-    ti.hwnd     = hParent;
-    ti.uId      = reinterpret_cast<UINT_PTR>(hTarget);
-    ti.lpszText = const_cast<LPWSTR>(text);
-
-    SendMessageW(hTip, TTM_ADDTOOL, 0, reinterpret_cast<LPARAM>(&ti));
-    SendMessageW(hTip, TTM_SETMAXTIPWIDTH, 0, 360);
-    SendMessageW(hTip, TTM_SETDELAYTIME, TTDT_INITIAL, 50);
-    SendMessageW(hTip, TTM_SETDELAYTIME, TTDT_AUTOPOP, 10000);
-
-    return hTip;
-}
-
-
-
 static void PopulateGpuList(HWND /*hwnd*/)
 {
-    if (!g_comboGpu) return;
-
     g_gpuList.clear();
-    SendMessageW(g_comboGpu, CB_RESETCONTENT, 0, 0);
 
     // Option 0: Auto (RTX Priority)
     GpuAdapterInfo autoOpt;
@@ -333,28 +728,12 @@ static void PopulateGpuList(HWND /*hwnd*/)
         }
     }
 
-    for (size_t idx = 0; idx < g_gpuList.size(); ++idx)
-    {
-        SendMessageW(g_comboGpu, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(g_gpuList[idx].displayName.c_str()));
-    }
-
-    SendMessageW(g_comboGpu, CB_SETCURSEL, selectedIndex, 0);
+    g_selectedGpuIndex = selectedIndex;
 
     // ---- DLSS hesaplama GPU'su listesi ----
-    // Ayni g_gpuList'i indeksler; tek fark RTX olmayan kartlarin isaretlenmesi.
-    if (g_comboDlssGpu)
+    // Ayni g_gpuList'i indeksler; tek fark RTX olmayan kartlarin isaretlenmesi
+    // (BuildStateJson'da "  — DLSS yok" etiketi eklenerek yapiliyor).
     {
-        SendMessageW(g_comboDlssGpu, CB_RESETCONTENT, 0, 0);
-
-        for (size_t idx = 0; idx < g_gpuList.size(); ++idx)
-        {
-            std::wstring label = g_gpuList[idx].displayName;
-            if (idx > 0 && !ContainsCaseInsensitive(g_gpuList[idx].name, L"RTX"))
-                label += L"  — DLSS yok";
-
-            SendMessageW(g_comboDlssGpu, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(label.c_str()));
-        }
-
         const std::wstring& savedDlssGpu = ConfigManager::Get().Config().dlssGpu;
         int dlssIndex = 0; // Otomatik (RTX Oncelikli)
         if (!savedDlssGpu.empty() && savedDlssGpu != L"Auto")
@@ -377,26 +756,8 @@ static void PopulateGpuList(HWND /*hwnd*/)
             }
         }
 
-        SendMessageW(g_comboDlssGpu, CB_SETCURSEL, dlssIndex, 0);
+        g_selectedDlssGpuIndex = dlssIndex;
     }
-}
-
-// ---------------------------------------------------------------------------
-// Custom UI Controls Drawing
-// ---------------------------------------------------------------------------
-static void DrawModernPanel(HDC hdc, const RECT& rc, COLORREF bg, COLORREF border, int radius = 8)
-{
-    HPEN hPen = CreatePen(PS_SOLID, 1, border);
-    HBRUSH hBr = CreateSolidBrush(bg);
-    HGDIOBJ oldPen = SelectObject(hdc, hPen);
-    HGDIOBJ oldBr = SelectObject(hdc, hBr);
-
-    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, radius, radius);
-
-    SelectObject(hdc, oldBr);
-    SelectObject(hdc, oldPen);
-    DeleteObject(hBr);
-    DeleteObject(hPen);
 }
 
 // ---------------------------------------------------------------------------
@@ -423,9 +784,11 @@ static bool IsOverlayRunning()
 }
 
 // BASLAT <-> DURDUR yazisi degistiginde butonu yeniden cizdir.
+// Faz 2: artik native bir buton yok -- guncel state'i (isCapturing dahil)
+// JS'e push ederek ayni etkiyi sagliyoruz.
 static void RefreshStartButton()
 {
-    if (g_btnStart) InvalidateRect(g_btnStart, nullptr, TRUE);
+    PushStateToJs();
 }
 
 static bool StartCaptureWithTarget(HWND hwnd, HWND target)
@@ -440,18 +803,96 @@ static bool StartCaptureWithTarget(HWND hwnd, HWND target)
         return false;
     }
 
+    // Insert menusu (VARSAYILAN VLSS5 AYARLARI dahil) yakalama baslarken KESIN
+    // KAPATILIR -- App::StartOverlayCommon'da da ayni cagri var, burada en
+    // erken noktada (ShowWindow/EnableWindow'dan bile once) tekrarlanmasi
+    // sirali/zamanlama sorunlarina karsi ek guvence.
+    SettingsWindow::Hide();
+
     // Overlay calisirken ana pencere GIZLENMEZ, sadece simge durumuna kucultulur.
     // SW_HIDE taskbar kaydini da siliyordu ve kullanici programi kapatamiyordu.
     ShowWindow(hwnd, SW_MINIMIZE);
     RefreshStartButton();
 
+    // "Varsayılan VLSS5 Ayarları" penceresi yakalama surerken ACILAMAZ -- artik
+    // JS tarafinda "settingsBtnEnabled" (RefreshStartButton'un pushladigi state
+    // icinde, isCapturing'den turetilir) ile gorsel olarak devre disi birakilir.
+
     if (!g_app->StartOverlay(hwnd, target, g_vsyncEnabled, g_dlssEnabled, g_fpsEnabled, g_fullscreenStretch))
     {
         ShowWindow(hwnd, SW_RESTORE);
+        RefreshStartButton();
         SetForegroundWindow(hwnd);
         SetStatus(L"Overlay başlatılamadı. Pencereyi kontrol edin.");
         return false;
     }
+
+    // g_app->GetState() artik Capturing -- JS'e it ki BASLAT butonu DURDUR'a
+    // donsun (pencere minimize olmadan once kisa bir an gorunur olabilir, ve
+    // Run() dongusu icinde ayni webview yine mesaj pompaliyor).
+    RefreshStartButton();
+
+    // Blocking render loop
+    g_app->Run();
+
+    // Prevent immediate hotkey re-trigger when returning from overlay
+    g_lastHotkeyTick = GetTickCount();
+    MSG flushMsg = {};
+    while (PeekMessageW(&flushMsg, nullptr, WM_HOTKEY, WM_HOTKEY, PM_REMOVE)) {}
+
+    // Wait until key is released (up to 300ms) so releasing Alt+S doesn't trigger start
+    DWORD waitStart = GetTickCount();
+    while (InputForwarder::IsStopKeyDown() && (GetTickCount() - waitStart < 300))
+    {
+        Sleep(10);
+    }
+
+    // When returned, restore main window
+    ShowWindow(hwnd, SW_RESTORE);
+    RefreshStartButton();
+    SetForegroundWindow(hwnd);
+    BringWindowToTop(hwnd);
+    PopulateList(hwnd);
+
+    std::wstring msg = L"Overlay durduruldu.  [";
+    msg += InputForwarder::Config().FormatDisplay();
+    msg += L"] veya BAŞLAT ile tekrar açabilirsiniz.";
+    SetStatus(msg.c_str());
+    return true;
+}
+
+static bool StartCaptureWithMonitor(HWND hwnd, HMONITOR monitor)
+{
+    // Ic ice Run() dongusune karsi son savunma hatti.
+    if (IsOverlayRunning())
+        return false;
+
+    if (!monitor)
+        return false;
+
+    // Insert menusu (VARSAYILAN VLSS5 AYARLARI dahil) yakalama baslarken KESIN
+    // KAPATILIR -- bkz. StartCaptureWithTarget'taki ayni yorum.
+    SettingsWindow::Hide();
+
+    // Overlay calisirken ana pencere GIZLENMEZ, sadece simge durumuna kucultulur.
+    ShowWindow(hwnd, SW_MINIMIZE);
+    RefreshStartButton();
+
+    // "Varsayılan VLSS5 Ayarları" penceresi yakalama surerken ACILAMAZ -- JS
+    // tarafinda "settingsBtnEnabled" ile gorsel olarak devre disi birakilir.
+
+    if (!g_app->StartOverlayDesktop(hwnd, monitor, g_vsyncEnabled, g_dlssEnabled, g_fpsEnabled))
+    {
+        ShowWindow(hwnd, SW_RESTORE);
+        RefreshStartButton();
+        SetForegroundWindow(hwnd);
+        SetStatus(L"Overlay başlatılamadı. Ekranı kontrol edin.");
+        return false;
+    }
+
+    // g_app->GetState() artik Capturing -- JS'e it ki BASLAT butonu DURDUR'a
+    // donsun (bkz. StartCaptureWithTarget'taki ayni aciklama).
+    RefreshStartButton();
 
     // Blocking render loop
     g_app->Run();
@@ -505,7 +946,17 @@ static void TriggerCaptureToggle(HWND hwnd)
     {
         wchar_t cls[64] = {};
         GetClassNameW(fg, cls, _countof(cls));
-        if (wcscmp(cls, L"Progman") != 0 &&
+
+        // Kendi surecimize ait HERHANGI bir pencere (VLSS5 Ayarlari, RTSS
+        // Ayarlari, Tuslar, On Ayarlar vs.) asla yakalama hedefi olmamali --
+        // aksi halde ALT+S o pencerenin uzerine bir overlay acar, pencere hic
+        // kapanmaz, sadece arkada kalmis gibi gorunur (kullanici geri bildirimi).
+        DWORD fgPid = 0;
+        GetWindowThreadProcessId(fg, &fgPid);
+        bool isOwnProcessWindow = (fgPid == GetCurrentProcessId());
+
+        if (!isOwnProcessWindow &&
+            wcscmp(cls, L"Progman") != 0 &&
             wcscmp(cls, L"WorkerW") != 0 &&
             wcscmp(cls, L"Shell_TrayWnd") != 0 &&
             wcscmp(cls, L"Shell_SecondaryTrayWnd") != 0)
@@ -514,15 +965,18 @@ static void TriggerCaptureToggle(HWND hwnd)
         }
     }
 
-    // 2. If foreground was the menu window itself or a system window, use the selected window in the list
+    // 2. If foreground was the menu window itself or a system window, use the selected entry in the list --
+    // ama SADECE gercek bir pencere ise. Masaustu/monitor yakalamasi (targetMonitor) kisayoldan (Alt+S)
+    // ASLA baslatilamaz -- kullanici bunu sadece menuden, BAŞLAT butonuyla secip yapabilmeli
+    // (bkz. IDC_BTN_START isleyicisi). Aksi halde hotkey bazen dogrudan masaustune render uyguluyordu.
     if (!target)
     {
-        int sel = static_cast<int>(SendMessageW(g_listBox, LB_GETCURSEL, 0, 0));
-        if (sel != LB_ERR && sel < static_cast<int>(g_windows.size()))
+        int sel = g_selectedTargetIndex;
+        if (sel >= 0 && sel < static_cast<int>(g_windows.size()) && !g_windows[sel].monitor)
         {
             target = g_windows[sel].hwnd;
         }
-        else if (!g_windows.empty())
+        else if (!g_windows.empty() && !g_windows[0].monitor)
         {
             target = g_windows[0].hwnd;
         }
@@ -535,7 +989,8 @@ static void TriggerCaptureToggle(HWND hwnd)
         {
             if (g_windows[i].hwnd == target)
             {
-                SendMessageW(g_listBox, LB_SETCURSEL, static_cast<WPARAM>(i), 0);
+                g_selectedTargetIndex = static_cast<int>(i);
+                PushStateToJs();
                 break;
             }
         }
@@ -544,654 +999,71 @@ static void TriggerCaptureToggle(HWND hwnd)
     }
     else
     {
-        SetStatus(L"Yakalanacak pencere bulunamadı. Lütfen listeden seçin.");
+        SetStatus(L"Yakalanacak pencere bulunamadı. Masaüstü (monitör) yakalaması yalnızca menüden BAŞLAT ile seçilebilir.");
     }
 }
 
 // ---------------------------------------------------------------------------
-// WndProc
+// JS -> Native mesaj koprusu (WebViewHost::MessageHandler)
 // ---------------------------------------------------------------------------
-static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+static void OnMainWebMessage(const std::wstring& jsonStr)
 {
-    switch (msg)
+    json msg;
+    try { msg = json::parse(ToUtf8(jsonStr)); }
+    catch (...) { return; }
+
+    // Son savunma hatti: SettingsWindow/RtssWindow/HotkeysWindow/PresetsWindow'daki
+    // ayni desen -- tum dispatch try/catch icinde, sadece json::parse degil.
+    // Bir istisna bu COM callback sinirini asarsa std::terminate cagrilip TUM
+    // uygulama sessizce cokebilir (bkz. Faz 1'de bulunan gercek hata).
+    try
     {
-    case WM_CREATE:
-    {
-        g_mainHwnd = hwnd;
+        std::string cmd = msg.value("cmd", "");
+        HWND hwnd = g_mainHwnd;
 
-        // Create fonts with Segoe UI for crisp rendering & Turkish character support
-        g_fontTitle = CreateFontW(-22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-
-        g_fontSubtitle = CreateFontW(-13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-
-        g_fontNormal = CreateFontW(-15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-
-        g_fontBold = CreateFontW(-14, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-
-        g_fontSmall = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-
-        // Theme brushes
-        g_brBg     = CreateSolidBrush(COLOR_BG);
-        g_brCard   = CreateSolidBrush(COLOR_CARD_BG);
-        g_brBorder = CreateSolidBrush(COLOR_BORDER);
-        g_brNeon   = CreateSolidBrush(COLOR_NEON_GREEN);
-
-        // Load 46x46 logo icon for header bar
-        HINSTANCE hInst = reinterpret_cast<LPCREATESTRUCTW>(lParam)->hInstance;
-        g_hLogoHeader = reinterpret_cast<HICON>(LoadImageW(
-            hInst, MAKEINTRESOURCEW(IDI_MAIN_ICON), IMAGE_ICON, 46, 46, LR_DEFAULTCOLOR));
-
-        auto SF = [](HWND h, HFONT f) {
-            SendMessageW(h, WM_SETFONT, reinterpret_cast<WPARAM>(f), TRUE);
-        };
-
-        // ---- Window List Section (Card 1: Hedef Uygulama Seçimi) ----
-        // Left Column: ListBox for target windows
-        g_listBox = CreateWindowExW(0, L"LISTBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | LBS_NOTIFY | LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT,
-            34, 112, 362, 178,
-            hwnd, reinterpret_cast<HMENU>(IDC_WINDOWLIST), nullptr, nullptr);
-        SF(g_listBox, g_fontNormal);
-        SetWindowTheme(g_listBox, L"DarkMode_Explorer", nullptr);
-        SendMessageW(g_listBox, LB_SETITEMHEIGHT, 0, 36);
-
-        // Right Column (Inside Card 1)
-        // Refresh Button
-        g_btnRefresh = CreateWindowW(L"BUTTON", L"Yenile    ↻",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            412, 112, 158, 34,
-            hwnd, reinterpret_cast<HMENU>(IDC_BTN_REFRESH), nullptr, nullptr);
-        SF(g_btnRefresh, g_fontBold);
-
-        // VSync Checkbox
-        g_chkVSync = CreateWindowW(L"BUTTON", L"VSync",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            412, 158, 158, 26,
-            hwnd, reinterpret_cast<HMENU>(IDC_CHK_VSYNC), nullptr, nullptr);
-        SF(g_chkVSync, g_fontBold);
-
-        // FPS Overlay Checkbox
-        g_chkFps = CreateWindowW(L"BUTTON", L"FPS Göstergesi",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            412, 194, 158, 26,
-            hwnd, reinterpret_cast<HMENU>(IDC_CHK_FPS), nullptr, nullptr);
-        SF(g_chkFps, g_fontBold);
-
-        // VLSS5 Checkbox
-        g_chkDlss = CreateWindowW(L"BUTTON", L"VLSS5 (Nöral)",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            412, 230, 158, 26,
-            hwnd, reinterpret_cast<HMENU>(IDC_CHK_DLSS), nullptr, nullptr);
-        SF(g_chkDlss, g_fontBold);
-
-        // Tam Ekran Yap Checkbox
-        g_fullscreenStretch = ConfigManager::Get().Config().fullscreenStretch;
-        g_chkFullscreen = CreateWindowW(L"BUTTON", L"Tam Ekran Yap",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            412, 266, 158, 26,
-            hwnd, reinterpret_cast<HMENU>(IDC_CHK_FULLSCREEN), nullptr, nullptr);
-        SF(g_chkFullscreen, g_fontBold);
-
-        // ---- Card 2: GPU & Kısayol Paneli ----
-        // Row 1: GPU Selection
-        g_lblGpu = CreateWindowW(L"STATIC", L"Ekran / Yakalama GPU:",
-            WS_CHILD | WS_VISIBLE, 32, 328, 160, 20,
-            hwnd, nullptr, nullptr, nullptr);
-        SF(g_lblGpu, g_fontBold);
-
-        g_comboGpu = CreateWindowExW(0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
-            196, 324, 342, 200,
-            hwnd, reinterpret_cast<HMENU>(IDC_COMBO_GPU), nullptr, nullptr);
-        SF(g_comboGpu, g_fontNormal);
-        SetWindowTheme(g_comboGpu, L"DarkMode_Explorer", nullptr);
-
-        g_btnGpuHelp = CreateWindowW(L"BUTTON", L"?",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            544, 323, 26, 26,
-            hwnd, reinterpret_cast<HMENU>(IDC_BTN_GPU_HELP), nullptr, nullptr);
-        SF(g_btnGpuHelp, g_fontBold);
-
-        g_tipGpuHelp = CreateButtonTooltip(hwnd, g_btnGpuHelp,
-            L"Ekranı yakalayıp sunan kart. Monitörünüzü hangi kart sürüyorsa o seçilmelidir.");
-
-        // Row 2: DLSS hesaplama GPU'su
-        // Yakalama kartindan AYRI secilebilir. Tipik kullanim: monitörü iGPU
-        // sürüyor, sinir agi RTX karta veriliyor.
-        g_lblDlssGpu = CreateWindowW(L"STATIC", L"DLSS Hesaplama GPU:",
-            WS_CHILD | WS_VISIBLE, 32, 364, 160, 20,
-            hwnd, nullptr, nullptr, nullptr);
-        SF(g_lblDlssGpu, g_fontBold);
-
-        g_comboDlssGpu = CreateWindowExW(0, L"COMBOBOX", nullptr,
-            WS_CHILD | WS_VISIBLE | WS_VSCROLL | CBS_DROPDOWNLIST,
-            196, 360, 342, 200,
-            hwnd, reinterpret_cast<HMENU>(IDC_COMBO_DLSSGPU), nullptr, nullptr);
-        SF(g_comboDlssGpu, g_fontNormal);
-        SetWindowTheme(g_comboDlssGpu, L"DarkMode_Explorer", nullptr);
-
-        g_btnDlssGpuHelp = CreateWindowW(L"BUTTON", L"?",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            544, 359, 26, 26,
-            hwnd, reinterpret_cast<HMENU>(IDC_BTN_DLSSGPU_HELP), nullptr, nullptr);
-        SF(g_btnDlssGpuHelp, g_fontBold);
-
-        g_tipDlssGpuHelp = CreateButtonTooltip(hwnd, g_btnDlssGpuHelp,
-            L"Sinir ağının koşacağı kart. RTX gereklidir. Yakalama kartından farklı seçilirse her kare PCIe üzerinden taşınır.");
-
-        // Row 3: VLSS5 Settings
-        g_btnDlssSettings = CreateWindowW(L"BUTTON", L"⚙ VLSS5 Ayarları",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            32, 400, 538, 30,
-            hwnd, reinterpret_cast<HMENU>(IDC_BTN_DLSS_SETTINGS), nullptr, nullptr);
-        SF(g_btnDlssSettings, g_fontBold);
-
-        // Row 4: RTSS Integration & Hotkeys
-        g_btnRtssSettings = CreateWindowW(L"BUTTON", L"RTSS AYARLARI",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            32, 440, 265, 32,
-            hwnd, reinterpret_cast<HMENU>(IDC_BTN_RTSS_SETTINGS), nullptr, nullptr);
-        SF(g_btnRtssSettings, g_fontBold);
-
-        g_btnHotkeys = CreateWindowW(L"BUTTON", L"TUŞLARI DEĞİŞTİR",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            309, 440, 265, 32,
-            hwnd, reinterpret_cast<HMENU>(IDC_BTN_HOTKEYS), nullptr, nullptr);
-        SF(g_btnHotkeys, g_fontBold);
-
-        // ---- Start Button (Big Action Button) ----
-        g_btnStart = CreateWindowW(L"BUTTON", L"BAŞLAT  ➔",
-            WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-            20, 496, 566, 48,
-            hwnd, reinterpret_cast<HMENU>(IDC_BTN_START), nullptr, nullptr);
-        SF(g_btnStart, g_fontTitle);
-
-        // ---- Status bar ----
-        g_lblStatus = CreateWindowW(L"STATIC", L"Hedef uygulamayı seçin veya istediğiniz penceredeyken ALT+S basın.",
-            WS_CHILD | WS_VISIBLE | SS_CENTER, 20, 554, 566, 20,
-            hwnd, reinterpret_cast<HMENU>(IDC_LBL_STATUS), nullptr, nullptr);
-        SF(g_lblStatus, g_fontSmall);
-
-        // Global hotkey registration & fallback timer
-        RegisterAppHotkey(hwnd);
-        SetTimer(hwnd, IDT_HOTKEY_TIMER, 50, nullptr);
-
-        // Populate initial lists
-        PopulateList(hwnd);
-        PopulateGpuList(hwnd);
-        break;
-    }
-
-    case WM_PAINT:
-    {
-        PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hwnd, &ps);
-
-        RECT client;
-        GetClientRect(hwnd, &client);
-
-        // 1. Fill entire window background (Dark Midnight)
-        FillRect(hdc, &client, g_brBg);
-
-        // 2. Draw Top Header Bar
-        RECT headerRect = { 0, 0, client.right, 66 };
-        FillRect(hdc, &headerRect, g_brCard);
-
-        // Header bottom accent line (Glowing Lime Line)
-        HPEN hPenGlow = CreatePen(PS_SOLID, 3, RGB(0, 90, 25));
-        HGDIOBJ oldPen = SelectObject(hdc, hPenGlow);
-        MoveToEx(hdc, 0, 65, nullptr);
-        LineTo(hdc, client.right, 65);
-
-        HPEN hPenNeon = CreatePen(PS_SOLID, 1, COLOR_LIME_ACCENT);
-        SelectObject(hdc, hPenNeon);
-        MoveToEx(hdc, 0, 65, nullptr);
-        LineTo(hdc, client.right, 65);
-        SelectObject(hdc, oldPen);
-        DeleteObject(hPenNeon);
-        DeleteObject(hPenGlow);
-
-        // Header Emblem / Logo (42x42)
-        if (g_hLogoHeader)
+        if (cmd == "getState")
         {
-            DrawIconEx(hdc, 20, 12, g_hLogoHeader, 42, 42, 0, nullptr, DI_NORMAL);
+            PushStateToJs();
         }
-
-        // Header Title (Bold White)
-        SetBkMode(hdc, TRANSPARENT);
-        SetTextColor(hdc, RGB(255, 255, 255));
-        SelectObject(hdc, g_fontTitle);
-        TextOutW(hdc, 74, 12, L"VLSS5", 5);
-
-        // Header Subtitle
-        SetTextColor(hdc, COLOR_TEXT_MUTED);
-        SelectObject(hdc, g_fontSubtitle);
-        const wchar_t subTitle[] = L"Youtube: @vuenxxmx";
-        TextOutW(hdc, 74, 38, subTitle, static_cast<int>(wcslen(subTitle)));
-
-        // Alt basligin sag kenari: kisayol hapi bunun ustune taşmamalı.
-        SIZE subSize = {};
-        GetTextExtentPoint32W(hdc, subTitle, static_cast<int>(wcslen(subTitle)), &subSize);
-        const LONG subtitleRight = 74 + subSize.cx;
-
-        // Keyboard Tips in Header (Right-side Pill Container)
-        //
-        // Hapın GENİŞLİĞİ metne göre hesaplanır, sabit değil: kısayollar
-        // kullanıcı tarafından değiştirilebiliyor ve sabit 440 px hem gereksiz
-        // yer kaplayıp alt başlığın üstüne biniyor hem de uzun kombinasyonlarda
-        // yetmiyordu.
-        auto& c = ConfigManager::Get().Config();
-        std::wstring tips = L"[" + Dlss5Config::FormatKey(c.vkFgIndicator) + L"] FG | [" +
-                            Dlss5Config::FormatKey(c.vkFocus) + L"] Odak | [" +
-                            Dlss5Config::FormatKey(c.vkFps) + L"] FPS | [" +
-                            Dlss5Config::FormatKey(c.vkToggleVlss) + L"] VLSS5 | [" +
-                            Dlss5Config::FormatKey(c.vkStart, c.modStart) + L"] Başlat";
-
-        SelectObject(hdc, g_fontSmall);
-        SIZE tipsSize = {};
-        GetTextExtentPoint32W(hdc, tips.c_str(), static_cast<int>(tips.length()), &tipsSize);
-
-        static constexpr LONG kPillPadX = 14;   // metnin iki yanındaki boşluk
-        static constexpr LONG kPillGap  = 16;   // alt başlık ile hap arası en az boşluk
-
-        LONG pillLeft = client.right - 20 - (tipsSize.cx + kPillPadX * 2);
-        if (pillLeft < subtitleRight + kPillGap)
+        else if (cmd == "refresh")
         {
-            // Çok uzun kısayol dizisi: hapı alt başlığın bitimine dayayıp metni
-            // ucu noktalı kırpıyoruz; üst üste binmesine izin vermiyoruz.
-            pillLeft = subtitleRight + kPillGap;
+            PopulateList(hwnd);
+            PopulateGpuList(hwnd);
+            SetStatus(L"Pencere ve GPU listesi güncellendi.");
         }
-
-        RECT rcTips = { pillLeft, 18, client.right - 20, 48 };
-        DrawModernPanel(hdc, rcTips, RGB(14, 18, 25), COLOR_BORDER, 6);
-
-        SetTextColor(hdc, RGB(165, 175, 190));
-        SelectObject(hdc, g_fontSmall);
-        DrawTextW(hdc, tips.c_str(), -1, &rcTips,
-                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-        // 3. Card 1 Panel (Hedef Uygulama Seçimi)
-        RECT card1 = { 20, 76, client.right - 20, 304 };
-        DrawModernPanel(hdc, card1, COLOR_CARD_BG, COLOR_BORDER, 10);
-
-        // Card 1 Title
-        SetTextColor(hdc, RGB(225, 232, 242));
-        SelectObject(hdc, g_fontBold);
-        TextOutW(hdc, 34, 88, L"HEDEF UYGULAMA SEÇİMİ", 21);
-
-        // 4. Card 2 Panel (GPU & Kısayol)
-        RECT card2 = { 20, 314, client.right - 20, 486 };
-        DrawModernPanel(hdc, card2, COLOR_CARD_BG, COLOR_BORDER, 10);
-
-        EndPaint(hwnd, &ps);
-        break;
-    }
-
-    case WM_DRAWITEM:
-    {
-        auto* dis = reinterpret_cast<DRAWITEMSTRUCT*>(lParam);
-        if (!dis) break;
-
-        // 1. Custom draw the Window ListBox (Items with App Icons & Lime Pill Selection)
-        if (dis->CtlID == IDC_WINDOWLIST)
+        else if (cmd == "selectTarget")
         {
-            if (dis->itemID == static_cast<UINT>(-1)) break;
-
-            bool isSelected = (dis->itemState & ODS_SELECTED);
-
-            RECT rc = dis->rcItem;
-            int itemW = rc.right - rc.left;
-            int itemH = rc.bottom - rc.top;
-
-            HDC memDC = CreateCompatibleDC(dis->hDC);
-            HBITMAP memBmp = CreateCompatibleBitmap(dis->hDC, itemW, itemH);
-            HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
-
-            // Fill background with card background
-            RECT rcLocal = { 0, 0, itemW, itemH };
-            FillRect(memDC, &rcLocal, g_brCard);
-
-            if (isSelected)
+            int idx = msg.value("id", -1);
+            if (idx >= 0 && idx < static_cast<int>(g_windows.size()))
             {
-                // Rounded lime green pill matching mockup
-                RECT rcPill = { 2, 2, itemW - 2, itemH - 2 };
-                HPEN hPenPill = CreatePen(PS_SOLID, 1, COLOR_LIME_ACCENT);
-                HBRUSH hBrPill = CreateSolidBrush(COLOR_LIME_ACCENT);
-                HGDIOBJ oldPen = SelectObject(memDC, hPenPill);
-                HGDIOBJ oldBr  = SelectObject(memDC, hBrPill);
-
-                RoundRect(memDC, rcPill.left, rcPill.top, rcPill.right, rcPill.bottom, 8, 8);
-
-                SelectObject(memDC, oldBr);
-                SelectObject(memDC, oldPen);
-                DeleteObject(hBrPill);
-                DeleteObject(hPenPill);
+                g_selectedTargetIndex = idx;
+                PushStateToJs();
             }
-
-            // Get item icon and title
-            HICON hIcon = nullptr;
-            std::wstring title;
-            if (dis->itemID < g_windows.size())
-            {
-                hIcon = g_windows[dis->itemID].icon;
-                title = g_windows[dis->itemID].title;
-            }
-            else
-            {
-                wchar_t buf[512] = {};
-                SendMessageW(dis->hwndItem, LB_GETTEXT, dis->itemID, reinterpret_cast<LPARAM>(buf));
-                title = buf;
-            }
-
-            // Draw application icon (20x20)
-            int iconSize = 20;
-            int iconX = 8;
-            int iconY = (itemH - iconSize) / 2;
-            if (hIcon)
-            {
-                DrawIconEx(memDC, iconX, iconY, hIcon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
-            }
-            else
-            {
-                HICON defIcon = LoadIconW(nullptr, IDI_APPLICATION);
-                if (defIcon)
-                    DrawIconEx(memDC, iconX, iconY, defIcon, iconSize, iconSize, 0, nullptr, DI_NORMAL);
-            }
-
-            // Draw window title text
-            SetBkMode(memDC, TRANSPARENT);
-            SetTextColor(memDC, isSelected ? COLOR_DARK_TEXT : COLOR_TEXT_MAIN);
-            SelectObject(memDC, isSelected ? g_fontBold : g_fontNormal);
-
-            RECT rcText = { iconX + iconSize + 8, 0, itemW - 8, itemH };
-            DrawTextW(memDC, title.c_str(), -1, &rcText,
-                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
-
-            BitBlt(dis->hDC, rc.left, rc.top, itemW, itemH, memDC, 0, 0, SRCCOPY);
-
-            SelectObject(memDC, oldBmp);
-            DeleteObject(memBmp);
-            DeleteDC(memDC);
-
-            return TRUE;
         }
-
-        // 2. Custom draw Checkboxes (VSync, FPS, DLSS 5) with modern square + checkmark
-        if (dis->CtlID == IDC_CHK_VSYNC || dis->CtlID == IDC_CHK_FPS ||
-            dis->CtlID == IDC_CHK_DLSS  || dis->CtlID == IDC_CHK_FULLSCREEN)
+        else if (cmd == "setVsync")
         {
-            bool isChecked = false;
-            const wchar_t* label = L"";
-            if (dis->CtlID == IDC_CHK_VSYNC)      { isChecked = g_vsyncEnabled; label = L"VSync"; }
-            else if (dis->CtlID == IDC_CHK_FPS)   { isChecked = g_fpsEnabled;   label = L"FPS Göstergesi"; }
-            else if (dis->CtlID == IDC_CHK_DLSS)  { isChecked = g_dlssEnabled;  label = L"VLSS5 (Nöral)"; }
-            else if (dis->CtlID == IDC_CHK_FULLSCREEN) { isChecked = g_fullscreenStretch; label = L"Tam Ekran Yap"; }
-
-            RECT rc = dis->rcItem;
-            int itemW = rc.right - rc.left;
-            int itemH = rc.bottom - rc.top;
-
-            HDC memDC = CreateCompatibleDC(dis->hDC);
-            HBITMAP memBmp = CreateCompatibleBitmap(dis->hDC, itemW, itemH);
-            HGDIOBJ oldBmp = SelectObject(memDC, memBmp);
-
-            RECT rcLocal = { 0, 0, itemW, itemH };
-            FillRect(memDC, &rcLocal, g_brCard);
-
-            // Checkbox square (18x18)
-            int boxSize = 18;
-            int boxX = 2;
-            int boxY = (itemH - boxSize) / 2;
-            RECT rcBox = { boxX, boxY, boxX + boxSize, boxY + boxSize };
-
-            if (isChecked)
-            {
-                // Dark box with crisp white checkmark matching mockup
-                HPEN hPenBox = CreatePen(PS_SOLID, 1, RGB(70, 85, 110));
-                HBRUSH hBrBox = CreateSolidBrush(RGB(28, 36, 48));
-                HGDIOBJ oldPen = SelectObject(memDC, hPenBox);
-                HGDIOBJ oldBr  = SelectObject(memDC, hBrBox);
-
-                RoundRect(memDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
-
-                // Draw white checkmark ✓
-                HPEN hPenCheck = CreatePen(PS_SOLID, 2, RGB(245, 250, 255));
-                SelectObject(memDC, hPenCheck);
-
-                MoveToEx(memDC, boxX + 4, boxY + 9, nullptr);
-                LineTo(memDC, boxX + 7, boxY + 13);
-                LineTo(memDC, boxX + 14, boxY + 5);
-
-                SelectObject(memDC, oldBr);
-                SelectObject(memDC, oldPen);
-                DeleteObject(hPenCheck);
-                DeleteObject(hBrBox);
-                DeleteObject(hPenBox);
-            }
-            else
-            {
-                // Unchecked: dark box with subtle border
-                HPEN hPenBox = CreatePen(PS_SOLID, 1, RGB(55, 68, 88));
-                HBRUSH hBrBox = CreateSolidBrush(RGB(20, 26, 36));
-                HGDIOBJ oldPen = SelectObject(memDC, hPenBox);
-                HGDIOBJ oldBr  = SelectObject(memDC, hBrBox);
-
-                RoundRect(memDC, rcBox.left, rcBox.top, rcBox.right, rcBox.bottom, 4, 4);
-
-                SelectObject(memDC, oldBr);
-                SelectObject(memDC, oldPen);
-                DeleteObject(hBrBox);
-                DeleteObject(hPenBox);
-            }
-
-            // Draw label
-            SetBkMode(memDC, TRANSPARENT);
-            SetTextColor(memDC, COLOR_TEXT_MAIN);
-            SelectObject(memDC, g_fontBold);
-
-            RECT rcText = { boxX + boxSize + 10, 0, itemW, itemH };
-            DrawTextW(memDC, label, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-            BitBlt(dis->hDC, rc.left, rc.top, itemW, itemH, memDC, 0, 0, SRCCOPY);
-
-            SelectObject(memDC, oldBmp);
-            DeleteObject(memBmp);
-            DeleteDC(memDC);
-
-            return TRUE;
-        }
-
-        // 3. Custom draw Start Button (Big Lime Action Button: BAŞLAT ➔)
-        if (dis->CtlID == IDC_BTN_START)
-        {
-            const bool isPressed = (dis->itemState & ODS_SELECTED) != 0;
-            const bool running   = IsOverlayRunning();
-
-            // Overlay calisirken buton DURDUR'a doner (kirmizi).
-            COLORREF btnBg = running
-                ? (isPressed ? COLOR_STOP_DARK : COLOR_STOP_ACCENT)
-                : (isPressed ? COLOR_LIME_DARK : COLOR_LIME_ACCENT);
-
-            DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBg, 10);
-
-            SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, running ? COLOR_TEXT_MAIN : COLOR_DARK_TEXT);
-            SelectObject(dis->hDC, g_fontTitle);
-
-            DrawTextW(dis->hDC, running ? L"DURDUR  ■" : L"BAŞLAT  ➔",
-                      -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            return TRUE;
-        }
-
-        // 4. Custom draw VLSS5 Settings Button (Vibrant Lime Green in Card 2)
-        if (dis->CtlID == IDC_BTN_DLSS_SETTINGS)
-        {
-            bool isPressed = (dis->itemState & ODS_SELECTED);
-            COLORREF btnBg = isPressed ? COLOR_LIME_DARK : COLOR_LIME_ACCENT;
-
-            DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBg, 6);
-
-            SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, COLOR_DARK_TEXT);
-            SelectObject(dis->hDC, g_fontBold);
-
-            DrawTextW(dis->hDC, L"⚙ VLSS5 Ayarları", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            return TRUE;
-        }
-
-        // 4.5 Custom draw RTSS Settings Button
-        if (dis->CtlID == IDC_BTN_RTSS_SETTINGS || dis->CtlID == IDC_BTN_HOTKEYS)
-        {
-            bool isPressed = (dis->itemState & ODS_SELECTED);
-            COLORREF btnBg = isPressed ? COLOR_LIME_DARK : COLOR_LIME_ACCENT;
-
-            DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBg, 6);
-
-            SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, RGB(10, 15, 20));
-            SelectObject(dis->hDC, g_fontBold);
-            
-            wchar_t text[64] = {};
-            GetWindowTextW(dis->hwndItem, text, 64);
-            DrawTextW(dis->hDC, text, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            return TRUE;
-        }
-
-        // 5. Custom draw Shortcut Pill Badge (Alt+S)
-        if (dis->CtlID == IDC_LBL_KEYBIND)
-        {
-            DrawModernPanel(dis->hDC, dis->rcItem, RGB(14, 18, 25), RGB(45, 58, 78), 6);
-
-            wchar_t keyText[64] = {};
-            GetWindowTextW(dis->hwndItem, keyText, _countof(keyText));
-
-            SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, COLOR_TEXT_MAIN);
-            SelectObject(dis->hDC, g_fontBold);
-
-            DrawTextW(dis->hDC, keyText, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            return TRUE;
-        }
-
-        // 6. Custom draw Secondary Buttons (Yenile, Değiştir)
-        if (dis->CtlID == IDC_BTN_REFRESH || dis->CtlID == IDC_BTN_KEYBIND)
-        {
-            bool isPressed = (dis->itemState & ODS_SELECTED);
-            COLORREF btnBg = isPressed ? RGB(36, 46, 62) : RGB(26, 34, 46);
-            COLORREF btnBorder = isPressed ? COLOR_LIME_ACCENT : RGB(48, 62, 82);
-
-            DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBorder, 6);
-
-            wchar_t btnText[64] = {};
-            GetWindowTextW(dis->hwndItem, btnText, _countof(btnText));
-
-            SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, COLOR_TEXT_MAIN);
-            SelectObject(dis->hDC, g_fontBold);
-
-            DrawTextW(dis->hDC, btnText, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            return TRUE;
-        }
-
-        // 7. Custom draw GPU Help '?' Buttons (yakalama + DLSS)
-        if (dis->CtlID == IDC_BTN_GPU_HELP || dis->CtlID == IDC_BTN_DLSSGPU_HELP)
-        {
-            bool isPressed = (dis->itemState & ODS_SELECTED);
-            COLORREF btnBg = isPressed ? RGB(36, 46, 62) : RGB(26, 34, 46);
-            COLORREF btnBorder = isPressed ? COLOR_LIME_ACCENT : RGB(48, 62, 82);
-            COLORREF textColor = isPressed ? COLOR_LIME_ACCENT : COLOR_TEXT_MUTED;
-
-            DrawModernPanel(dis->hDC, dis->rcItem, btnBg, btnBorder, 6);
-
-            SetBkMode(dis->hDC, TRANSPARENT);
-            SetTextColor(dis->hDC, textColor);
-            SelectObject(dis->hDC, g_fontBold);
-
-            DrawTextW(dis->hDC, L"?", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-            return TRUE;
-        }
-        break;
-    }
-
-    case WM_CTLCOLORSTATIC:
-    {
-        HDC hdc = reinterpret_cast<HDC>(wParam);
-        HWND ctlHwnd = reinterpret_cast<HWND>(lParam);
-
-        SetBkMode(hdc, TRANSPARENT);
-
-        if (ctlHwnd == g_lblStatus)
-        {
-            SetTextColor(hdc, COLOR_TEXT_MUTED);
-            return reinterpret_cast<LRESULT>(g_brBg);
-        }
-
-        SetTextColor(hdc, COLOR_TEXT_MAIN);
-        return reinterpret_cast<LRESULT>(g_brCard);
-    }
-
-    case WM_CTLCOLORLISTBOX:
-    case WM_CTLCOLOREDIT:
-    {
-        HDC hdc = reinterpret_cast<HDC>(wParam);
-        SetBkMode(hdc, OPAQUE);
-        SetBkColor(hdc, COLOR_CARD_BG);
-        SetTextColor(hdc, COLOR_TEXT_MAIN);
-        return reinterpret_cast<LRESULT>(g_brCard);
-    }
-
-    case WM_COMMAND:
-    {
-        int ctlId = LOWORD(wParam);
-
-        // VSync checkbox toggle
-        if (ctlId == IDC_CHK_VSYNC)
-        {
-            g_vsyncEnabled = !g_vsyncEnabled;
-            InvalidateRect(g_chkVSync, nullptr, TRUE);
+            g_vsyncEnabled = msg.value("value", g_vsyncEnabled);
             if (g_vsyncEnabled)
                 SetStatus(L"VSync etkin: Kareler monitör yenileme hızına kilitlenecek.");
             else
                 SetStatus(L"VSync kapalı: Sınırsız kare hızı & en düşük gecikme.");
-            break;
         }
-
-        // FPS checkbox toggle
-        if (ctlId == IDC_CHK_FPS)
+        else if (cmd == "setFps")
         {
-            g_fpsEnabled = !g_fpsEnabled;
-            InvalidateRect(g_chkFps, nullptr, TRUE);
-            break;
+            g_fpsEnabled = msg.value("value", g_fpsEnabled);
+            PushStateToJs();
         }
-
-        // DLSS 5 checkbox toggle
-        if (ctlId == IDC_CHK_DLSS)
+        else if (cmd == "setDlss")
         {
-            g_dlssEnabled = !g_dlssEnabled;
-            InvalidateRect(g_chkDlss, nullptr, TRUE);
+            g_dlssEnabled = msg.value("value", g_dlssEnabled);
             if (g_dlssEnabled)
                 SetStatus(L"VLSS5 etkin: Nöral iyileştirme devrede.");
             else
                 SetStatus(L"VLSS5 kapalı: Standart doğrudan görüntü modu.");
-            break;
         }
-
-        // Tam Ekran Yap checkbox toggle
-        if (ctlId == IDC_CHK_FULLSCREEN)
+        else if (cmd == "setFullscreen")
         {
-            g_fullscreenStretch = !g_fullscreenStretch;
-            InvalidateRect(g_chkFullscreen, nullptr, TRUE);
-
+            g_fullscreenStretch = msg.value("value", g_fullscreenStretch);
             ConfigManager::Get().Config().fullscreenStretch = g_fullscreenStretch;
             ConfigManager::Get().Save();
 
@@ -1199,24 +1071,13 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetStatus(L"Tam Ekran Yap etkin: Pencere, monitörün tamamına gerdirilecek.");
             else
                 SetStatus(L"Tam Ekran Yap kapalı: Overlay pencerenin kendi boyutunda kalacak.");
-            break;
         }
-
-        // Refresh window & GPU lists
-        if (ctlId == IDC_BTN_REFRESH)
+        else if (cmd == "setGpu")
         {
-            PopulateList(hwnd);
-            PopulateGpuList(hwnd);
-            SetStatus(L"Pencere ve GPU listesi güncellendi.");
-            break;
-        }
-
-        // GPU Selection change
-        if (ctlId == IDC_COMBO_GPU && HIWORD(wParam) == CBN_SELCHANGE)
-        {
-            int sel = static_cast<int>(SendMessageW(g_comboGpu, CB_GETCURSEL, 0, 0));
+            int sel = msg.value("index", -1);
             if (sel >= 0 && sel < static_cast<int>(g_gpuList.size()))
             {
+                g_selectedGpuIndex = sel;
                 const std::wstring& chosenName = g_gpuList[sel].name;
                 ConfigManager::Get().Config().selectedGpu = chosenName;
                 ConfigManager::Get().Save();
@@ -1228,25 +1089,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
                 std::wstring statusMsg;
                 if (chosenName == L"Auto")
-                {
                     statusMsg = L"Ekran/yakalama GPU: Otomatik (RTX Öncelikli)";
-                }
                 else
-                {
                     statusMsg = L"Ekran/yakalama GPU: " + g_gpuList[sel].displayName;
-                }
                 SetStatus(statusMsg.c_str());
                 DLSS_Log("[Main] GPU selection changed to: %ls", chosenName.c_str());
             }
-            break;
         }
-
-        // DLSS hesaplama GPU'su degisimi
-        if (ctlId == IDC_COMBO_DLSSGPU && HIWORD(wParam) == CBN_SELCHANGE)
+        else if (cmd == "setDlssGpu")
         {
-            int sel = static_cast<int>(SendMessageW(g_comboDlssGpu, CB_GETCURSEL, 0, 0));
+            int sel = msg.value("index", -1);
             if (sel >= 0 && sel < static_cast<int>(g_gpuList.size()))
             {
+                g_selectedDlssGpuIndex = sel;
                 const std::wstring& chosenName = g_gpuList[sel].name;
                 ConfigManager::Get().Config().dlssGpu = chosenName;
                 ConfigManager::Get().Save();
@@ -1275,91 +1130,776 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
                 SetStatus(statusMsg.c_str());
                 DLSS_Log("[Main] DLSS hesaplama GPU'su: %ls", chosenName.c_str());
             }
-            break;
         }
-
-        // DLSS GPU Help '?' button click
-        if (ctlId == IDC_BTN_DLSSGPU_HELP)
+        else if (cmd == "setCaptureBackend")
         {
-            MessageBoxW(
-                hwnd,
-                L"Sinir ağının (DLSS5) koşacağı kart.\n\n"
-                L"RTX bir kart gereklidir; AMD ve Intel kartlarda çalışmaz.\n\n"
-                L"Yakalama kartıyla AYNI seçilirse en düşük gecikmeyi alırsınız.\n\n"
-                L"FARKLI seçilirse her kare (giriş + hareket vektörü + çıkış) PCIe "
-                L"üzerinden taşınır. Bu, monitörü iGPU sürüyorsa mantıklıdır; iki güçlü "
-                L"kart arasında genellikle zarar eder.\n\n"
-                L"Değişiklik bir sonraki BAŞLAT'ta etkili olur.",
-                L"VLSS5 — DLSS Hesaplama GPU",
-                MB_ICONINFORMATION | MB_OK);
-            break;
+            // UI'da kilitli/devre disi -- JS normalde bunu hic gondermez, yine de
+            // savunmaci olarak, eski WM_COMMAND davranisiyla ayni sekilde islenir.
+            int sel = msg.value("index", 0);
+            ConfigManager::Get().Config().captureBackend = sel;
+            ConfigManager::Get().Save();
+
+            SetStatus((sel == 1)
+                ? L"Yakalama yöntemi: DXGI Desktop Duplication (Deneysel) — bir sonraki BAŞLAT'ta etkili olur"
+                : L"Yakalama yöntemi: WGC (Varsayılan) — bir sonraki BAŞLAT'ta etkili olur");
+            DLSS_Log("[Main] Yakalama yontemi degisti: %s", (sel == 1) ? "DXGI Desktop Duplication" : "WGC");
         }
-
-        // GPU Help '?' button click
-        if (ctlId == IDC_BTN_GPU_HELP)
+        else if (cmd == "startStop")
         {
-            MessageBoxW(
-                hwnd,
-                L"Bu kart ekranı yakalar ve overlay'i sunar.\n\n"
-                L"Monitörünüzü hangi kart sürüyorsa o seçilmelidir: tam ekran sunum, "
-                L"ekranı süren kartta olmak zorundadır.\n\n"
-                L"Sinir ağını başka bir karta vermek isterseniz bir alttaki "
-                L"\"DLSS Hesaplama GPU\" ayarını kullanın.",
-                L"VLSS5 — Ekran / Yakalama GPU",
-                MB_ICONINFORMATION | MB_OK);
-            break;
-        }
-
-        // RTSS Directory button click
-        if (ctlId == IDC_BTN_RTSS_SETTINGS)
-        {
-            RtssWindow::Show(hwnd);
-            break;
-        }
-
-        if (ctlId == IDC_BTN_HOTKEYS)
-        {
-            HotkeysWindow::Show(hwnd);
-            break;
-        }
-
-        // Start overlay
-        if (ctlId == IDC_BTN_START)
-        {
-            // Zaten calisiyorsa yeniden BASLATMA — ic ice Run() dongusu acilirdi.
-            // Bunun yerine butonu DURDUR olarak kullan.
+            // Zaten calisiyorsa yeniden BASLATMA -- ic ice Run() dongusu acilirdi.
             if (IsOverlayRunning())
             {
                 g_app->RequestStop();
                 SetStatus(L"Overlay durduruluyor...");
-                break;
             }
-
-            int sel = static_cast<int>(SendMessageW(g_listBox, LB_GETCURSEL, 0, 0));
-            if (sel == LB_ERR || sel >= static_cast<int>(g_windows.size()))
+            else if (!NvngxDlssnrExists())
             {
-                SetStatus(L"Lütfen listeden bir pencere seçin.");
-                break;
+                // Bkz. dllStatusBar (Ana Sayfa) -- JS tarafi zaten BASLAT'i
+                // devre disi birakiyor, burasi sadece savunmaci ikinci kontrol.
+                SetStatus(L"nvngx_dlssnr.dll bulunamadı -- lütfen üstteki alana sürükleyip bırakın.");
+            }
+            else
+            {
+                int sel = msg.value("targetId", g_selectedTargetIndex);
+                if (sel < 0 || sel >= static_cast<int>(g_windows.size()))
+                {
+                    SetStatus(L"Lütfen listeden bir pencere seçin.");
+                }
+                else
+                {
+                    g_selectedTargetIndex = sel;
+                    if (g_windows[sel].monitor)
+                        StartCaptureWithMonitor(hwnd, g_windows[sel].monitor);
+                    else
+                        StartCaptureWithTarget(hwnd, g_windows[sel].hwnd);
+                }
+            }
+        }
+        else if (cmd == "openSettings")
+        {
+            // "Varsayılan VLSS5 Ayarları" penceresi SADECE yakalama calismiyorken
+            // acilabilir -- bkz. eski IDC_BTN_DLSS_SETTINGS yorumu (mukerrer/
+            // belirsiz on ayar duzenleme durumunu onlemek icin).
+            //
+            // KRITIK: SettingsWindow::Toggle() (ilk acilista) yeni bir WebView2
+            // controller'i (CreatePopup) OLUSTURUR. Bunu burada, ana pencerenin
+            // KENDI WebView2 WebMessageReceived callback'i ICINDEN senkron
+            // cagirmak WebView2'nin ic-ice (reentrant) async COM cagrisini hic
+            // TAMAMLAMAMASINA yol aciyor -- yeni pencere 10 saniye timeout'a
+            // girip sonunda dumduz SIYAH kaliyor (controller hic olusmuyor).
+            // Cozum: gercek cagriyi WM_APP+4 ile ertele, boylece bu callback'in
+            // cagri yigininin TAMAMEN disina cikip normal mesaj dongusune
+            // dondukten sonra calissin.
+            if (!IsOverlayRunning())
+                PostMessageW(hwnd, WM_APP + 4, 0, 0);
+        }
+        else if (cmd == "openRtss")
+        {
+            PostMessageW(hwnd, WM_APP + 4, 1, 0);
+        }
+        else if (cmd == "openHotkeys")
+        {
+            PostMessageW(hwnd, WM_APP + 4, 2, 0);
+        }
+        else if (cmd == "openPresets")
+        {
+            PostMessageW(hwnd, WM_APP + 4, 3, 0);
+        }
+        else if (cmd == "help")
+        {
+            std::string topic = msg.value("topic", "");
+            if (topic == "gpu")
+            {
+                MessageBoxW(
+                    hwnd,
+                    L"Bu kart ekranı yakalar ve overlay'i sunar.\n\n"
+                    L"Monitörünüzü hangi kart sürüyorsa o seçilmelidir: tam ekran sunum, "
+                    L"ekranı süren kartta olmak zorundadır.\n\n"
+                    L"Sinir ağını başka bir karta vermek isterseniz bir alttaki "
+                    L"\"DLSS Hesaplama GPU\" ayarını kullanın.",
+                    L"VLSS5 — Ekran / Yakalama GPU",
+                    MB_ICONINFORMATION | MB_OK);
+            }
+            else if (topic == "dlssGpu")
+            {
+                MessageBoxW(
+                    hwnd,
+                    L"Sinir ağının (DLSS5) koşacağı kart.\n\n"
+                    L"RTX bir kart gereklidir; AMD ve Intel kartlarda çalışmaz.\n\n"
+                    L"Yakalama kartıyla AYNI seçilirse en düşük gecikmeyi alırsınız.\n\n"
+                    L"FARKLI seçilirse her kare (giriş + hareket vektörü + çıkış) PCIe "
+                    L"üzerinden taşınır. Bu, monitörü iGPU sürüyorsa mantıklıdır; iki güçlü "
+                    L"kart arasında genellikle zarar eder.\n\n"
+                    L"Değişiklik bir sonraki BAŞLAT'ta etkili olur.",
+                    L"VLSS5 — DLSS Hesaplama GPU",
+                    MB_ICONINFORMATION | MB_OK);
+            }
+            else if (topic == "captureBackend")
+            {
+                MessageBoxW(
+                    hwnd,
+                    L"WGC (Windows.Graphics.Capture): Varsayılan. Her durumda çalışır.\n\n"
+                    L"DXGI Desktop Duplication (Deneysel): Pencere modunda WGC'nin bazen bulanıklaştırdığı "
+                    L"görüntüyü keskinleştirir. Sadece ekranı süren kartla aynı adaptörde çalışır; "
+                    L"başlatılamazsa VLSS5 otomatik olarak WGC'ye döner (log'da görürsünüz).\n\n"
+                    L"Pencere üzerine gelen başka bir pencere (bildirim, alt-tab vb.) o kareyi atlatır, "
+                    L"eski görüntü kalır -- kirli kare gösterilmez.\n\n"
+                    L"Değişiklik bir sonraki BAŞLAT'ta etkili olur.",
+                    L"VLSS5 — Yakalama Yöntemi",
+                    MB_ICONINFORMATION | MB_OK);
+            }
+        }
+        // -------------------------------------------------------------
+        // Faz 3: "Ayarlar" sekmesi (bkz. SettingsWindow::OnWebMessage'daki
+        // "getConfig"/"setConfig"/"listPresets"/"loadPreset" dallariyla AYNI
+        // mantik). Bu sekme SADECE yakalama calismiyorken kullanilabilir
+        // (bkz. plan section 4 notu) -- bu yuzden SettingsWindowHasActiveTarget
+        // dalina hic girmeden HER ZAMAN ConfigManager::Get().Save() kullanilir.
+        // -------------------------------------------------------------
+        else if (cmd == "settingsGetConfig")
+        {
+            const auto& cfg = ConfigManager::Get().Config();
+            json data;
+            data["style"]           = cfg.style;
+            data["preset"]          = cfg.preset;
+            data["intensity"]       = cfg.intensity;
+            data["boostFactor"]     = cfg.boostFactor;
+            data["localStructure"]  = cfg.localStructure;
+            data["localTone"]       = cfg.localTone;
+            data["skinStructure"]   = cfg.skinStructure;
+            data["resolutionScale"] = cfg.resolutionScale;
+            data["passCount"]       = cfg.passCount;
+            data["passFalloff"]     = cfg.passFalloff;
+            data["useAutoMask"]     = cfg.useAutoMask;
+            data["opticalFlow"]     = cfg.opticalFlow;
+            data["splitScreen"]     = cfg.splitScreen;
+            data["splitPos"]        = cfg.splitPos;
+
+            json out;
+            out["type"] = "settingsConfig";
+            out["data"] = data;
+            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
+        }
+        else if (cmd == "settingsListPresets")
+        {
+            auto entries = PresetsManager::Get().ListPresets();
+            json arr = json::array();
+            for (auto& e : entries)
+            {
+                json item;
+                item["folder"]      = ToUtf8(e.folderName);
+                item["displayName"] = ToUtf8(e.displayName);
+                arr.push_back(item);
+            }
+            json out;
+            out["type"] = "settingsPresetList";
+            out["data"] = arr;
+            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
+        }
+        else if (cmd == "settingsSetConfig")
+        {
+            // KRITIK: yakalama calisirken bu sekme JS tarafinda GIZLENMEZ/kapatilmaz
+            // (pencere sadece minimize edilir, kullanici taskbar'dan geri getirip
+            // yine de dokunabilir). ConfigManager::Get().Config() render motorunun
+            // HER KARE dogrudan okudugu TEK PAYLASIMLI struct -- buraya yazmak,
+            // "varsayilan" niyetiyle yapilsa bile o an yakalanan hedefin (kendi
+            // kayitli on ayari olsa DAHI) canli goruntusunu aninda degistiriyordu.
+            // Yakalama surerken bu sekmeden gelen degisiklikleri sessizce reddet.
+            if (IsOverlayRunning())
+            {
+                SetStatus(L"Yakalama sürerken Varsayılan Ayarlar değiştirilemez.");
+                return;
+            }
+            if (msg.contains("data"))
+            {
+                auto& d = msg["data"];
+                auto& cfg = ConfigManager::Get().Config();
+
+                cfg.style           = d.value("style", cfg.style);
+                cfg.preset          = d.value("preset", cfg.preset);
+                cfg.intensity       = d.value("intensity", cfg.intensity);
+                cfg.boostFactor     = std::clamp(d.value("boostFactor", cfg.boostFactor), 1.0f, 2.5f);
+                cfg.localStructure  = d.value("localStructure", cfg.localStructure);
+                cfg.localTone       = d.value("localTone", cfg.localTone);
+                cfg.skinStructure   = d.value("skinStructure", cfg.skinStructure);
+                if (cfg.skinStructure <= -0.99f) cfg.skinStructure = -1.0f;
+                cfg.resolutionScale = d.value("resolutionScale", cfg.resolutionScale);
+                cfg.passCount       = std::clamp(d.value("passCount", cfg.passCount), 1, 4);
+                cfg.passFalloff     = std::clamp(d.value("passFalloff", cfg.passFalloff), 0.25f, 1.0f);
+                cfg.useAutoMask     = d.value("useAutoMask", cfg.useAutoMask);
+                cfg.opticalFlow     = d.value("opticalFlow", cfg.opticalFlow);
+                cfg.splitScreen     = d.value("splitScreen", cfg.splitScreen);
+                cfg.splitPos        = std::clamp(d.value("splitPos", cfg.splitPos), 0.0f, 1.0f);
+
+                // Bu sekme sadece yakalama calismiyorken kullanilabilir --
+                // SettingsWindow'daki "aktif hedef on ayarina yaz" dalina
+                // hic gerek yok, her zaman global config'e kaydedilir.
+                ConfigManager::Get().Save();
+            }
+        }
+        else if (cmd == "settingsLoadPreset")
+        {
+            // Ayni gerekce: bkz. settingsSetConfig -- yakalama surerken burasi
+            // canli ConfigManager struct'ina yazip aktif hedefi bozmasin.
+            if (IsOverlayRunning())
+            {
+                SetStatus(L"Yakalama sürerken Varsayılan Ayarlar değiştirilemez.");
+                return;
+            }
+            std::string folder = msg.value("folder", "");
+            if (!folder.empty())
+            {
+                Dlss5Config loaded;
+                if (PresetsManager::Get().LoadPresetConfig(FromUtf8(folder), loaded))
+                {
+                    auto& cfg = ConfigManager::Get().Config();
+                    cfg.style           = loaded.style;
+                    cfg.preset          = loaded.preset;
+                    cfg.intensity       = loaded.intensity;
+                    cfg.boostFactor     = loaded.boostFactor;
+                    cfg.localStructure  = loaded.localStructure;
+                    cfg.localTone       = loaded.localTone;
+                    cfg.skinStructure   = loaded.skinStructure;
+                    cfg.resolutionScale = loaded.resolutionScale;
+                    cfg.passCount       = loaded.passCount;
+                    cfg.passFalloff     = loaded.passFalloff;
+                    cfg.useAutoMask     = loaded.useAutoMask;
+                    cfg.opticalFlow     = loaded.opticalFlow;
+                    cfg.splitScreen     = loaded.splitScreen;
+                    cfg.splitPos        = loaded.splitPos;
+
+                    ConfigManager::Get().Save();
+
+                    json data;
+                    data["style"]           = cfg.style;
+                    data["preset"]          = cfg.preset;
+                    data["intensity"]       = cfg.intensity;
+                    data["boostFactor"]     = cfg.boostFactor;
+                    data["localStructure"]  = cfg.localStructure;
+                    data["localTone"]       = cfg.localTone;
+                    data["skinStructure"]   = cfg.skinStructure;
+                    data["resolutionScale"] = cfg.resolutionScale;
+                    data["passCount"]       = cfg.passCount;
+                    data["passFalloff"]     = cfg.passFalloff;
+                    data["useAutoMask"]     = cfg.useAutoMask;
+                    data["opticalFlow"]     = cfg.opticalFlow;
+                    data["splitScreen"]     = cfg.splitScreen;
+                    data["splitPos"]        = cfg.splitPos;
+
+                    json out;
+                    out["type"] = "settingsConfig";
+                    out["data"] = data;
+                    if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
+                }
+            }
+        }
+        // -------------------------------------------------------------
+        // Faz 3: "RTSS Ayarları" sekmesi (bkz. RtssWindow::DispatchMessage
+        // ile AYNI mantik).
+        // -------------------------------------------------------------
+        else if (cmd == "rtssGetDir")
+        {
+            std::wstring dir = ConfigManager::Get().Config().rtssDirectory;
+            std::wstring shown = dir.empty() ? (L"(Varsayılan) " + RTSSManager::Get().GetProfilesDir()) : dir;
+
+            wchar_t buf[440] = {};
+            wcsncpy_s(buf, shown.c_str(), _TRUNCATE);
+            PathCompactPathExW(buf, shown.c_str(), 70, 0);
+
+            json out;
+            out["type"] = "rtssDir";
+            out["data"] = ToUtf8(buf);
+            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
+        }
+        else if (cmd == "rtssListProfiles")
+        {
+            json arr = json::array();
+            for (const auto& prof : RTSSManager::Get().GetProfiles())
+                arr.push_back(ToUtf8(prof));
+
+            json out;
+            out["type"] = "rtssProfileList";
+            out["data"] = arr;
+            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
+        }
+        else if (cmd == "rtssBrowseFolder")
+        {
+            IFileDialog* pfd = nullptr;
+            if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd))))
+            {
+                DWORD dwOptions;
+                if (SUCCEEDED(pfd->GetOptions(&dwOptions))) pfd->SetOptions(dwOptions | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
+                if (SUCCEEDED(pfd->Show(hwnd)))
+                {
+                    IShellItem* psi = nullptr;
+                    if (SUCCEEDED(pfd->GetResult(&psi)))
+                    {
+                        PWSTR pszPath = nullptr;
+                        if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &pszPath)))
+                        {
+                            ConfigManager::Get().Config().rtssDirectory = pszPath;
+                            ConfigManager::Get().Save();
+                            CoTaskMemFree(pszPath);
+
+                            // rtssListProfiles + rtssGetDir esdegeri: guncel
+                            // klasoru/profilleri hemen JS'e geri bas.
+                            json arr = json::array();
+                            for (const auto& prof : RTSSManager::Get().GetProfiles())
+                                arr.push_back(ToUtf8(prof));
+                            json outProfiles;
+                            outProfiles["type"] = "rtssProfileList";
+                            outProfiles["data"] = arr;
+                            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(outProfiles.dump()));
+
+                            std::wstring dir = ConfigManager::Get().Config().rtssDirectory;
+                            wchar_t buf[440] = {};
+                            wcsncpy_s(buf, dir.c_str(), _TRUNCATE);
+                            PathCompactPathExW(buf, dir.c_str(), 70, 0);
+                            json outDir;
+                            outDir["type"] = "rtssDir";
+                            outDir["data"] = ToUtf8(buf);
+                            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(outDir.dump()));
+                        }
+                        psi->Release();
+                    }
+                }
+                pfd->Release();
+            }
+        }
+        else if (cmd == "rtssDeleteProfile")
+        {
+            std::wstring name = FromUtf8(msg.value("name", std::string()));
+            if (!name.empty())
+            {
+                std::wstring dispMsg = L"\"" + name + L"\" profili silinsin mi?";
+                if (ConfirmDialog::AskYesNo(hwnd, L"VLSS5 - Profili Sil",
+                        L"Bu RTSS profilini silmek istediğinizden emin misiniz?", dispMsg.c_str(),
+                        L"Evet", L"Hayır", /*defaultIsYes*/false, /*warningIcon*/true))
+                {
+                    std::wstring cfgPath = RTSSManager::Get().GetProfilesDir() + L"\\" + name + L".cfg";
+                    DeleteFileW(cfgPath.c_str());
+                    RTSSManager::Get().NotifyRTSS();
+
+                    json arr = json::array();
+                    for (const auto& prof : RTSSManager::Get().GetProfiles())
+                        arr.push_back(ToUtf8(prof));
+                    json out;
+                    out["type"] = "rtssProfileList";
+                    out["data"] = arr;
+                    if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
+                }
+            }
+        }
+        // -------------------------------------------------------------
+        // Faz 3: "Ön Ayarlar" sekmesi (bkz. PresetsWindow::DispatchMessage
+        // ile AYNI mantik).
+        // -------------------------------------------------------------
+        else if (cmd == "presetsList")
+        {
+            g_presetsTabCache = PresetsManager::Get().ListPresets();
+            json arr = json::array();
+            for (auto& e : g_presetsTabCache)
+            {
+                json item;
+                item["folder"]      = ToUtf8(e.folderName);
+                item["displayName"] = ToUtf8(e.displayName);
+                arr.push_back(item);
+            }
+            json out;
+            out["type"] = "presetsPresetList";
+            out["data"] = arr;
+            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
+        }
+        else if (cmd == "presetsOpenFolder")
+        {
+            std::wstring dir = PresetsManager::Get().GetPresetsRootDir();
+            ShellExecuteW(hwnd, L"open", dir.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        }
+        else if (cmd == "presetsDeletePreset")
+        {
+            std::wstring folder = FromUtf8(msg.value("folder", std::string()));
+            if (!folder.empty())
+            {
+                auto it = std::find_if(g_presetsTabCache.begin(), g_presetsTabCache.end(),
+                    [&](const PresetEntry& e) { return e.folderName == folder; });
+                std::wstring displayName = (it != g_presetsTabCache.end()) ? it->displayName : folder;
+
+                std::wstring dispMsg = L"\"" + displayName + L"\" silinsin mi?";
+                if (ConfirmDialog::AskYesNo(hwnd, L"VLSS5 - Ön Ayarı Sil",
+                        L"Bu ön ayarı silmek istediğinizden emin misiniz?", dispMsg.c_str(),
+                        L"Evet", L"Hayır", /*defaultIsYes*/false, /*warningIcon*/true))
+                {
+                    PresetsManager::Get().DeletePreset(folder);
+
+                    g_presetsTabCache = PresetsManager::Get().ListPresets();
+                    json arr = json::array();
+                    for (auto& e : g_presetsTabCache)
+                    {
+                        json item;
+                        item["folder"]      = ToUtf8(e.folderName);
+                        item["displayName"] = ToUtf8(e.displayName);
+                        arr.push_back(item);
+                    }
+                    json out;
+                    out["type"] = "presetsPresetList";
+                    out["data"] = arr;
+                    if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
+                }
+            }
+        }
+        // -------------------------------------------------------------
+        // Faz 3: "Tuşları Değiştir" sekmesi -- WH_KEYBOARD_LL hook mekanizmasi
+        // HotkeysWindow'un KENDI statik uyeleri uzerinde calisiyor; burada
+        // TEKRAR YAZILMAZ, dogrudan (artik public olan) StartKeybindCapture
+        // cagrilir. Sonuc HotkeysWindow::SetExternalKeyCapturedCallback ile
+        // WinMain'de bir kez baglanan geri cagirma uzerinden g_mainWebView'e
+        // asenkron olarak (RebindKeyboardProc -> EndKeybindCapture) geri doner.
+        // -------------------------------------------------------------
+        else if (cmd == "hotkeysGetHotkeys")
+        {
+            PushHotkeysTabListToJs();
+        }
+        else if (cmd == "hotkeysStartCapture")
+        {
+            int id = msg.value("hotkeyId", -1);
+            HotkeysWindow::StartKeybindCapture(id);
+        }
+        // -------------------------------------------------------------
+        // "Güncellemeler" sekmesi (bkz. UpdateChecker.h/.cpp, PushUpdatesStateToJs).
+        // -------------------------------------------------------------
+        else if (cmd == "updatesGetState")
+        {
+            PushUpdatesStateToJs();
+        }
+        else if (cmd == "updatesSetAutoCheck")
+        {
+            bool value = msg.value("value", true);
+            ConfigManager::Get().Config().autoCheckUpdates = value;
+            ConfigManager::Get().Save();
+            PushUpdatesStateToJs();
+        }
+        else if (cmd == "updatesCheckNow")
+        {
+            StartUpdatesCheck(hwnd, /*silentStartupCheck*/false);
+        }
+        else if (cmd == "updatesDownload")
+        {
+            std::wstring url  = FromUtf8(msg.value("url", std::string()));
+            std::wstring name = FromUtf8(msg.value("name", std::string()));
+            StartUpdatesDownload(hwnd, url, name);
+        }
+        // -------------------------------------------------------------
+        // nvngx_dlssnr.dll surukle-birak yuklemesi (bkz. Ana Sayfa dllStatusBar,
+        // web/main/app.js uploadNvngxDlssnr). WebView2 suruklenen dosyanin
+        // gercek yolunu vermedigi icin icerik PARCALAR halinde base64 ile
+        // akitiliyor -- bkz. Base64Decode.
+        // -------------------------------------------------------------
+        else if (cmd == "nvngxDropBegin")
+        {
+            std::wstring name = FromUtf8(msg.value("name", std::string()));
+            for (auto& ch : name) ch = towlower(ch);
+
+            if (g_nvngxUploadFile != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(g_nvngxUploadFile);
+                g_nvngxUploadFile = INVALID_HANDLE_VALUE;
             }
 
-            HWND target = g_windows[sel].hwnd;
-            StartCaptureWithTarget(hwnd, target);
-            break;
-        }
+            if (name != L"nvngx_dlssnr.dll")
+            {
+                json out; out["type"] = "nvngxDropResult";
+                json d; d["ok"] = false; d["error"] = "Sadece nvngx_dlssnr.dll kabul edilir.";
+                out["data"] = d;
+                if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
+                return;
+            }
 
-        // DLSS 5 Settings window toggle
-        if (ctlId == IDC_BTN_DLSS_SETTINGS)
+            g_nvngxUploadTempPath     = GetNvngxDlssnrPath() + L".part";
+            g_nvngxUploadFile         = CreateFileW(g_nvngxUploadTempPath.c_str(), GENERIC_WRITE, 0, nullptr,
+                                                     CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+            g_nvngxUploadExpectedSize = msg.value("size", static_cast<uint64_t>(0));
+            g_nvngxUploadReceivedSize = 0;
+            g_nvngxUploadNextSeq      = 0;
+
+            if (g_nvngxUploadFile == INVALID_HANDLE_VALUE)
+            {
+                json out; out["type"] = "nvngxDropResult";
+                json d; d["ok"] = false; d["error"] = "Geçici dosya oluşturulamadı.";
+                out["data"] = d;
+                if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
+            }
+        }
+        else if (cmd == "nvngxDropChunk")
         {
-            SettingsWindow::Toggle(hwnd);
-            break;
+            if (g_nvngxUploadFile == INVALID_HANDLE_VALUE) return;
+
+            int seq = msg.value("seq", -1);
+            if (seq != g_nvngxUploadNextSeq)
+            {
+                CloseHandle(g_nvngxUploadFile);
+                g_nvngxUploadFile = INVALID_HANDLE_VALUE;
+                DeleteFileW(g_nvngxUploadTempPath.c_str());
+
+                json out; out["type"] = "nvngxDropResult";
+                json d; d["ok"] = false; d["error"] = "Aktarım sırası bozuldu, tekrar deneyin.";
+                out["data"] = d;
+                if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
+                return;
+            }
+
+            auto bytes = Base64Decode(msg.value("dataB64", std::string()));
+            DWORD written = 0;
+            WriteFile(g_nvngxUploadFile, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
+            g_nvngxUploadReceivedSize += written;
+            g_nvngxUploadNextSeq++;
+        }
+        else if (cmd == "nvngxDropEnd")
+        {
+            bool ok = false;
+            std::wstring error;
+
+            if (g_nvngxUploadFile != INVALID_HANDLE_VALUE)
+            {
+                CloseHandle(g_nvngxUploadFile);
+                g_nvngxUploadFile = INVALID_HANDLE_VALUE;
+
+                if (g_nvngxUploadExpectedSize != 0 && g_nvngxUploadReceivedSize != g_nvngxUploadExpectedSize)
+                {
+                    error = L"Dosya boyutu uyuşmadı, aktarım bozuk olabilir.";
+                    DeleteFileW(g_nvngxUploadTempPath.c_str());
+                }
+                else
+                {
+                    std::wstring finalPath = GetNvngxDlssnrPath();
+                    DeleteFileW(finalPath.c_str()); // eskisi varsa uzerine yazabilmek icin
+                    if (MoveFileW(g_nvngxUploadTempPath.c_str(), finalPath.c_str()))
+                    {
+                        ok = true;
+                        DLSS_Log("[Main] nvngx_dlssnr.dll surukle-birak ile eklendi (%llu bayt).",
+                                 static_cast<unsigned long long>(g_nvngxUploadReceivedSize));
+                    }
+                    else
+                    {
+                        error = L"Dosya taşınamadı (hata=" + std::to_wstring(GetLastError()) + L").";
+                    }
+                }
+            }
+            else
+            {
+                error = L"Aktarım durumu bulunamadı.";
+            }
+
+            json out; out["type"] = "nvngxDropResult";
+            json d; d["ok"] = ok;
+            if (!ok) d["error"] = ToUtf8(error);
+            out["data"] = d;
+            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
+
+            if (ok) PushStateToJs(); // BASLAT butonu/durum cubugu aninda guncellensin
+        }
+    }
+    catch (...) { /* Hatali/beklenmedik JSON alani -- bu mesaji yoksay, uygulamayi cokertme. */ }
+}
+
+// ---------------------------------------------------------------------------
+// WndProc
+// ---------------------------------------------------------------------------
+static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg)
+    {
+    case WM_CREATE:
+    {
+        g_mainHwnd = hwnd;
+
+        g_fullscreenStretch = ConfigManager::Get().Config().fullscreenStretch;
+
+        // Faz 2: istemci alanini tamamen kaplayan gomulu WebView2 kontrolu.
+        // WebViewHost::EnsureEnvironment zaten WinMain'de SettingsWindow::Initialize
+        // (vb.) tarafindan bu pencere yaratilmadan ONCE cagrildi -- ortam hazir.
+        //
+        // KRITIK: CreateCoreWebView2Controller BURADA (WM_CREATE icinde) COK ERKEN --
+        // pencere WinMain henuz ShowWindow(SW_SHOW) cagirmadigi icin HALA GORUNMEZ.
+        // Bu durumda WebView2'nin dahili DirectComposition gorsel agaci pencereye
+        // hicbir zaman duzgun baglanmiyor; kontrolor/navigasyon "basarili" rapor
+        // etse (ve put_DefaultBackgroundColor bile "basarili" dese) BILE ekranda
+        // SONSUZA KADAR bembeyaz kaliyor -- 4 popup pencere bunu YASAMIYOR cunku
+        // onlar WS_POPUP | WS_VISIBLE ile, yani zaten GORUNUR halde olusturuluyor.
+        // Cozum: gercek CreateEmbedded cagrisini, pencere WinMain'de ShowWindow ile
+        // gosterildikten SONRAYA ertelemek -- kendimize postaladigimiz WM_APP+3
+        // mesaji, ShowWindow/UpdateWindow bittikten SONRA, ana mesaj dongusu
+        // basladiginda islenecek.
+        g_mainWebView = std::make_unique<WebViewHost>();
+        PostMessageW(hwnd, WM_APP + 3, 0, 0);
+
+        // Global hotkey registration & fallback timer
+        RegisterAppHotkey(hwnd);
+        SetTimer(hwnd, IDT_HOTKEY_TIMER, 50, nullptr);
+
+        // Populate initial lists (veri hazirla -- JS'e push WM_APP+3'te olacak)
+        PopulateList(hwnd);
+        PopulateGpuList(hwnd);
+        break;
+    }
+
+    case WM_APP + 3:
+    {
+        // Bkz. WM_CREATE'teki aciklama: pencere artik WinMain'de ShowWindow ile
+        // gosterilmis olmali (mesaj kuyruga ShowWindow'dan SONRA girdi) -- WebView2
+        // kontrolunu simdi guvenle olusturabiliriz.
+        if (g_mainWebView)
+        {
+            g_mainWebView->CreateEmbedded(hwnd, L"vlss5.main",
+                ExeDirWebFolder(L"main").c_str(), L"index.html", &OnMainWebMessage);
+            PushStateToJs();
+        }
+        break;
+    }
+
+    case WM_SIZE:
+    {
+        if (g_mainWebView)
+        {
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            g_mainWebView->Resize(rc);
         }
         break;
     }
 
     case WM_APP + 1:
     {
+        // HotkeysWindow'dan rebind bildirimi -- hotkey'i yeniden kaydet ve
+        // guncel etiketleri (RefreshStartButton == PushStateToJs) JS'e it.
         RegisterAppHotkey(hwnd);
-        InvalidateRect(hwnd, nullptr, TRUE);
+        RefreshStartButton();
+        break;
+    }
+
+    case WM_APP + 4:
+    {
+        // Bkz. OnMainWebMessage'daki openSettings/openRtss/openHotkeys/openPresets
+        // aciklamasi: alt pencereleri burada, ana webview'in WebMessageReceived
+        // callback'inin TAMAMEN disinda acariz -- boylece CreatePopup'in kendi
+        // ic-ice WebView2 controller olusturma cagrisi asla reentrant bir COM
+        // cagrisi icinde takilip 10sn timeout'a girip siyah kalmiyor.
+        switch (static_cast<int>(wParam))
+        {
+        case 0: SettingsWindow::Toggle(hwnd); break;
+        case 1: RtssWindow::Show(hwnd);       break;
+        case 2: HotkeysWindow::Show(hwnd);    break;
+        case 3: PresetsWindow::Show(hwnd);    break;
+        }
+        break;
+    }
+
+    case WM_APP_UPDATES_FETCH_DONE:
+    {
+        // Bkz. StartUpdatesCheck: FetchLatestReleases arka plan thread'inde
+        // calisti, sonuc heap'te bize devredildi -- sahiplik burada, tek
+        // cikis yolunda delete edilir.
+        std::unique_ptr<UpdateChecker::FetchResult> result(
+            reinterpret_cast<UpdateChecker::FetchResult*>(lParam));
+        bool silentStartupCheck = (wParam == 1);
+
+        g_updatesChecking = false;
+        if (result->ok)
+        {
+            g_updatesCache = result->releases;
+            g_updatesLastError.clear();
+            g_updatesLatestTag = g_updatesCache.empty() ? L"" : g_updatesCache.front().tag;
+            g_updatesHasNewer = !g_updatesLatestTag.empty() &&
+                UpdateChecker::CompareVersions(g_updatesLatestTag, VLSS5_VERSION_STRING) > 0;
+        }
+        else
+        {
+            g_updatesLastError = result->error;
+            DLSS_Log("[Updates] Surum kontrolu basarisiz: %ls", result->error.c_str());
+        }
+        PushUpdatesStateToJs();
+
+        if (silentStartupCheck && g_updatesHasNewer)
+        {
+            std::wstring mainInstruction = L"Yeni güncelleme mevcut: " + g_updatesLatestTag + L". İndirilip kurulsun mu?";
+            std::wstring content = L"Mevcut sürümünüz: " + std::wstring(VLSS5_VERSION_STRING);
+
+            if (ConfirmDialog::AskYesNo(hwnd, L"VLSS5 - Güncelleme Mevcut",
+                    mainInstruction.c_str(), content.c_str(),
+                    L"Evet", L"Hayır", /*defaultIsYes*/true, /*warningIcon*/false))
+            {
+                if (!g_updatesCache.empty())
+                {
+                    if (const auto* asset = UpdateChecker::PickBestAsset(g_updatesCache.front()))
+                        StartUpdatesDownload(hwnd, asset->downloadUrl, asset->name);
+                }
+            }
+        }
+        break;
+    }
+
+    case WM_APP_UPDATES_DL_PROGRESS:
+    {
+        std::unique_ptr<UpdateChecker::DownloadProgress> prog(
+            reinterpret_cast<UpdateChecker::DownloadProgress*>(lParam));
+        if (g_mainWebView)
+        {
+            json data;
+            data["received"] = prog->received;
+            data["total"]    = prog->total;
+            json msg;
+            msg["type"] = "updatesDownloadProgress";
+            msg["data"] = data;
+            g_mainWebView->PostJson(FromUtf8(msg.dump()));
+        }
+        break;
+    }
+
+    case WM_APP_UPDATES_DL_DONE:
+    {
+        std::unique_ptr<std::wstring> pathOrError(reinterpret_cast<std::wstring*>(lParam));
+        bool ok = (wParam == 1);
+        g_updatesDownloading = false;
+
+        json data;
+        data["ok"] = ok;
+        if (ok)
+        {
+            data["path"] = ToUtf8(*pathOrError);
+
+            std::wstring fileName = *pathOrError;
+            size_t slash = fileName.find_last_of(L"\\/");
+            if (slash != std::wstring::npos) fileName = fileName.substr(slash + 1);
+
+            if (UpdateChecker::IsAutoInstallableAsset(fileName))
+            {
+                // Yeni surumler (bkz. installer/VLSS5.iss + .github/workflows/release.yml):
+                // Setup.exe -- sessizce kur, VLSS5'i kapat, installer kurulum
+                // bitince otomatik yeniden baslatir. Elle mudahale YOK.
+                data["autoInstalling"] = true;
+                LaunchSilentInstallAndExit(hwnd, *pathOrError);
+            }
+            else
+            {
+                // Eski surumlerin .rar asset'i (henuz yeni Setup.exe pipeline'iyla
+                // yayimlanmamis) -- otomatik kuramayiz, kullanicinin varsayilan
+                // arsiv programina devrediyoruz (bkz. presetsOpenFolder ile ayni desen).
+                ShellExecuteW(hwnd, L"open", pathOrError->c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+            }
+        }
+        else
+        {
+            data["error"] = ToUtf8(*pathOrError);
+            DLSS_Log("[Updates] Indirme basarisiz: %ls", pathOrError->c_str());
+        }
+
+        if (g_mainWebView)
+        {
+            json msg;
+            msg["type"] = "updatesDownloadDone";
+            msg["data"] = data;
+            g_mainWebView->PostJson(FromUtf8(msg.dump()));
+        }
+        PushUpdatesStateToJs();
         break;
     }
 
@@ -1389,18 +1929,12 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         KillTimer(hwnd, IDT_HOTKEY_TIMER);
         UnregisterAppHotkey(hwnd);
         InputForwarder::EndCapture();
-        if (g_fontNormal)   { DeleteObject(g_fontNormal);   g_fontNormal   = nullptr; }
-        if (g_fontTitle)    { DeleteObject(g_fontTitle);    g_fontTitle    = nullptr; }
-        if (g_fontSubtitle) { DeleteObject(g_fontSubtitle); g_fontSubtitle = nullptr; }
-        if (g_fontBold)     { DeleteObject(g_fontBold);     g_fontBold     = nullptr; }
-        if (g_fontSmall)    { DeleteObject(g_fontSmall);    g_fontSmall    = nullptr; }
 
-        if (g_brBg)         { DeleteObject(g_brBg);         g_brBg         = nullptr; }
-        if (g_brCard)       { DeleteObject(g_brCard);       g_brCard       = nullptr; }
-        if (g_brBorder)     { DeleteObject(g_brBorder);     g_brBorder     = nullptr; }
-        if (g_brNeon)       { DeleteObject(g_brNeon);       g_brNeon       = nullptr; }
-        if (g_hLogoHeader)  { DestroyIcon(g_hLogoHeader);   g_hLogoHeader  = nullptr; }
-        if (g_tipGpuHelp)   { DestroyWindow(g_tipGpuHelp);  g_tipGpuHelp   = nullptr; }
+        // WebView2 controller/webview COM nesnelerini ana pencere yok edilmeden
+        // once temiz birak. WebViewHost::CreateEmbedded m_embedded=true kurdugu
+        // icin destructor bu asamada DestroyWindow(hwnd) -- COKTAN yikilmakta
+        // olan bu ayni pencereyi -- CAGIRMAZ -- bkz. WebViewHost.cpp.
+        g_mainWebView.reset();
 
         PostQuitMessage(0);
         break;
@@ -1469,25 +2003,20 @@ void CheckRequiredFiles()
 
     wchar_t file1[MAX_PATH] = {};
     PathCombineW(file1, exePath, L"nvngx.dll_dlssnr.dll");
-    
-    wchar_t file2[MAX_PATH] = {};
-    PathCombineW(file2, exePath, L"nvngx_dlssnr.dll");
 
     if (GetFileAttributesW(file1) == INVALID_FILE_ATTRIBUTES)
     {
-        MessageBoxW(nullptr, 
-            L"Önemli bir dll dosyası ana klasörde bulunamadı! nvngx.dll_dllsnr.dll dosyasını lütfen geri yükleyin. Bu dosya DLSS5 dosyası değildir, programa ait bir .dll'dir ve programın yanında olmak zorundadır.", 
+        MessageBoxW(nullptr,
+            L"Önemli bir dll dosyası ana klasörde bulunamadı! nvngx.dll_dllsnr.dll dosyasını lütfen geri yükleyin. Bu dosya DLSS5 dosyası değildir, programa ait bir .dll'dir ve programın yanında olmak zorundadır.",
             L"VLSS5 Hata", MB_ICONERROR | MB_OK | MB_TOPMOST);
         ExitProcess(1);
     }
 
-    if (GetFileAttributesW(file2) == INVALID_FILE_ATTRIBUTES)
-    {
-        MessageBoxW(nullptr, 
-            L"DLSS5 için gerekli olan nvngx_dlssnr.dll dosyası bulunamadı! Lütfen DLSS5'in çalışmasını istiyorsanız bu dosyayı yükleyin.", 
-            L"VLSS5 Hata", MB_ICONERROR | MB_OK | MB_TOPMOST);
-        ExitProcess(1);
-    }
+    // nvngx_dlssnr.dll (telifli NGX model agirliklari) ARTIK burada sert bir
+    // hata/ExitProcess ile zorunlu tutulmuyor -- Ana Sayfa'daki durum/surukle-
+    // birak cubugu (bkz. dllStatusBar, NvngxDlssnrExists) kullaniciya dosyayi
+    // uygulama ICINDEN eklemesini saglar. Dosya yoksa sadece BASLAT devre disi
+    // kalir (bkz. BuildStateJson "nvngxDlssnrReady" ve "startStop" isleyicisi).
 }
 
 // ---------------------------------------------------------------------------
@@ -1589,12 +2118,44 @@ static bool IsProcessRunning(const wchar_t* processName)
 
 static void CheckRivaTunerRunning()
 {
-    if (!IsProcessRunning(L"RTSS.exe"))
+    if (ConfigManager::Get().Config().suppressRtssRunningWarning)
+        return;
+
+    if (IsProcessRunning(L"RTSS.exe"))
+        return;
+
+    const wchar_t* msg =
+        L"UYARI! Arka planda RivaTuner çalışmadığı tespit edildi. Lütfen FPS kalibrasyonu için arkada uygulamayı açık bırakın. Kalibrasyon yapılmadığı sürece FPS çok kötü olabilir.";
+
+    typedef HRESULT (WINAPI *TaskDialogIndirect_t)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
+    HMODULE hComCtl = LoadLibraryW(L"comctl32.dll");
+    TaskDialogIndirect_t pTaskDialogIndirect = hComCtl ? (TaskDialogIndirect_t)GetProcAddress(hComCtl, "TaskDialogIndirect") : nullptr;
+
+    if (pTaskDialogIndirect)
     {
-        MessageBoxW(nullptr,
-            L"UYARI! Arka planda RivaTuner çalışmadığı tespit edildi. Lütfen FPS kalibrasyonu için arkada uygulamayı açık bırakın. Kalibrasyon yapılmadığı sürece FPS çok kötü olabilir.",
-            L"VLSS5 - RivaTuner Çalışmıyor",
-            MB_ICONWARNING | MB_OK | MB_TOPMOST);
+        TASKDIALOGCONFIG tdc = { sizeof(TASKDIALOGCONFIG) };
+        tdc.hwndParent            = nullptr;
+        tdc.hInstance             = GetModuleHandle(nullptr);
+        tdc.dwFlags               = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
+        tdc.pszWindowTitle        = L"VLSS5 - RivaTuner Çalışmıyor";
+        tdc.pszMainInstruction    = L"UYARI! Arka planda RivaTuner çalışmadığı tespit edildi.";
+        tdc.pszContent            = L"Lütfen FPS kalibrasyonu için arkada uygulamayı açık bırakın. Kalibrasyon yapılmadığı sürece FPS çok kötü olabilir.";
+        tdc.pszMainIcon           = TD_WARNING_ICON;
+        tdc.pszVerificationText   = L"Bir daha gösterme";
+        tdc.dwCommonButtons       = TDCBF_OK_BUTTON;
+
+        BOOL verificationChecked = FALSE;
+        HRESULT hr = pTaskDialogIndirect(&tdc, nullptr, nullptr, &verificationChecked);
+
+        if (SUCCEEDED(hr) && verificationChecked)
+        {
+            ConfigManager::Get().Config().suppressRtssRunningWarning = true;
+            ConfigManager::Get().Save();
+        }
+    }
+    else
+    {
+        MessageBoxW(nullptr, msg, L"VLSS5 - RivaTuner Çalışmıyor", MB_ICONWARNING | MB_OK | MB_TOPMOST);
     }
 }
 
@@ -1603,6 +2164,8 @@ static void CheckRivaTunerRunning()
 // ---------------------------------------------------------------------------
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 {
+    CrashHandler::Install();
+
     CheckRequiredFiles();
     CheckRivaTuner();
     CheckRivaTunerRunning();
@@ -1636,6 +2199,13 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     }
 
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+    // Hedef listesindeki pencere simgelerini (HICON) PNG'ye kodlamak icin --
+    // bkz. IconToDataUri. PopulateList'ten (dolayisiyla herhangi bir pencere
+    // olusturulmadan) ONCE baslatilmali.
+    ULONG_PTR gdiplusToken = 0;
+    Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+    Gdiplus::GdiplusStartup(&gdiplusToken, &gdiplusStartupInput, nullptr);
 
     winrt::init_apartment(winrt::apartment_type::single_threaded);
 
@@ -1683,15 +2253,37 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     SettingsWindow::Initialize(hInstance);
     RtssWindow::Initialize(hInstance);
     HotkeysWindow::Initialize(hInstance);
+    PresetsWindow::Initialize(hInstance);
+
+    // Faz 3: "Tuşları Değiştir" sekmesi HotkeysWindow'un KENDI WH_KEYBOARD_LL
+    // hook'unu kullanir (bkz. OnMainWebMessage'daki hotkeysStartCapture) ama
+    // ana pencere sekmesi HotkeysWindow'un s_host'undan FARKLI bir WebViewHost
+    // (g_mainWebView) kullandigi icin sonucu bu callback ile ayrica alir.
+    HotkeysWindow::SetExternalKeyCapturedCallback([](bool /*save*/, UINT /*vk*/, UINT /*mod*/)
+    {
+        if (!g_mainWebView) return;
+
+        json ack;
+        ack["type"] = "hotkeysKeyCaptured";
+        g_mainWebView->PostJson(FromUtf8(ack.dump()));
+
+        json labelsMsg;
+        labelsMsg["type"] = "hotkeysList";
+        labelsMsg["data"] = BuildHotkeyLabelsJson();
+        g_mainWebView->PostJson(FromUtf8(labelsMsg.dump()));
+    });
 
     // Create modern dark window (fixed size, centered, styled)
+    const int kMainWndW = 1280, kMainWndH = 720;
+    const int mainWndX = (GetSystemMetrics(SM_CXSCREEN) - kMainWndW) / 2;
+    const int mainWndY = (GetSystemMetrics(SM_CYSCREEN) - kMainWndH) / 2;
     HWND hwnd = CreateWindowExW(
         0,
         L"VLSS5Main",
-        L"VLSS5 - Yüksek Performanslı Oyun Overlay",
+        L"VLSS5",
         (WS_OVERLAPPEDWINDOW & ~(WS_THICKFRAME | WS_MAXIMIZEBOX)),
-        CW_USEDEFAULT, CW_USEDEFAULT,
-        622, 631,
+        mainWndX, mainWndY,
+        kMainWndW, kMainWndH,
         nullptr, nullptr, hInstance, nullptr);
 
     if (!hwnd)
@@ -1716,6 +2308,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 
     // Create App instance
     g_app = std::make_unique<App>(hInstance);
+    SettingsWindow::SetAppInstance(g_app.get());
+
+    // "Güncellemeler" sekmesi: kullanici acmasa bile her baslangicta sessizce
+    // GitHub Releases kontrol edilir (ayar kapatilabilir, bkz. ConfigManager
+    // autoCheckUpdates / web/main "Güncellemeler" sekmesindeki anahtar).
+    // Yeni surum bulunursa WM_APP_UPDATES_FETCH_DONE isleyicisi onay dialogu gosterir.
+    if (ConfigManager::Get().Config().autoCheckUpdates)
+    {
+        StartUpdatesCheck(hwnd, /*silentStartupCheck*/true);
+    }
 
     // Standard Win32 message loop
     MSG msg = {};
@@ -1727,6 +2329,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 
     g_app.reset();
     winrt::uninit_apartment();
+    Gdiplus::GdiplusShutdown(gdiplusToken);
 
     if (hSingleInstanceMutex)
     {

@@ -3,6 +3,9 @@
 #include "ConfigManager.h"
 #include "RTSSManager.h"
 #include "GpuSelector.h"
+#include "PresetsManager.h"
+#include "WindowEnumerator.h"
+#include "CrashHandler.h"
 #include "resource.h"
 #include <shlwapi.h>
 #pragma comment(lib, "shlwapi.lib")
@@ -12,7 +15,72 @@
 // Global pointer so the static OverlayWndProc can reach the App.
 static App* g_appInstance = nullptr;
 
+// IN gostergesi icin giris FPS'ini secer: mumkunse RTSS'in paylasimli bellegindeki,
+// oyunun D3D Present() cagrisindan DOGRUDAN olctugu degeri kullanir. Bu, bizim kendi
+// yakalama/compositor katmanimizdan (WGC/DXGI) tamamen bagimsizdir -- topmost/opak
+// overlay'imiz hedefin ustunde oldugundan, WGC'nin FrameArrived'i da DXGI Duplication'in
+// "yeni kare" sinyali de DWM composition tick'ine (dolayisiyla BIZIM kendi render/present
+// hizimiza) bagli cikiyor ve gercek oyun FPS'ini yansitmiyor (bkz. proje notlari/sohbet
+// gecmisi). RTSS zaten oyunun icine hook'lu oldugundan bu kirlenmeden azade, gercek sayi.
+// RTSS calismiyorsa/hedefi henuz hook'lamadiysa -1 doner, o zaman capture-tabanli (yaklasik)
+// degere dusulur -- hic gostergesiz kalmaktan iyidir.
+static int GetDisplayInputFps(HWND targetHwnd, CaptureManager* captureManager)
+{
+    if (targetHwnd)
+    {
+        DWORD targetPid = 0;
+        GetWindowThreadProcessId(targetHwnd, &targetPid);
+        if (targetPid)
+        {
+            int rtssFps = RTSSManager::Get().GetLiveFps(targetPid);
+            if (rtssFps > 0) return rtssFps;
+        }
+    }
+    return captureManager ? captureManager->GetCurrentInputFps() : 0;
+}
+
 static constexpr wchar_t kOverlayClass[] = L"VLSS5Overlay";
+
+// DXGI Desktop Duplication crop kaynagi icin hedef pencerenin GERCEK ekran-koordinatli
+// yakalama dikdortgeni.
+//
+// Ikinci deneme: GetClientRect + ClientToScreen de DWMWA_EXTENDED_FRAME_BOUNDS ile AYNI
+// yanlis boyutu (1856x924, gercek 1840x885 yerine) verdi -- bu oyunda (eski Source motoru,
+// hl.exe) pencere yoneticisinin raporladigi istemci alani, oyunun GERCEKTEN render ettigi
+// alanla uyusmuyor (StripTargetBorders'taki SetWindowPos'un boyutu win32k/DWM tarafinda
+// tam olarak "sindirilmemis" olmasi ihtimali yuksek). Bu yuzden BOYUT icin Win32 sorgularina
+// guvenmek yerine WGC'nin GraphicsCaptureItem::Size()'ini kullaniyoruz -- bu DWM composition
+// metadata'sindan okunur ve WGC'nin kendisi bu oyunda dogru calistigina gore GUVENILIR kaynak
+// budur (CaptureManager::QueryWindowContentSize, gecici bir WGC item acip kapatir, capture
+// baslatmaz). KONUM icin hala ClientToScreen kullanilir -- pencerenin istemci alaninin nerede
+// BASLADIGI Win32'de sorunsuz; sorun yalnizca boyuttaydi.
+static RECT GetScreenClientRect(HWND hwnd)
+{
+    RECT r = {};
+    if (!hwnd) return r;
+
+    RECT client = {};
+    GetClientRect(hwnd, &client);
+
+    POINT topLeft = { client.left, client.top };
+    ClientToScreen(hwnd, &topLeft);
+
+    int w = client.right  - client.left;
+    int h = client.bottom - client.top;
+
+    int wgcW = 0, wgcH = 0;
+    if (CaptureManager::QueryWindowContentSize(hwnd, wgcW, wgcH))
+    {
+        w = wgcW;
+        h = wgcH;
+    }
+
+    r.left   = topLeft.x;
+    r.top    = topLeft.y;
+    r.right  = topLeft.x + w;
+    r.bottom = topLeft.y + h;
+    return r;
+}
 
 // ==========================================================================
 // Ctor / Dtor
@@ -47,7 +115,24 @@ App::~App()
 
 bool App::InitD3D()
 {
-    if (m_device) return true; // already done
+    if (m_device)
+    {
+        // ONEMLI: m_device non-null olmasi cihazin hala CANLI oldugu anlamina
+        // gelmez -- surucu (TDR, GPU reset, driver crash) onu herhangi bir
+        // anda "removed/suspended" durumuna dusurebilir (loglarla dogrulandi:
+        // StartWithItem 0x887A0005 "GPU device instance has been suspended"
+        // ile art arda basarisiz oluyordu). Bu kontrol olmadan m_device
+        // sonsuza dek olu kaliyor ve process YENIDEN BASLATILMADAN hicbir
+        // "Baslat" denemesi bir daha calismiyordu. Kaldirilmissa cihazi/
+        // context'i atip asagida sifirdan olusturuyoruz.
+        HRESULT removedReason = m_device->GetDeviceRemovedReason();
+        if (removedReason == S_OK) return true; // already done, still alive
+
+        DLSS_Log("[App] Mevcut D3D11 cihazi kaldirilmis/askiya alinmis (0x%08X) -- sifirdan olusturuluyor.",
+            removedReason);
+        m_context.Reset();
+        m_device.Reset();
+    }
 
     UINT flags = 0;
 #if defined(_DEBUG)
@@ -134,6 +219,16 @@ void App::SetPreferredGpu(const std::wstring& gpuName)
 RECT App::ComputeOverlayRect() const
 {
     RECT r = {};
+
+    if (m_desktopMode)
+    {
+        // Tum Ekran modu: capture kaynagi zaten monitorun tamami, ek gerdirme gerekmez.
+        MONITORINFO mi = { sizeof(mi) };
+        if (m_targetMonitor && GetMonitorInfoW(m_targetMonitor, &mi))
+            r = mi.rcMonitor;
+        return r;
+    }
+
     if (!m_targetHwnd) return r;
 
     if (m_fullscreenStretch)
@@ -215,7 +310,8 @@ bool App::CreateOverlayWindow(HWND targetHwnd)
 {
     RECT r = ComputeOverlayRect();
     m_lastTargetRect = r;
-    m_lastMonitor    = MonitorFromWindow(targetHwnd, MONITOR_DEFAULTTONEAREST);
+    m_lastMonitor    = m_desktopMode ? m_targetMonitor
+                                      : MonitorFromWindow(targetHwnd, MONITOR_DEFAULTTONEAREST);
 
     int x = r.left;
     int y = r.top;
@@ -243,7 +339,16 @@ bool App::CreateOverlayWindow(HWND targetHwnd)
     // net şekilde görünmesi için WDA_NONE kullanıyoruz.
     // WGC hedef oyunu doğrudan pencere tanıtıcısı (CreateForWindow) ile izole yakaladığından
     // döngü (feedback loop) riski yoktur.
-    SetWindowDisplayAffinity(m_overlayHwnd, WDA_NONE);
+    // Tum Ekran modunda VEYA DXGI Desktop Duplication backend'inde ise yakalama monitoru
+    // dogrudan ekran uzeyinden okur (WGC'nin CreateForWindow'undaki pencere izolasyonu yok),
+    // dolayisiyla topmost/opak overlay kendi ciktisini tekrar yakalar (sonsuz geri besleme --
+    // ilk gercek oyun karesi bir kere islenip ekrana basildiktan sonra her donusum kendi son
+    // ciktisini "yeni kare" sanip isler, bu da DLSS5 acikken ekranin donmus gibi kalmasina yol
+    // acar). WDA_EXCLUDEFROMCAPTURE bunu engeller; bedeli overlay'in ekran goruntulerinde/
+    // kayitlarda gorunmemesidir.
+    const bool wantsExcludeFromCapture = m_desktopMode ||
+        ConfigManager::Get().Config().captureBackend == 1; // 1 == CaptureBackend::DXGIDuplication
+    SetWindowDisplayAffinity(m_overlayHwnd, wantsExcludeFromCapture ? WDA_EXCLUDEFROMCAPTURE : WDA_NONE);
 
     // Show + position without activating.
     SetWindowPos(m_overlayHwnd, HWND_TOPMOST,
@@ -262,26 +367,123 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
 {
     if (m_state == AppState::Capturing) return false;
 
-    m_menuHwnd  = menuHwnd;
-    m_targetHwnd = targetHwnd;
-    m_fullscreenStretch = fullscreenStretch;
+    m_menuHwnd           = menuHwnd;
+    m_targetHwnd          = targetHwnd;
+    m_desktopMode         = false;
+    m_targetMonitor       = nullptr;
+    m_fullscreenStretch   = fullscreenStretch;
+
+    return StartOverlayCommon(vsync, dlss, fps);
+}
+
+bool App::StartOverlayDesktop(HWND menuHwnd, HMONITOR targetMonitor, bool vsync, bool dlss, bool fps)
+{
+    if (m_state == AppState::Capturing) return false;
+    if (!targetMonitor) return false;
+
+    m_menuHwnd           = menuHwnd;
+    m_targetHwnd          = nullptr;
+    m_desktopMode         = true;
+    m_targetMonitor       = targetMonitor;
+    // Capture kaynagi zaten monitorun tam cozunurlugu; ek gerdirmeye gerek yok.
+    m_fullscreenStretch   = false;
+
+    return StartOverlayCommon(vsync, dlss, fps);
+}
+
+bool App::StartOverlayCommon(bool vsync, bool dlss, bool fps)
+{
+    // "Varsayılan VLSS5 Ayarları" penceresi ana menuden acik birakilmis olabilir
+    // (henuz yakalama yokken). Yakalama simdi basliyorsa bu pencere KAPATILMALI:
+    // aksi halde oyunun ustunde asili kalir ve "varsayilan" duzenleme baglami
+    // ile artik aktif olan oyun baglami karisir (Insert'e basilirsa hangi
+    // profilin duzenlendigi belirsizlesirdi).
+    if (SettingsWindow::IsOpen())
+        SettingsWindow::Hide();
+
+    // ---- 0. Hedefin on ayari varsa yukle, yoksa "Varsayilan VLSS5 Ayarlari"
+    //      (vlss5_config.ini'de duran, ana menudeki ayni adli butondan
+    //      duzenlenen profil) ile devam et. ConfigManager::Config() BELLEKTE
+    //      degistirilir, diske YAZILMAZ -- oturum bitince StopOverlay()
+    //      diskten yeniden yukleyip "Varsayilan"i sifirlar (bkz. StopOverlay).
+    {
+        PresetIdentity id;
+        bool haveIdentity = false;
+        if (m_desktopMode)
+        {
+            id.isMonitor     = true;
+            id.monitorDevice = WindowEnumerator::ResolveMonitorDeviceName(m_targetMonitor);
+            haveIdentity = !id.monitorDevice.empty();
+        }
+        else if (m_targetHwnd)
+        {
+            id.isMonitor   = false;
+            id.exeFullPath = WindowEnumerator::ResolveExeFullPath(m_targetHwnd);
+            haveIdentity = !id.exeFullPath.empty();
+        }
+
+        if (haveIdentity)
+        {
+            PresetEntry match = PresetsManager::Get().FindPresetForIdentity(id);
+            if (!match.folderName.empty())
+            {
+                Dlss5Config loaded = ConfigManager::Get().Config(); // hotkey/GPU/RTSS alanlari korunur
+                if (PresetsManager::Get().LoadPresetConfig(match.folderName, loaded))
+                {
+                    ConfigManager::Get().Config() = loaded;
+                    DLSS_Log("[App] On ayar yuklendi: %ls", match.displayName.c_str());
+                }
+            }
+            // Eslesme yoksa hicbir sey yapilmaz: ConfigManager::Config() zaten
+            // "Varsayilan VLSS5 Ayarlari" degerlerini tasiyor (bir onceki
+            // StopOverlay'in diskten yeniden yuklemesi ya da uygulama acilisi
+            // sayesinde).
+        }
+    }
 
     // ---- 1. D3D11 device (reused across sessions) ----
     if (!InitD3D()) return false;
 
-    // Hedef pencerenin baslik cubugunu kaldir. 
+    // Hedef pencerenin baslik cubugunu kaldir (yalnizca pencere modunda; StripTargetBorders
+    // zaten m_targetHwnd null ise no-op'tur).
     // "Tam Ekran Yap" aciksa VEYA pencereli moddaysa (kullanici talebi).
     StripTargetBorders();
 
     // ---- 2. Create the overlay window ----
-    if (!CreateOverlayWindow(targetHwnd)) return false;
+    if (!CreateOverlayWindow(m_targetHwnd)) return false;
 
-    // ---- 3. Start WGC capture ----
+    // ---- 3. Start capture (WGC or DXGI Desktop Duplication, per user setting) ----
     m_captureManager = std::make_unique<CaptureManager>();
-    if (!m_captureManager->Start(targetHwnd, m_device.Get()))
+    // DXGI Desktop Duplication arka planda KİLİTLİ: kendi kendini tetikleme (bkz. Main.cpp'deki
+    // ayni konudaki not) yuzunden IN/OUT FPS gostergesi guvenilmez ve bazi senaryolarda kalici
+    // donma riski hala tam cozulmedi. ConfigManager().captureBackend degeri (eski ini'lerden
+    // 1 kalmis olabilir) burada BILEREK yok sayiliyor -- WGC her zaman zorlaniyor. Konuyla
+    // tekrar ilgilenmeye karar verirsek: asagidaki satiri eski haline (config'i okuyan haline)
+    // getirip Main.cpp'deki combo'yu tekrar EnableWindow(TRUE) yap.
+    const CaptureBackend backend = CaptureBackend::WGC;
+    const bool captureStarted = m_desktopMode
+        ? m_captureManager->StartMonitor(m_targetMonitor, m_device.Get(), backend)
+        : m_captureManager->Start(m_targetHwnd, m_device.Get(), backend);
+    if (!captureStarted)
     {
         DestroyWindow(m_overlayHwnd); m_overlayHwnd = nullptr;
         return false;
+    }
+
+    DLSS_Log("[App] Yakalama basladi: istenen=%s, aktif=%s (mod=%s)",
+        (backend == CaptureBackend::DXGIDuplication) ? "DXGI Desktop Duplication" : "WGC",
+        (m_captureManager->GetBackend() == CaptureBackend::DXGIDuplication) ? "DXGI Desktop Duplication" : "WGC",
+        m_desktopMode ? "monitor" : "pencere");
+
+    // DXGI Desktop Duplication + pencere modu: capture boyutu ilk SetCropRect() cagrisina
+    // kadar 0 kalir (normalde UpdateOverlayPosition'in ilk tick'inde gelir) -- burada hemen
+    // veriyoruz ki asagidaki capW/capH ve pipeline ilk kareden itibaren dogru boyutlansin.
+    // NOT: m_lastTargetRect burada KULLANILMAZ -- Tam Ekran Yap acikken o zaten monitor
+    // dikdortgenini tasir (bkz. ComputeOverlayRect), crop kaynagi ise her zaman pencerenin
+    // KENDI dikdortgeni olmali (UpdateOverlayPosition'daki ayni desenin aynisi).
+    if (!m_desktopMode && backend == CaptureBackend::DXGIDuplication)
+    {
+        m_captureManager->SetCropRect(GetScreenClientRect(m_targetHwnd));
     }
 
     // Initial capture dimensions (may be updated on first frame).
@@ -348,6 +550,23 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
         }
     });
 
+    // ---- 5. Fare eslemesi + imlec kilidi ----
+    // Tam Ekran modunda goruntu monitore gerilirken fare koordinati gerilmez;
+    // MouseMapper bu sapmayi kapatir (ayrinti icin MouseMapper.h).
+    // Tum Ekran (desktop) modunda hedef pencere olmadigindan, capture zaten 1:1
+    // monitor cozunurlugunde oldugundan fare zaten doguru hizalidir; eslemeye gerek yok.
+    if (!m_desktopMode)
+    {
+        m_mouseMapper = std::make_unique<MouseMapper>();
+        m_mouseMapper->Start(m_overlayHwnd, m_targetHwnd,
+                             m_fullscreenStretch,
+                             initialCfg.mouseMapping,
+                             initialCfg.cursorLock,
+                             initialCfg.hideSystemCursor);
+    }
+    m_mouseTargetRect = {};
+    m_mouseProbeTick  = 0;
+
     m_fpsEnabled  = fps;
     m_dlssEnabled = dlss;
     m_prevVlssDown = false;
@@ -355,6 +574,9 @@ bool App::StartOverlay(HWND menuHwnd, HWND targetHwnd, bool vsync, bool dlss, bo
     // Give keyboard focus back to the target app so that Insert (ReShade),
     // game input, etc. work exactly as if VLSS5 were not here.
     // We use AttachThreadInput for reliability (avoids the "foreground lock").
+    // Tum Ekran modunda tek bir hedef uygulama olmadigindan bu adim atlanir;
+    // odak ne uzerindeyse (masaustu, son aktif pencere) oyle kalir.
+    if (!m_desktopMode)
     {
         DWORD myTid     = GetCurrentThreadId();
         DWORD targetTid = GetWindowThreadProcessId(m_targetHwnd, nullptr);
@@ -436,11 +658,35 @@ void App::Run()
 
         if (!m_running) break;
 
-        // 2. Safety: stop if target window was closed
-        if (!IsWindow(m_targetHwnd))
+        // 2. Safety: stop if target window was closed (desktop mode has no target window;
+        // stop instead if the captured monitor has been disconnected/reconfigured away).
+        if (m_desktopMode)
+        {
+            MONITORINFO mi = { sizeof(mi) };
+            if (!m_targetMonitor || !GetMonitorInfoW(m_targetMonitor, &mi))
+            {
+                m_running = false;
+                break;
+            }
+        }
+        else if (!IsWindow(m_targetHwnd))
         {
             m_running = false;
             break;
+        }
+
+        // 2b. WGC oturumu kendi icinden kopmus olabilir (bkz. CaptureManager::IsSessionBroken
+        // aciklamasi) -- eskiden bu durum sessizce hicbir kare uretmeyen, donmus/bos bir
+        // overlay'e yol aciyordu (Chrome gibi kompozisyon agaci sik degisen uygulamalarda
+        // gozlemlendi). Hedef hala aciksa yakalamayi sifirdan yeniden baslatmayi dene; olmazsa
+        // gorunmez sekilde asili kalmak yerine oturumu temiz kapat.
+        if (m_captureManager && m_captureManager->IsSessionBroken())
+        {
+            if (!RestartCapture())
+            {
+                m_running = false;
+                break;
+            }
         }
 
         // 3. Update input, hotkeys, window position
@@ -469,12 +715,26 @@ void App::Run()
             ID3D11ShaderResourceView* srv = m_captureManager->AcquireCurrentFrameSRV(m_device.Get());
             if (srv)
             {
-                // Kare uretimine baslamadan once sunum kuyrugunda yer acilmasini bekle.
-                // Bu bekleme olmadan backpressure Present() icinde 31-143 ms'lik sert
-                // blokaj olarak patliyordu (log: render=0.9 ms, present=143 ms).
-                m_renderer->WaitForPresentReady();
+                // NOT: burada bir ara "gercek FPS'i ust sinir olarak kullanip fazladan
+                // render'lari atla" seklinde bir throttle denendi. GERI ALINDI: WGC probe'unun
+                // (ve RTSS yoksa ona dusen GetDisplayInputFps'in) anlik degeri 0.5sn'lik
+                // pencerelerde gurultulu/dengesiz cikabiliyor (gozlemlenen: ayni oturumda
+                // 30/31/37/61/100 gibi sicramalar) -- bu deger dogrudan "bu kareyi RENDER ETME"
+                // kararinda kullanilinca, olcum kotu okudugu anlarda GERCEK/gecerli kareler de
+                // atlaniyor ve gozle gorulur kasma/duraksama yaratiyordu (dusuk FPS'e
+                // sabitlenince daha da belirginlesiyordu). Render etme kararini byle kirilgan,
+                // aninlik bir tahmine baglamak yanlisti -- bir gosterge sayisini duzeltmek
+                // ugruna gercek kare kaybetmek kabul edilemez bir takas. OUT'un IN'den yuksek
+                // cikmasi (DXGI backend'inin kendi kendini tetikleme egilimi) hala cozulmedi,
+                // ama bu SADECE gostergedeki sayiyi etkiliyor -- render/oynanabilirlik dogru.
+                {
+                    // Kare uretimine baslamadan once sunum kuyrugunda yer acilmasini bekle.
+                    // Bu bekleme olmadan backpressure Present() icinde 31-143 ms'lik sert
+                    // blokaj olarak patliyordu (log: render=0.9 ms, present=143 ms).
+                    m_renderer->WaitForPresentReady();
 
-                Render(srv);
+                    Render(srv);
+                }
                 m_captureManager->ReleaseCurrentFrame();
             }
         }
@@ -512,6 +772,34 @@ void App::Run()
 void App::UpdateOverlayPosition()
 {
     if (!m_targetHwnd || !m_overlayHwnd || m_overlayHidden) return;
+
+    // DXGI Desktop Duplication + pencere modu: crop kaynagi HER ZAMAN hedef pencerenin
+    // kendi dikdortgeni (Tam Ekran Yap acik olsa bile -- o modda YALNIZCA overlay'in
+    // kapladigi alan monitore genisler, yakalama kaynagi pencere boyutunda kalmaya devam
+    // eder, tipki WGC'nin CreateForWindow'unun davranisi gibi -- bu yuzden asagidaki
+    // m_lastTargetRect/ComputeOverlayRect akisindan BAGIMSIZ, ayri hesaplaniyor). WGC
+    // backend'inde bu blok tamamen no-op / maliyetsiz.
+    if (m_captureManager && m_captureManager->GetBackend() == CaptureBackend::DXGIDuplication)
+    {
+        RECT cropWinRect = GetScreenClientRect(m_targetHwnd);
+
+        static RECT lastCropRect = {};
+        static DWORD lastCropCheck = 0;
+        DWORD nowTick = GetTickCount();
+        bool cropRectChanged = (cropWinRect.left   != lastCropRect.left  ||
+                                 cropWinRect.top    != lastCropRect.top   ||
+                                 cropWinRect.right  != lastCropRect.right ||
+                                 cropWinRect.bottom != lastCropRect.bottom);
+
+        // GetClientRect/ClientToScreen are cheap local window-manager calls (no DWM IPC),
+        // but keep the same throttle style as the rest of this function for consistency.
+        if (cropRectChanged || (nowTick - lastCropCheck >= 100))
+        {
+            lastCropCheck = nowTick;
+            lastCropRect  = cropWinRect;
+            m_captureManager->SetCropRect(cropWinRect);
+        }
+    }
 
     // Tam Ekran Yap: overlay hedefin degil, monitorun dikdortgenini kaplar.
     // Hedef pencere icinde hareket ettikce yeniden konumlandirmaya gerek yok;
@@ -605,6 +893,96 @@ void App::RecreateCaptureSizedResources()
 }
 
 // ==========================================================================
+// RestartCapture — CaptureManager::IsSessionBroken() true donunce cagrilir.
+// ==========================================================================
+
+bool App::RestartCapture()
+{
+    DLSS_Log("[App] WGC oturumu bozuldu -- yakalama yeniden baslatiliyor (hedef=%p, mod=%s)",
+        m_targetHwnd, m_desktopMode ? "monitor" : "pencere");
+
+    // Eski CaptureManager'i tamamen at, sifirdan kur -- yarim/tutarsiz WGC nesneleriyle
+    // (kapanmis GraphicsCaptureItem, gecersiz frame pool) devam etmeye calismak yerine
+    // StartWithItem'in zaten sagladigi temiz kurulum/temizlik yolunu tekrar kullaniyoruz.
+    if (m_captureManager)
+    {
+        m_captureManager->Stop();
+        m_captureManager.reset();
+    }
+    m_captureManager = std::make_unique<CaptureManager>();
+
+    const CaptureBackend backend = CaptureBackend::WGC;
+    const bool captureStarted = m_desktopMode
+        ? m_captureManager->StartMonitor(m_targetMonitor, m_device.Get(), backend)
+        : m_captureManager->Start(m_targetHwnd, m_device.Get(), backend);
+
+    if (!captureStarted)
+    {
+        DLSS_Log("[App] Yakalama yeniden baslatilamadi -- oturum sonlandiriliyor.");
+        m_captureManager.reset();
+        return false;
+    }
+
+    DLSS_Log("[App] Yakalama basariyla yeniden baslatildi.");
+
+    // Yakalama boyutu onceki oturumdan farkli olabilir -- renderer'i guncel boyuta gore
+    // yeniden kur (ConsumeResizeEvent yolundakiyle ayni islem).
+    RecreateCaptureSizedResources();
+
+    // Kopan oturumla yeni oturum arasindaki bosluk uzerinden DLSS'in temporal interpolasyon
+    // denemesini engelle (CheckFocusAndMinimize'daki odak-geri-kazanma yoluyla ayni gerekce).
+    if (m_renderer && m_renderer->GetDLSSNRManager())
+    {
+        m_renderer->GetDLSSNRManager()->ResetHistory();
+    }
+
+    return true;
+}
+
+// ==========================================================================
+// UpdateMouseMapping — fare eslemesi + imlec kilidi (bkz. MouseMapper)
+// ==========================================================================
+
+void App::UpdateMouseMapping()
+{
+    if (!m_mouseMapper || !m_overlayHwnd || !m_targetHwnd) return;
+
+    RECT overlayRect = {};
+    GetWindowRect(m_overlayHwnd, &overlayRect);
+
+    // DwmGetWindowAttribute bir IPC cagrisidir (UpdateOverlayPosition'daki nota bak);
+    // her kare degil, 200 ms'te bir soruluyor. ANCAK GetWindowRect bedelsizdir:
+    // pencere kipirdadigi anda DWM sorgusu hemen tekrarlanir. Aksi halde hedef
+    // dikdortgeni 200 ms bayat kalir ve imlec o bayat dikdortgene kirpilirdi.
+    RECT rawRect = {};
+    GetWindowRect(m_targetHwnd, &rawRect);
+    const bool rawMoved =
+        (rawRect.left   != m_mouseRawRect.left  || rawRect.top    != m_mouseRawRect.top ||
+         rawRect.right  != m_mouseRawRect.right || rawRect.bottom != m_mouseRawRect.bottom);
+
+    const ULONGLONG now = GetTickCount64();
+    if (m_mouseProbeTick == 0 || rawMoved || (now - m_mouseProbeTick) > 200)
+    {
+        m_mouseProbeTick = now;
+        m_mouseRawRect   = rawRect;
+        RECT tr = {};
+        if (FAILED(DwmGetWindowAttribute(
+                m_targetHwnd, DWMWA_EXTENDED_FRAME_BOUNDS, &tr, sizeof(tr))))
+        {
+            GetWindowRect(m_targetHwnd, &tr);
+        }
+        m_mouseTargetRect = tr;
+    }
+
+    // "Oyun modu": overlay gorunur, odak oyunda ve ayarlar penceresi kapali.
+    // Ayarlar acikken veya F8 ile overlay'e odaklanildiginda kullanici GERCEK
+    // imlecle calismali; esleme ve kilit geri cekilir.
+    const bool inGameMode = !m_overlayHidden && !m_overlayFocused && !SettingsWindow::IsOpen();
+
+    m_mouseMapper->Tick(overlayRect, m_mouseTargetRect, inGameMode);
+}
+
+// ==========================================================================
 // CheckStopKey — called every frame, zero hooks, zero interference
 // ==========================================================================
 
@@ -630,8 +1008,10 @@ void App::CheckF8FocusToggle()
     auto& cfg = ConfigManager::Get().Config();
     const bool focusDown = (GetAsyncKeyState(cfg.vkFocus) & 0x8000) != 0;
 
-    // Trigger ONLY on leading edge (new press)
-    if (focusDown && !m_prevFocusDown)
+    // Trigger on the TRAILING edge (key release), not the press.
+    // Ayni stuck-key sebebi: AttachThreadInput ile focus calarken tus hala
+    // basiliysa eski foreground uygulama WM_KEYUP'i alamaz.
+    if (!focusDown && m_prevFocusDown)
     {
         if (!m_overlayFocused)
         {
@@ -710,6 +1090,9 @@ void App::CheckF8FocusToggle()
 
 void App::CheckFocusAndMinimize()
 {
+    // Tum Ekran modunda tek bir "hedef pencere" olmadigindan auto-hide devre disidir;
+    // overlay durdurulana kadar acik kalir (kullanici tercihi).
+    if (m_desktopMode) return;
     if (!m_targetHwnd || !m_overlayHwnd) return;
 
     // 1. Is target window minimized or closed/invisible?
@@ -799,11 +1182,12 @@ void App::CheckFocusAndMinimize()
 
 bool App::CalibInSync(int inFps, int outFps)
 {
-    // Sabit "<= 1" toleransi fazla dardi: 0.5 sn'lik pencerede tamsayiya yuvarlanan
-    // FPS dogal olarak +-2 oynar ve sahte desenkron uretirdi. Yuzdesel tolerans
-    // yuksek FPS'te de dogru calisir.
-    const int tol = (std::max)(2, static_cast<int>(inFps * 0.05 + 0.5));
-    return std::abs(inFps - outFps) <= tol;
+    // Sabit, kucuk bir tolerans: 0.5 sn'lik olcum penceresinde tamsayiya yuvarlanan
+    // FPS dogal olarak +-1-2 oynayabilir, bu yuzden tam "<=0" sahte desenkron
+    // uretirdi. Ama yuzdesel tolerans (eski hali) yuksek FPS'te 5-7 FPS'e kadar
+    // gozle GORULEN farklari bile "senkron" sayip kilitliyordu (bildirilen "52/49"
+    // ve "94/87" hatalari). Artik FPS'ten bagimsiz, SABIT ve SIKI: en fazla 2 FPS.
+    return std::abs(inFps - outFps) <= kCalibSyncToleranceFps;
 }
 
 int App::GetMonitorRefreshHz(HWND hwnd)
@@ -868,6 +1252,7 @@ bool App::CalibApplyLimit(int fps)
     if (m_captureManager) m_captureManager->ResetInputFpsWindow();
     m_calibSettleTicks = 1;
     m_calibNotApplied  = 0;
+    m_calibConfirmCount = 0; // yeni hedef icin dogrulama sayaci sifirlanir
 
     DLSS_Log("[Calib] Limit uygulandi: %d FPS (%ls)", fps, m_calibExeName.c_str());
     return true;
@@ -894,6 +1279,15 @@ void App::CalibAbort(const std::wstring& msg)
 void App::CalibFinish(int fps)
 {
     if (fps < 0) fps = 0;
+
+    // Guvenlik payi: arama, senkronun TAM kirildigi sinira kadar cikiyor; oraya
+    // aynen kilitlemek yerine biraz altina inip dogal FPS titremesine pay birakiyoruz.
+    // fps==0 (limit gereksiz) istisna -- oradan pay dusmek anlamsiz.
+    if (fps > 0)
+    {
+        fps -= kCalibSafetyMarginFps;
+        if (fps < kCalibMinFps) fps = kCalibMinFps;
+    }
 
     RTSSManager::Get().SetFramerateLimit(m_calibExeName, fps);
     m_calibTargetFps    = fps;
@@ -987,7 +1381,27 @@ void App::UpdateCalibration(const Dlss5Config& cfg)
     }
 
     // Emniyet 3: bayat olcumle karar verme.
-    const int inFps  = m_captureManager ? m_captureManager->GetInputFpsFresh() : 0;
+    //
+    // GIRIS FPS KAYNAGI: WGC-tabanli CaptureManager::GetInputFpsFresh() KULLANILMAZ.
+    // Yorum (bkz. GetDisplayInputFps, dosya basi) acikca uyariyor: WGC'nin kare-gelis
+    // hizi bizim KENDI render/present dongumuze (DWM composition tick) bagli cikiyor
+    // ve gercek oyun FPS'ini yansitmiyor. Bu yuzden IN/OUT gostergesi RTSS'in oyuna
+    // dogrudan hook'lu, capture katmanindan tamamen bagimsiz olcumunu kullaniyordu --
+    // ama kalibrasyon hala eski WGC degerine bakiyordu. Sonuc: kalibrasyon "senkron"
+    // derken ekrandaki gercek RTSS-tabanli IN ile OUT arasinda kalici bir fark
+    // kaliyordu (bildirilen "93 in / 87 out kilitlendi" hatasi). Kalibrasyon artik
+    // ekranda gorunenle AYNI kaynaga (RTSS canli FPS, yoksa WGC'ye dusen) bakiyor.
+    int inFps = -1;
+    if (m_targetHwnd)
+    {
+        DWORD targetPid = 0;
+        GetWindowThreadProcessId(m_targetHwnd, &targetPid);
+        if (targetPid) inFps = RTSSManager::Get().GetLiveFps(targetPid);
+    }
+    if (inFps <= 0)
+    {
+        inFps = m_captureManager ? m_captureManager->GetInputFpsFresh() : 0;
+    }
     const int outFps = GetOutputFpsFresh();
     if (inFps <= 0 || outFps <= 0)
     {
@@ -1060,7 +1474,16 @@ void App::UpdateCalibration(const Dlss5Config& cfg)
 
         if (CalibInSync(inFps, outFps))
         {
-            m_calibLoFps = m_calibTargetFps;   // bu hiz DOGRULANDI
+            // Kaba adimda da tek sansli bir tike guvenmiyoruz: m_calibLoFps daha
+            // sonra FineUp'ta hic tekrar test edilmeden dogrudan taban olarak
+            // kullaniliyor (capa optimizasyonu), o yuzden burasi da ardisik
+            // dogrulama istiyor.
+            if (++m_calibConfirmCount < kCalibConfirmTicks)
+            {
+                return; // ayni hedefte bir tik daha olc
+            }
+
+            m_calibLoFps = m_calibTargetFps;   // bu hiz ARDISIK TIKLARLA DOGRULANDI
 
             if (inFps < m_calibTargetFps - 5)
             {
@@ -1089,48 +1512,104 @@ void App::UpdateCalibration(const Dlss5Config& cfg)
             return;
         }
 
-        // Bozuldu. Cevap (son dogrulanan, mevcut hedef) araligindadir; 1'er inerek ara.
-        DLSS_Log("[Calib] %d FPS tasinmiyor (giris=%d cikis=%d) -> ince arama, taban=%d",
-                 m_calibTargetFps, inFps, outFps, m_calibLoFps);
+        // Bozuldu. Tahmin yurutup 1'er inmek yerine, GERCEKTE ulasilan cikis FPS'ini
+        // (outFps) dogrudan gercegin gostergesi olarak kullaniyoruz -- oyun/VLSS5
+        // zaten o hizi teslim edebildigini bu tikte ISPATLADI. Once bir tik daha
+        // bekleyip bu okumayi dogrulayacagiz (AnchorWait), sonra oradan 1'er 1'er
+        // yukari tirmanacagiz.
+        DLSS_Log("[Calib] %d FPS tasinmiyor (giris=%d cikis=%d) -> capa dogrulaniyor",
+                 m_calibTargetFps, inFps, outFps);
 
-        {
-            const int floorFps = (m_calibLoFps > 0) ? m_calibLoFps : kCalibMinFps;
-            const int next     = m_calibTargetFps - 1;
-
-            if (next <= floorFps)
-            {
-                // Inecek yer yok: dogrulanmis en yuksek hizda bitir.
-                CalibFinish(floorFps);
-                return;
-            }
-
-            m_calibState   = CalibState::FineDown;
-            m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(next) + L")...";
-            CalibApplyLimit(next);
-        }
+        m_calibAnchorCandidate = outFps;
+        m_calibState           = CalibState::AnchorWait;
+        m_calibMessage         = L"SENKRON KAYBEDILDI, DOGRULANIYOR...";
         return;
     }
 
-    case CalibState::FineDown:
+    case CalibState::AnchorWait:
     {
-        if (CalibInSync(inFps, outFps))
+        // Limiti degistirmeden bir tik daha olcup ilk okumayi dogruluyoruz;
+        // ikisinin kucugunu alarak gecici bir sicramayi capa yapmaktan kaciniyoruz.
+        const int floorFps = (m_calibLoFps > 0) ? m_calibLoFps : kCalibMinFps;
+        int anchor = (std::min)(m_calibAnchorCandidate, outFps);
+        if (anchor < floorFps) anchor = floorFps;
+        if (anchor >= m_calibTargetFps) anchor = m_calibTargetFps - 1;
+        if (anchor < floorFps) anchor = floorFps;
+
+        // Capa, zaten DOGRULANMIS tabana esitse (outFps taban altina dustugu icin
+        // clamp edildi) onu tekrar test etmeye gerek yok -- bunu zaten biliyoruz.
+        // Direkt bir ustunu dene, bir adim (bir tam olcum donguyu) kazandirir.
+        if (m_calibLoFps > 0 && anchor <= m_calibLoFps)
         {
-            CalibFinish(m_calibTargetFps);
+            const int next = m_calibLoFps + 1;
+            if (next >= m_calibTargetFps)
+            {
+                CalibFinish(m_calibLoFps);
+                return;
+            }
+
+            DLSS_Log("[Calib] Capa zaten dogrulanmis taban (%d); dogrudan %d deneniyor",
+                     m_calibLoFps, next);
+
+            m_calibState   = CalibState::FineUp;
+            m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(next) + L")...";
+            CalibApplyLimit(next);
             return;
         }
 
-        // Emniyet 1: ince arama, DOGRULANMIS en yuksek hizin altina inmez.
-        // m_calibLoFps hicbir zaman dogrulanmadiysa taban kCalibMinFps'tir.
-        // Boylece hedef asla 0'in (RTSS'te SINIRSIZ) altina dusemez ve eskiden
-        // gorulen "-30 FPS" kacisi yapisal olarak imkansizdir.
+        DLSS_Log("[Calib] Capa dogrulandi: %d FPS'e sabitleniyor (aday=%d, bu tik=%d)",
+                 anchor, m_calibAnchorCandidate, outFps);
+
+        m_calibState   = CalibState::FineUp;
+        m_calibMessage = L"SENKRON BULUNDU: " + std::to_wstring(anchor) + L" FPS'E SABITLENIYOR...";
+        CalibApplyLimit(anchor);
+        return;
+    }
+
+    case CalibState::FineUp:
+    {
+        // Capa sadece bir TAHMINDI (bozulma anindaki tek okumadan dogrulanmis).
+        // Bu hedefte gercekten senkronsa yukari (1 arttir); degilse capa fazla
+        // iyimserdi demektir, asagi in (1 azalt). Boylece hangi yonden gelinirse
+        // gelinsin dogru sinira 1 FPS hassasiyetle yakinsiyoruz.
+        if (CalibInSync(inFps, outFps))
+        {
+            // Tek tik "senkron" gorunup hemen ardindan kalici desenkrona
+            // dusebiliyordu (kisa 1.2s pencere geciciyi yakalayabiliyor).
+            // Bir hedefi DOGRULANMIS saymadan once ust uste kCalibConfirmTicks
+            // tik senkron kalmasini istiyoruz.
+            if (++m_calibConfirmCount < kCalibConfirmTicks)
+            {
+                return; // ayni hedefte bir tik daha olc
+            }
+
+            m_calibLoFps = m_calibTargetFps;   // bu hiz ARDISIK TIKLARLA DOGRULANDI
+
+            if (m_calibTargetFps >= m_calibHiBound)
+            {
+                CalibFinish(m_calibHiBound);
+                return;
+            }
+
+            const int next = m_calibTargetFps + 1;
+            m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(next) + L")...";
+            CalibApplyLimit(next);
+            return;
+        }
+
+        // Bozuk. Dogrulanmis en yuksek hiz (varsa) tabandir; onun altina inmeyiz.
+        m_calibConfirmCount = 0;
         const int floorFps = (m_calibLoFps > 0) ? m_calibLoFps : kCalibMinFps;
-        const int next     = m_calibTargetFps - 1;
+        const int next      = m_calibTargetFps - 1;
 
         if (next <= floorFps)
         {
             CalibFinish(floorFps);
             return;
         }
+
+        DLSS_Log("[Calib] %d FPS tasinmiyor (giris=%d cikis=%d) -> %d deneniyor (geri)",
+                 m_calibTargetFps, inFps, outFps, next);
 
         m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(next) + L")...";
         CalibApplyLimit(next);
@@ -1156,6 +1635,10 @@ void App::Update()
     CheckFocusAndMinimize();
     if (!m_running) return;
 
+    // Fare eslemesi/kilidi: overlay gizliyken de tiklanir, cunku kilidin ve
+    // bosaltilmis sistem imleclerinin geri alinmasi da bu yoldan gecer.
+    UpdateMouseMapping();
+
     // If overlay is hidden because target lost focus, skip remaining interactive hotkeys & positioning
     if (m_overlayHidden) return;
 
@@ -1173,6 +1656,16 @@ void App::Update()
         m_renderer->UpdateFpsConstantBuffer(m_context.Get());
     }
     m_prevFpsDown = fpsDown;
+
+    // Yuksek GPU yuku uyarisini bu oturum boyunca sustur/geri ac. Kullanici
+    // kalibrasyon yapmak istemiyorsa uyariyi tek tusla tamamen kapatabilir.
+    const bool dismissDown = (GetAsyncKeyState(cfg.vkDismissWarning) & 0x8000) != 0;
+    if (dismissDown && !m_prevDismissWarningDown)
+    {
+        m_warningDismissed = !m_warningDismissed;
+        DLSS_Log("[App] Yuksek GPU yuku uyarisi %s", m_warningDismissed ? "SUSTURULDU" : "tekrar acildi");
+    }
+    m_prevDismissWarningDown = dismissDown;
 
     // FPS kalibrasyonu (durum makinesi + kacis emniyetleri ayri fonksiyonda)
     UpdateCalibration(cfg);
@@ -1197,7 +1690,7 @@ void App::Update()
             {
                 m_renderer->GetDLSSManager()->SetEnabled(m_dlssEnabled);
             }
-            int inputFps = m_captureManager ? m_captureManager->GetCurrentInputFps() : 0;
+            int inputFps = GetDisplayInputFps(m_targetHwnd, m_captureManager.get());
             bool showWarning = !m_warningDismissed && (inputFps > m_fpsCurrent + 20);
             const double* history = m_captureManager ? m_captureManager->GetGapHistory() : nullptr;
             int historyIdx = m_captureManager ? m_captureManager->GetGapHistoryIdx() : 0;
@@ -1223,7 +1716,14 @@ void App::Update()
 
     const bool settingsDown = modMatch && ((GetAsyncKeyState(scfg.settingsVk) & 0x8000) != 0);
     static bool s_prevSettingsDown = false;
-    if (settingsDown && !s_prevSettingsDown)
+
+    // DIKKAT: tetikleme BIRAKMA kenarinda (trailing edge) yapilir, basma
+    // kenarinda DEGIL. Pencere focus'u alirken AttachThreadInput kullaniyoruz;
+    // eger tus o anda hala basiliysa eski foreground uygulama WM_KEYUP'i asla
+    // alamaz ve tus onun icin sonsuza dek basili kalir (menusu kayip durur).
+    // Tus birakildiktan SONRA gecis yaparak bunu yapisal olarak imkansiz
+    // kiliyoruz.
+    if (!settingsDown && s_prevSettingsDown)
     {
         SettingsWindow::Toggle(m_overlayHwnd);
     }
@@ -1273,8 +1773,8 @@ void App::Render(ID3D11ShaderResourceView* srv)
         // Tazelik damgasi: kalibrasyon bayat cikis FPS'iyle karar vermesin.
         m_fpsLastUpdateTick = GetTickCount64();
         
-        int inputFps = m_captureManager ? m_captureManager->GetCurrentInputFps() : 0;
-        
+        int inputFps = GetDisplayInputFps(m_targetHwnd, m_captureManager.get());
+
         // Show warning if input > output + 20 and not dismissed
         bool showWarning = false;
         if (!m_warningDismissed && (inputFps > m_fpsCurrent + 20))
@@ -1286,6 +1786,21 @@ void App::Render(ID3D11ShaderResourceView* srv)
         int historyIdx = m_captureManager ? m_captureManager->GetGapHistoryIdx() : 0;
         
         m_renderer->UpdateOSD(m_context.Get(), m_fpsCurrent, inputFps, showWarning, history, historyIdx, true, m_calibMessage);
+    }
+
+    // Overlay imleci: esleme acikken gercek imlec oyun dikdortgenine tasinir ve
+    // sistem imlecleri bosaltilir; ekranda gorunen imleci biz ciziyoruz.
+    if (m_mouseMapper)
+    {
+        const uint32_t* cursorPixels = nullptr;
+        if (m_mouseMapper->ConsumeCursorImage(&cursorPixels))
+            m_renderer->UpdateCursorImage(m_context.Get(), cursorPixels);
+
+        float cx = 0.0f, cy = 0.0f;
+        if (m_mouseMapper->GetCursorDrawPos(cx, cy))
+            m_renderer->SetCursorOverlay(true, cx, cy);
+        else
+            m_renderer->SetCursorOverlay(false, 0.0f, 0.0f);
     }
 
     // --- RenderFrame stage ---
@@ -1371,6 +1886,15 @@ void App::StopOverlay()
 
     SettingsWindow::Hide();
 
+    // Fare eslemesini once durdur: imlec kilidini birakir ve bosaltilmis sistem
+    // imleclerini geri yukler. Overlay penceresi yok edilmeden once yapilmali,
+    // cunku ham girdi kaydi o pencereye bagli.
+    if (m_mouseMapper)
+    {
+        m_mouseMapper->Stop();
+        m_mouseMapper.reset();
+    }
+
     // Stop WGC before touching D3D resources.
     if (m_captureManager)
     {
@@ -1395,9 +1919,16 @@ void App::StopOverlay()
         m_overlayHwnd = nullptr;
     }
 
-    // Oturum bitti
+    // Oturum bitti: bellekteki config bu oturum icin bir on ayarla degistirilmis
+    // olabilir (bkz. StartOverlayCommon). Diskten yeniden yukleyip "Varsayilan
+    // VLSS5 Ayarlari"na donuyoruz -- boylece bir sonraki preset'siz oyun
+    // dogrudan varsayilanla baslar, onceki oyunun degerleriyle degil.
+    ConfigManager::Get().Load();
+
     RestoreTargetBorders();
     m_targetHwnd = nullptr;
+    m_desktopMode = false;
+    m_targetMonitor = nullptr;
     m_lastMonitor = nullptr;
     m_overlayFocused = false;
     m_prevFocusDown     = false;
@@ -1436,6 +1967,13 @@ LRESULT CALLBACK App::OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM 
             SetCursor(LoadCursor(nullptr, IDC_ARROW));
             return TRUE;
         }
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
+
+    case WM_INPUT:
+        // Ham fare girdisi (RIDEV_INPUTSINK). Yalnizca bir KOPYADIR: oyunun
+        // girdisini tuketmez, geciktirmez. DefWindowProc temizlik icin sart.
+        if (g_appInstance->m_mouseMapper)
+            g_appInstance->m_mouseMapper->OnRawInput(lParam);
         return DefWindowProcW(hwnd, msg, wParam, lParam);
 
     case WM_DESTROY:
@@ -1514,6 +2052,19 @@ void App::StartWatchdog()
     QueryPerformanceCounter(&m_stageEnteredTime);
     m_currentStage.store("idle", std::memory_order_relaxed);
     m_watchdogRunning.store(true, std::memory_order_relaxed);
+    m_hangDumpWritten.store(false, std::memory_order_relaxed);
+    m_hangTerminateTriggered.store(false, std::memory_order_relaxed);
+
+    // Run() bu fonksiyonu cagiran thread uzerinde calisir; watchdog'un ileride
+    // bu thread'i suspend edip call stack'ini dump edebilmesi icin kopya bir
+    // handle aliyoruz (CloseHandle ile kapatilana kadar gecerli).
+    if (m_renderThreadHandle)
+    {
+        CloseHandle(m_renderThreadHandle);
+        m_renderThreadHandle = nullptr;
+    }
+    DuplicateHandle(GetCurrentProcess(), GetCurrentThread(),
+        GetCurrentProcess(), &m_renderThreadHandle, 0, FALSE, DUPLICATE_SAME_ACCESS);
 
     m_watchdogThread = CreateThread(
         nullptr, 0, WatchdogThreadProc, this, 0, nullptr);
@@ -1531,6 +2082,11 @@ void App::StopWatchdog()
         CloseHandle(m_watchdogThread);
         m_watchdogThread = nullptr;
     }
+    if (m_renderThreadHandle)
+    {
+        CloseHandle(m_renderThreadHandle);
+        m_renderThreadHandle = nullptr;
+    }
 }
 
 DWORD WINAPI App::WatchdogThreadProc(LPVOID param)
@@ -1539,12 +2095,26 @@ DWORD WINAPI App::WatchdogThreadProc(LPVOID param)
     LARGE_INTEGER freq;
     QueryPerformanceFrequency(&freq);
 
+    // 5 sn: "belki yavas ama normal bir islem" -- sadece teshis amacli bir dump al,
+    //       programa dokunma (donma basina bir kez, m_hangDumpWritten).
+    // 20 sn: bu artik kesinlikle bir deadlock/donma -- kullaniciyi bilgilendirip
+    //       sureci kendiliginden kapat (m_hangTerminateTriggered). Boylece program
+    //       ekranda gorunmeden %0 CPU ile sonsuza kadar arka planda takili kalmaz;
+    //       kullanicinin Gorev Yoneticisi'nden elle sonlandirmasina gerek kalmaz.
+    static constexpr double kHangDumpThresholdMs      = 5000.0;
+    static constexpr double kHangTerminateThresholdMs = 20000.0;
+
     while (app->m_watchdogRunning.load(std::memory_order_relaxed))
     {
         Sleep(500);
 
         const char* stage = app->m_currentStage.load(std::memory_order_relaxed);
-        if (!stage || strcmp(stage, "idle") == 0) continue;
+        if (!stage || strcmp(stage, "idle") == 0)
+        {
+            app->m_hangDumpWritten.store(false, std::memory_order_relaxed);
+            app->m_hangTerminateTriggered.store(false, std::memory_order_relaxed);
+            continue;
+        }
 
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
@@ -1554,6 +2124,17 @@ DWORD WINAPI App::WatchdogThreadProc(LPVOID param)
         if (stuckMs > 2000.0)
             DLSS_Log("[Watchdog] UYARI: render thread '%s' asamasinda %.0f ms dir takildi!",
                 stage, stuckMs);
+
+        if (stuckMs > kHangTerminateThresholdMs && !app->m_hangTerminateTriggered.load(std::memory_order_relaxed))
+        {
+            app->m_hangTerminateTriggered.store(true, std::memory_order_relaxed);
+            CrashHandler::HandleConfirmedHang(app->m_renderThreadHandle, stage); // Bu cagri geri donmez (TerminateProcess).
+        }
+        else if (stuckMs > kHangDumpThresholdMs && !app->m_hangDumpWritten.load(std::memory_order_relaxed))
+        {
+            app->m_hangDumpWritten.store(true, std::memory_order_relaxed);
+            CrashHandler::WriteHangDump(app->m_renderThreadHandle, stage);
+        }
     }
     return 0;
 }

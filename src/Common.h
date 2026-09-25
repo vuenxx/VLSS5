@@ -45,6 +45,10 @@ struct WindowInfo
     HWND         hwnd = nullptr;
     std::wstring title;
     HICON        icon = nullptr;
+
+    // Non-null only for a "whole screen" pseudo-entry (see WindowEnumerator::GetMonitors).
+    // When set, 'hwnd' stays null and this monitor is captured instead of a specific window.
+    HMONITOR     monitor = nullptr;
 };
 
 // Thin HRESULT guard — throws on failure (debug-friendly).

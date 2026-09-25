@@ -1,43 +1,46 @@
 #pragma once
 #include "Common.h"
 #include "ConfigManager.h"
+#include "WebViewHost.h"
 #include <functional>
+#include <memory>
 
 class HotkeysWindow
 {
 public:
+    // Faz 3: hem gercek bir tus yakalandiginda (save=true) hem de iptal edildiginde
+    // (Esc, save=false) cagrilir -- Main.cpp'nin ana pencere sekmesi (KENDI ayri
+    // WebViewHost'u -- s_host DEGIL) bunu kullanarak hotkey pill'ini/sekme buton
+    // etiketlerini gunceller. s_host varsa (popup acikken) ONA yapilan PostJson
+    // cagrilari zaten degismeden calismaya devam eder; bu callback SADECE EK bir
+    // bildirim kanalidir.
+    using KeyCapturedCallback = std::function<void(bool save, UINT vk, UINT mod)>;
+
     static void Initialize(HINSTANCE hInstance);
     static void Show(HWND parent = nullptr);
     static void Hide();
     static bool IsOpen();
-    static HWND GetHwnd() { return s_hwnd; }
+    static HWND GetHwnd();
 
-private:
-    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    static LRESULT CALLBACK RebindKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
-    static void CreateControls(HWND hwnd);
-    static void UpdateLabels();
+    static void SetExternalKeyCapturedCallback(KeyCapturedCallback cb);
+
+    // Faz 3: Main.cpp'nin ana pencere sekmesi WH_KEYBOARD_LL hook mekanizmasini
+    // TEKRAR YAZMAK yerine dogrudan bu ikisini cagirir (bkz. plan section 4).
     static void StartKeybindCapture(int hotkeyId);
     static void EndKeybindCapture(bool save, UINT vk, UINT mod);
 
-    static HWND s_hwnd;
+private:
+    static LRESULT CALLBACK RebindKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
+
+    static void OnWebMessage(const std::wstring& json);
+    static void PushHotkeysToJs();
+
+    static std::unique_ptr<WebViewHost> s_host;
     static HINSTANCE s_hInstance;
 
     static bool s_rebindingKey;
     static HHOOK s_rebindHook;
-    static int s_currentRebindId; // 0=Settings, 1=FG, 2=Focus, 3=FPS, 4=VLSS, 5=Calib, 6=Start
+    static int s_currentRebindId; // 0=Settings, 2=Focus, 3=FPS, 4=VLSS, 5=Calib, 6=Start, 7=DismissWarning
 
-    static HWND s_lblSettings, s_btnSettings;
-    static HWND s_lblFg, s_btnFg;
-    static HWND s_lblFocus, s_btnFocus;
-    static HWND s_lblFps, s_btnFps;
-    static HWND s_lblVlss, s_btnVlss;
-    static HWND s_lblCalib, s_btnCalib;
-    static HWND s_lblStart, s_btnStart;
-
-    static HWND s_btnClose;
-
-    static HFONT s_fontTitle;
-    static HFONT s_fontNormal;
-    static HFONT s_fontBold;
+    static KeyCapturedCallback s_externalCallback;
 };

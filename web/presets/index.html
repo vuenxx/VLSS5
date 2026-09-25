@@ -1,0 +1,25 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<link rel="stylesheet" href="https://vlss5.shared/style.css">
+</head>
+<body>
+  <div class="titlebar">
+    <div class="title">Ön Ayarlar</div>
+    <div class="titlebar-btns"><div class="wbtn close" id="btnClose">&#10005;</div></div>
+  </div>
+  <div class="content">
+    <div class="list-box" id="listBox"></div>
+    <div class="empty-msg" id="emptyMsg" style="display:none">
+      Henüz kaydedilmiş ön ayar yok.<br>Insert menüsündeki KAYDET ile ekleyebilirsiniz.
+    </div>
+    <div class="btn-row">
+      <button class="secondary" id="btnOpenFolder">Klasörü Aç</button>
+      <button class="danger" id="btnDelete">Sil</button>
+    </div>
+  </div>
+  <script src="https://vlss5.shared/ipc.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

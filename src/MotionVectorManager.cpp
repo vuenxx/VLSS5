@@ -1,4 +1,6 @@
 #include "MotionVectorManager.h"
+#include "ConfigManager.h"
+#include <algorithm>
 
 // ---------------------------------------------------------------------------
 // Compute Shader for Optical Flow & Dynamic UI Reactive Mask
@@ -205,13 +207,67 @@ void CSMain(
 }
 )HLSL";
 
+// ---------------------------------------------------------------------------
+// Compute Shader for Photometric Frame Confidence (Gorev 4)
+//
+// Akisin ONERDIGI konumdaki renk GERCEKTEN simdiki renkle eslesiyor mu diye
+// olcer. Tek piksel karsilastirmasi dokulu bolgelerde yanlis pozitif verir
+// (bir komsu piksel tesadufen eslesebilir) -- 3x3 komsulukta MAKSIMUM farki
+// al, ortalamayi degil. Izgara 32x18 (kProbeGridW/H ile ayni, degerler
+// burada literal -- HLSL derleme zamaninda C++ sabitine erisemiyor).
+// ---------------------------------------------------------------------------
+static const char* s_photoConfCS = R"HLSL(
+Texture2D<float4>   g_CurrentFrame   : register(t0);
+Texture2D<float4>   g_PrevFrame      : register(t1);
+Texture2D<float2>   g_MotionVectors  : register(t2);
+RWTexture2D<float>  g_Confidence     : register(u0);
+
+cbuffer ConfParams : register(b0)
+{
+    float2 g_frameSize;
+    float2 g_pad;
+};
+
+[numthreads(32, 18, 1)]
+void CSPhotoConfidence(uint3 dtid : SV_DispatchThreadID)
+{
+    int w = (int)g_frameSize.x;
+    int h = (int)g_frameSize.y;
+    int2 maxCoord = int2(w - 1, h - 1);
+
+    int cellW = max(1, w / 32);
+    int cellH = max(1, h / 18);
+    int2 pos = clamp(int2((int)dtid.x * cellW + cellW / 2, (int)dtid.y * cellH + cellH / 2), int2(0, 0), maxCoord);
+
+    float2 mv = g_MotionVectors[pos];
+    int2 refPos = clamp(pos + int2(round(mv.x), round(mv.y)), int2(0, 0), maxCoord);
+
+    float maxErr = 0.0f;
+    [unroll]
+    for (int dy = -1; dy <= 1; ++dy)
+    {
+        [unroll]
+        for (int dx = -1; dx <= 1; ++dx)
+        {
+            int2 cp = clamp(pos    + int2(dx, dy), int2(0, 0), maxCoord);
+            int2 rp = clamp(refPos + int2(dx, dy), int2(0, 0), maxCoord);
+            float3 diff = g_CurrentFrame[cp].rgb - g_PrevFrame[rp].rgb;
+            maxErr = max(maxErr, dot(diff, diff));
+        }
+    }
+
+    g_Confidence[dtid.xy] = sqrt(maxErr);
+}
+)HLSL";
+
 bool MotionVectorManager::Init(ID3D11Device* device, int width, int height)
 {
     m_width  = width;
     m_height = height;
 
-    if (!CreateResources(device, width, height)) return false;
-    if (!CompileShaders(device))                 return false;
+    if (!CreateResources(device, width, height))       return false;
+    if (!CompileShaders(device))                       return false;
+    if (!CompilePhotoConfidenceShader(device))          return false;
 
     // Linear clamp sampler
     D3D11_SAMPLER_DESC sd = {};
@@ -226,10 +282,19 @@ bool MotionVectorManager::Init(ID3D11Device* device, int width, int height)
     m_nvof = std::make_unique<NvOFManager>();
     ComPtr<ID3D11DeviceContext> immCtx;
     device->GetImmediateContext(&immCtx);
-    if (m_nvof->Init(device, immCtx.Get(), width, height))
+
+    const auto& cfg = ConfigManager::Get().Config();
+    static const NV_OF_PERF_LEVEL kPerfLevelByQuality[3] = {
+        NV_OF_PERF_LEVEL_FAST, NV_OF_PERF_LEVEL_MEDIUM, NV_OF_PERF_LEVEL_SLOW
+    };
+    int qualityIdx = (cfg.nrFlowQuality >= 0 && cfg.nrFlowQuality <= 2) ? cfg.nrFlowQuality : 0;
+    NV_OF_PERF_LEVEL perfLevel = kPerfLevelByQuality[qualityIdx];
+
+    if (m_nvof->Init(device, immCtx.Get(), width, height, cfg.nrFlowGrid, perfLevel))
     {
         m_useHardwareNvOF = true;
-        DLSS_Log("[OpticalFlow] Hardware NVIDIA Optical Flow (NVOF) active! GridSize=4 (~0.5ms), Zero SM load.");
+        DLSS_Log("[OpticalFlow] Hardware NVIDIA Optical Flow (NVOF) active! GridSize=%d, PerfLevel=%d, Zero SM load.",
+            cfg.nrFlowGrid, (int)perfLevel);
     }
     else
     {
@@ -283,6 +348,21 @@ void MotionVectorManager::CleanupTextures()
         m_stagingMvRing[i].Reset();
     m_probeRingIndex = 0;
     m_probeFramesPending = 0;
+
+    m_confUAV.Reset();
+    m_confTexture.Reset();
+    for (int i = 0; i < kConfRingSize; ++i)
+        m_confStagingRing[i].Reset();
+    m_confRingIndex = 0;
+    m_confFramesPending = 0;
+
+    // Harici MV dokusu (D3D12Interop'un paylasimli dokusu) Resize/Init'te
+    // degisebilir; eskiye bagli SRV'i dusur, bir sonraki UpdatePhotoConfidence
+    // cagrisi tazesiyle yeniden olustursun.
+    m_externalMvSRV.Reset();
+    m_cachedExternalMvTexPtr = nullptr;
+    m_flowSuspect = false;
+    m_lastPhotoConfErr = 0.0f;
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +380,8 @@ void MotionVectorManager::Cleanup()
     m_useHardwareNvOF = false;
 
     m_opticalFlowCS.Reset();
+    m_photoConfCS.Reset();
+    m_photoConfCB.Reset();
     m_constantBuffer.Reset();
     m_linearSampler.Reset();
 }
@@ -369,10 +451,10 @@ bool MotionVectorManager::CreateResources(ID3D11Device* device, int width, int h
     hr = device->CreateShaderResourceView(m_depthTexture.Get(), nullptr, &m_depthSRV);
     if (FAILED(hr)) return false;
 
-    // 5. Staging texture ring (16x16 R16G16_FLOAT) for stall-free periodic diagnostic probing
+    // 5. Staging texture ring (32x18 R16G16_FLOAT sparse grid) for stall-free periodic diagnostic probing
     D3D11_TEXTURE2D_DESC tdStaging = {};
-    tdStaging.Width          = 16;
-    tdStaging.Height         = 16;
+    tdStaging.Width          = kProbeGridW;
+    tdStaging.Height         = kProbeGridH;
     tdStaging.MipLevels      = 1;
     tdStaging.ArraySize      = 1;
     tdStaging.Format         = DXGI_FORMAT_R16G16_FLOAT;
@@ -388,6 +470,41 @@ bool MotionVectorManager::CreateResources(ID3D11Device* device, int width, int h
     }
     m_probeRingIndex = 0;
     m_probeFramesPending = 0;
+
+    // 5b. Fotometrik guven ciktisi (32x18 R32_FLOAT UAV) + async okuma icin ring.
+    // Probe'un aksine HER karede yazilir (sahne kesmesi herhangi bir karede olabilir).
+    D3D11_TEXTURE2D_DESC tdConf = {};
+    tdConf.Width          = kProbeGridW;
+    tdConf.Height         = kProbeGridH;
+    tdConf.MipLevels      = 1;
+    tdConf.ArraySize      = 1;
+    tdConf.Format         = DXGI_FORMAT_R32_FLOAT;
+    tdConf.SampleDesc     = { 1, 0 };
+    tdConf.Usage          = D3D11_USAGE_DEFAULT;
+    tdConf.BindFlags      = D3D11_BIND_UNORDERED_ACCESS;
+
+    hr = device->CreateTexture2D(&tdConf, nullptr, &m_confTexture);
+    if (FAILED(hr)) return false;
+
+    hr = device->CreateUnorderedAccessView(m_confTexture.Get(), nullptr, &m_confUAV);
+    if (FAILED(hr)) return false;
+
+    D3D11_TEXTURE2D_DESC tdConfStaging = tdConf;
+    tdConfStaging.Usage          = D3D11_USAGE_STAGING;
+    tdConfStaging.BindFlags      = 0;
+    tdConfStaging.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+
+    for (int i = 0; i < kConfRingSize; ++i)
+    {
+        hr = device->CreateTexture2D(&tdConfStaging, nullptr, &m_confStagingRing[i]);
+        if (FAILED(hr)) return false;
+    }
+    m_confRingIndex = 0;
+    m_confFramesPending = 0;
+    m_externalMvSRV.Reset();
+    m_cachedExternalMvTexPtr = nullptr;
+    m_flowSuspect = false;
+    m_lastPhotoConfErr = 0.0f;
 
     // 6. Constant buffer for Compute Shader (create if not already existing)
     if (!m_constantBuffer)
@@ -432,6 +549,44 @@ bool MotionVectorManager::CompileShaders(ID3D11Device* device)
 }
 
 // ---------------------------------------------------------------------------
+// CompilePhotoConfidenceShader
+// ---------------------------------------------------------------------------
+bool MotionVectorManager::CompilePhotoConfidenceShader(ID3D11Device* device)
+{
+    if (m_photoConfCS && m_photoConfCB) return true;
+
+    ComPtr<ID3DBlob> blob, errBlob;
+    HRESULT hr = D3DCompile(
+        s_photoConfCS, strlen(s_photoConfCS),
+        "PhotoConfidenceCS", nullptr, nullptr,
+        "CSPhotoConfidence", "cs_5_0",
+        D3DCOMPILE_OPTIMIZATION_LEVEL3, 0,
+        &blob, &errBlob);
+
+    if (FAILED(hr))
+    {
+        if (errBlob)
+            OutputDebugStringA(static_cast<char*>(errBlob->GetBufferPointer()));
+        return false;
+    }
+
+    hr = device->CreateComputeShader(blob->GetBufferPointer(), blob->GetBufferSize(), nullptr, &m_photoConfCS);
+    if (FAILED(hr)) return false;
+
+    if (!m_photoConfCB)
+    {
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = 16; // float2 g_frameSize + float2 padding, 16-byte cbuffer aligned
+        bd.Usage     = D3D11_USAGE_DEFAULT;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        hr = device->CreateBuffer(&bd, nullptr, &m_photoConfCB);
+        if (FAILED(hr)) return false;
+    }
+
+    return true;
+}
+
+// ---------------------------------------------------------------------------
 // IEEE 754 half-precision float converter for MV probe
 // ---------------------------------------------------------------------------
 static inline float HalfToFloat(uint16_t h)
@@ -461,7 +616,11 @@ static inline float HalfToFloat(uint16_t h)
 }
 
 // ---------------------------------------------------------------------------
-// ProbeMotionVectors — periodic CPU probe of center 16x16 motion vectors
+// ProbeMotionVectors — periodic CPU probe of a sparse grid spanning the whole
+// frame (kProbeGridW x kProbeGridH points, one per cell). A single center
+// block only ever reported ONE motion direction, so mean and max were always
+// identical and said nothing about the flow field elsewhere on screen. Still
+// periodic (see s_probeCounter cadence below) -- this never runs per-frame.
 // ---------------------------------------------------------------------------
 void MotionVectorManager::ProbeMotionVectors(ID3D11DeviceContext* ctx, ID3D11Texture2D* mvTex)
 {
@@ -473,19 +632,30 @@ void MotionVectorManager::ProbeMotionVectors(ID3D11DeviceContext* ctx, ID3D11Tex
     bool shouldProbe = (s_probeCounter <= 5 || (s_probeCounter % 300 == 0));
     if (shouldProbe)
     {
-        int cx = std::max(0, m_width / 2 - 8);
-        int cy = std::max(0, m_height / 2 - 8);
-        D3D11_BOX box = {};
-        box.left   = static_cast<UINT>(cx);
-        box.top    = static_cast<UINT>(cy);
-        box.front  = 0;
-        box.right  = static_cast<UINT>(cx + 16);
-        box.bottom = static_cast<UINT>(cy + 16);
-        box.back   = 1;
-
-        // Asynchronous copy to current slot in ring buffer
+        // Her hucrenin merkezinden TEK piksel kopyala: 576 kucuk CopySubresourceRegion,
+        // hepsi tek bir izgara dokusuna -- tek Map/Unmap yeterli. Bu sadece nadiren
+        // (baslangicta 5 kare + her 300 karede bir) calisir, per-frame maliyeti yok.
         int writeSlot = m_probeRingIndex;
-        ctx->CopySubresourceRegion(m_stagingMvRing[writeSlot].Get(), 0, 0, 0, 0, mvTex, 0, &box);
+        ID3D11Texture2D* dst = m_stagingMvRing[writeSlot].Get();
+
+        for (int gy = 0; gy < kProbeGridH; ++gy)
+        {
+            int sy = std::min(m_height - 1, (gy * m_height) / kProbeGridH + (m_height / kProbeGridH) / 2);
+            for (int gx = 0; gx < kProbeGridW; ++gx)
+            {
+                int sx = std::min(m_width - 1, (gx * m_width) / kProbeGridW + (m_width / kProbeGridW) / 2);
+
+                D3D11_BOX box = {};
+                box.left   = static_cast<UINT>(sx);
+                box.top    = static_cast<UINT>(sy);
+                box.front  = 0;
+                box.right  = static_cast<UINT>(sx + 1);
+                box.bottom = static_cast<UINT>(sy + 1);
+                box.back   = 1;
+
+                ctx->CopySubresourceRegion(dst, 0, static_cast<UINT>(gx), static_cast<UINT>(gy), 0, mvTex, 0, &box);
+            }
+        }
 
         m_probeRingIndex = (m_probeRingIndex + 1) % kProbeRingSize;
         m_probeFramesPending++;
@@ -498,35 +668,141 @@ void MotionVectorManager::ProbeMotionVectors(ID3D11DeviceContext* ctx, ID3D11Tex
             D3D11_MAPPED_SUBRESOURCE mapped = {};
             if (SUCCEEDED(ctx->Map(m_stagingMvRing[readSlot].Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped)))
             {
-                const uint16_t* pData = reinterpret_cast<const uint16_t*>(mapped.pData);
-                UINT pitchElements = mapped.RowPitch / sizeof(uint16_t);
+                const uint8_t* pBase = reinterpret_cast<const uint8_t*>(mapped.pData);
 
-                float sumMag = 0.0f;
-                float maxMag = 0.0f;
+                float sampleMag[kProbeGridW * kProbeGridH];
                 int nonZeroCount = 0;
-                float centerDx = 0.0f, centerDy = 0.0f;
+                int sampleCount = 0;
 
-                for (int y = 0; y < 16; ++y)
+                for (int y = 0; y < kProbeGridH; ++y)
                 {
-                    for (int x = 0; x < 16; ++x)
+                    const uint16_t* pRow = reinterpret_cast<const uint16_t*>(pBase + y * mapped.RowPitch);
+                    for (int x = 0; x < kProbeGridW; ++x)
                     {
-                        uint16_t hx = pData[y * pitchElements + x * 2 + 0];
-                        uint16_t hy = pData[y * pitchElements + x * 2 + 1];
-                        float dx = HalfToFloat(hx);
-                        float dy = HalfToFloat(hy);
+                        float dx = HalfToFloat(pRow[x * 2 + 0]);
+                        float dy = HalfToFloat(pRow[x * 2 + 1]);
                         float mag = std::sqrt(dx * dx + dy * dy);
                         if (mag > 0.01f) nonZeroCount++;
-                        sumMag += mag;
-                        if (mag > maxMag) maxMag = mag;
-                        if (x == 8 && y == 8) { centerDx = dx; centerDy = dy; }
+                        sampleMag[sampleCount++] = mag;
                     }
                 }
                 ctx->Unmap(m_stagingMvRing[readSlot].Get(), 0);
 
-                float meanMag = sumMag / 256.0f;
-                float nonZeroPct = (nonZeroCount * 100.0f) / 256.0f;
-                DLSS_Log("[OpticalFlow] Probe #%u (%dx%d): mean |mv|=%.2f px, max=%.2f px, nonZero=%.1f%%, center=(%.1f, %.1f) px",
-                    s_probeCounter, m_width, m_height, meanMag, maxMag, nonZeroPct, centerDx, centerDy);
+                std::sort(sampleMag, sampleMag + sampleCount);
+                float p50 = sampleMag[(sampleCount * 50) / 100];
+                float p95 = sampleMag[(sampleCount * 95) / 100];
+                float maxMag = sampleMag[sampleCount - 1];
+                float nonZeroPct = (nonZeroCount * 100.0f) / (float)sampleCount;
+
+                DLSS_Log("[OpticalFlow] Probe #%u (%dx%d, grid=%dx%d): p50 |mv|=%.2f px, p95=%.2f px, max=%.2f px, nonZero=%.1f%%",
+                    s_probeCounter, m_width, m_height, kProbeGridW, kProbeGridH, p50, p95, maxMag, nonZeroPct);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// UpdatePhotoConfidence — HER karede calisir (Probe'un aksine periyodik degil,
+// sahne kesmesi herhangi bir karede olabilir). m_prevFrameSRV bu karenin
+// rengiyle EZILMEDEN once cagrilmali (bkz. ProcessFrame cagri yeri).
+// ---------------------------------------------------------------------------
+void MotionVectorManager::UpdatePhotoConfidence(
+    ID3D11DeviceContext* ctx,
+    ID3D11ShaderResourceView* currentFrameSRV,
+    ID3D11Texture2D* mvTex)
+{
+    if (!ctx || !currentFrameSRV || !mvTex || !m_photoConfCS || !m_photoConfCB || !m_confUAV || !m_prevFrameSRV)
+        return;
+
+    // Hardware NvOF yolunda hareket vektorleri D3D12Interop'un paylasimli
+    // dokusuna yaziliyor (mvTex != m_mvTexture); o dokunun SRV'si bize
+    // gecilmiyor, pointer degismedigi surece burada bir kez olusturup
+    // onbellekliyoruz.
+    ID3D11ShaderResourceView* mvSRV = nullptr;
+    if (mvTex == m_mvTexture.Get())
+    {
+        mvSRV = m_mvSRV.Get();
+    }
+    else
+    {
+        if (mvTex != m_cachedExternalMvTexPtr)
+        {
+            m_externalMvSRV.Reset();
+            m_cachedExternalMvTexPtr = nullptr;
+            ComPtr<ID3D11Device> device;
+            ctx->GetDevice(&device);
+            if (device && SUCCEEDED(device->CreateShaderResourceView(mvTex, nullptr, &m_externalMvSRV)))
+            {
+                m_cachedExternalMvTexPtr = mvTex;
+            }
+        }
+        mvSRV = m_externalMvSRV.Get();
+    }
+    if (!mvSRV) return;
+
+    struct { float w, h, pad0, pad1; } cb = { (float)m_width, (float)m_height, 0.0f, 0.0f };
+    ctx->UpdateSubresource(m_photoConfCB.Get(), 0, nullptr, &cb, 0, 0);
+
+    ctx->CSSetShader(m_photoConfCS.Get(), nullptr, 0);
+    ctx->CSSetConstantBuffers(0, 1, m_photoConfCB.GetAddressOf());
+
+    ID3D11ShaderResourceView* srvs[3] = { currentFrameSRV, m_prevFrameSRV.Get(), mvSRV };
+    ctx->CSSetShaderResources(0, 3, srvs);
+
+    ID3D11UnorderedAccessView* uavs[1] = { m_confUAV.Get() };
+    UINT initCounts[1] = { 0 };
+    ctx->CSSetUnorderedAccessViews(0, 1, uavs, initCounts);
+
+    ctx->Dispatch(1, 1, 1); // numthreads(32,18,1) == tum izgara tek grupta
+
+    ID3D11UnorderedAccessView* nullUAVs[1] = { nullptr };
+    ctx->CSSetUnorderedAccessViews(0, 1, nullUAVs, nullptr);
+    ID3D11ShaderResourceView* nullSRVs[3] = { nullptr, nullptr, nullptr };
+    ctx->CSSetShaderResources(0, 3, nullSRVs);
+
+    // Async, stall-free readback: her karede yaz, kConfRingSize kare once
+    // yazilan (hazir olmasi garanti) slotu DO_NOT_WAIT ile oku. Hazir
+    // degilse bu karede m_flowSuspect eski degerinde kalir -- pipeline
+    // hicbir zaman durmaz (Probe'daki ayni desen).
+    int writeSlot = m_confRingIndex;
+    ctx->CopyResource(m_confStagingRing[writeSlot].Get(), m_confTexture.Get());
+    m_confRingIndex = (m_confRingIndex + 1) % kConfRingSize;
+    m_confFramesPending++;
+
+    if (m_confFramesPending >= kConfRingSize)
+    {
+        int readSlot = m_confRingIndex;
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (SUCCEEDED(ctx->Map(m_confStagingRing[readSlot].Get(), 0, D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &mapped)))
+        {
+            const uint8_t* pBase = reinterpret_cast<const uint8_t*>(mapped.pData);
+            const int count = kProbeGridW * kProbeGridH;
+            float sum = 0.0f;
+            for (int y = 0; y < kProbeGridH; ++y)
+            {
+                const float* pRow = reinterpret_cast<const float*>(pBase + y * mapped.RowPitch);
+                for (int x = 0; x < kProbeGridW; ++x)
+                    sum += pRow[x];
+            }
+            ctx->Unmap(m_confStagingRing[readSlot].Get(), 0);
+
+            // Ampirik baslangic esigi (0..~1.73 RGB fark buyuklugu araliginda);
+            // olculmeden degistirme -- Gorev 3'teki NrFlowQuality gibi.
+            static constexpr float kPhotoConfSuspectThreshold = 0.35f;
+
+            m_lastPhotoConfErr = sum / (float)count;
+            bool wasSuspect = m_flowSuspect;
+            m_flowSuspect = (m_lastPhotoConfErr > kPhotoConfSuspectThreshold);
+
+            if (m_flowSuspect && !wasSuspect)
+            {
+                DLSS_Log("[OpticalFlow] Fotometrik guven dustu: ort hata=%.3f (esik=%.2f) -> akis supheli, sonraki DLSS-NR degerlendirmesinde reset zorlanacak",
+                    m_lastPhotoConfErr, kPhotoConfSuspectThreshold);
+            }
+            else if (!m_flowSuspect && wasSuspect)
+            {
+                DLSS_Log("[OpticalFlow] Fotometrik guven toparlandi: ort hata=%.3f (esik=%.2f)",
+                    m_lastPhotoConfErr, kPhotoConfSuspectThreshold);
             }
         }
     }
@@ -618,6 +894,10 @@ bool MotionVectorManager::ProcessFrame(
     // Periodic diagnostic probe of motion vectors
     ID3D11Texture2D* activeMvTex = targetMvTex ? targetMvTex : m_mvTexture.Get();
     ProbeMotionVectors(ctx, activeMvTex);
+
+    // Fotometrik kare guveni: m_prevFrameSRV bu karenin rengiyle EZILMEDEN
+    // once cagrilmali, o yuzden asagidaki CopyResource'tan ONCE.
+    UpdatePhotoConfidence(ctx, currentFrameSRV, activeMvTex);
 
     // Cache current frame for next iteration
     if (m_prevFrameTexture)

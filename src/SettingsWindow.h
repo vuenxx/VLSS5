@@ -1,7 +1,12 @@
 #pragma once
 #include "Common.h"
 #include "ConfigManager.h"
+#include "PresetsManager.h"
+#include "WebViewHost.h"
 #include <functional>
+#include <memory>
+
+class App;
 
 class SettingsWindow
 {
@@ -13,58 +18,29 @@ public:
     static void Hide();
     static void Toggle(HWND parent = nullptr);
     static bool IsOpen();
-    static HWND GetHwnd() { return s_hwnd; }
+    static HWND GetHwnd();
 
     static void SetOnConfigChanged(ConfigChangedCallback cb);
 
+    // Aktif yakalama hedefini (App uzerinden) bilmesi icin -- her ayar
+    // degisikliginde ilgili on ayara otomatik kaydetmek bu baglantiya dayanir.
+    static void SetAppInstance(App* app);
+
 private:
-    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    static LRESULT CALLBACK ModernSliderProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    static LRESULT CALLBACK ModernToggleProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
+    // Aktif hedefin kimligine (tam exe yolu / monitor cihazi) gore diske
+    // SESSIZCE yazar (onay istemez, hedef yoksa no-op). Her ayar
+    // degisikliginde otomatik cagrilir -- bkz. OnSettingChanged.
+    static void AutoSaveActivePreset();
 
-    static void CreateControls(HWND hwnd);
-    static void UpdateControlValues();
-    static void UpdateLiveLabels();
-    static void UpdateLayout();
-    static void OnSettingChanged();
+    // JS'ten gelen JSON komutlarini isler (bkz. WebViewHost::MessageHandler).
+    static void OnWebMessage(const std::wstring& json);
 
-    static HWND                  s_hwnd;
-    static HINSTANCE             s_hInstance;
-    static ConfigChangedCallback s_callback;
+    static void PushConfigToJs();
+    static void PushPresetListToJs();
 
-    // Controls
-    static HWND s_comboStyle;
-    static HWND s_comboPreset;
-    static HWND s_sliderIntensity;
-    static HWND s_lblIntensityVal;
-    static HWND s_sliderBoost;
-    static HWND s_lblBoostVal;
-    static HWND s_sliderStructure;
-    static HWND s_lblStructureVal;
-    static HWND s_sliderTone;
-    static HWND s_lblToneVal;
-    static HWND s_sliderSkin;
-    static HWND s_lblSkinVal;
-    static HWND s_sliderResScale;
-    static HWND s_lblResScaleVal;
-    static HWND s_sliderPassCount;
-    static HWND s_lblPassCountVal;
-    static HWND s_sliderPassFalloff;
-    static HWND s_lblPassFalloffVal;
-    static HWND s_chkAutoMask;
-    static HWND s_chkOpticalFlow;
-    static HWND s_chkSplitScreen;
-    static HWND s_lblSplitTitle;
-    static HWND s_lblSplitVal;
-    static HWND s_sliderSplit;
-    static HWND s_btnClose;
-
-    // GDI resources
-    static HFONT s_fontTitle;
-    static HFONT s_fontNormal;
-    static HFONT s_fontBold;
-    static HFONT s_fontSmall;
-    static HBRUSH s_brBg;
-    static HBRUSH s_brCard;
-    static HBRUSH s_brBorder;
+    static std::unique_ptr<WebViewHost> s_host;
+    static HINSTANCE                    s_hInstance;
+    static ConfigChangedCallback        s_callback;
+    static App*                         s_app;
+    static std::vector<PresetEntry>     s_presetSourceCache;
 };

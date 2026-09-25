@@ -16,6 +16,9 @@ bool DLSSNRManager::Init(ID3D12Device* device, ID3D12CommandQueue* queue, int wi
 
     if (!m_device || !m_queue) return false;
 
+    QueryPerformanceFrequency(&m_qpcFreq);
+    m_lastEvalQpc.QuadPart = 0;
+
     // Load initial settings from ConfigManager
     const auto& cfg = ConfigManager::Get().Config();
     m_preset          = cfg.preset;
@@ -40,8 +43,17 @@ bool DLSSNRManager::Init(ID3D12Device* device, ID3D12CommandQueue* queue, int wi
     if (m_resolutionScale < 0.50f) m_resolutionScale = 0.50f;
     if (m_resolutionScale > 1.00f) m_resolutionScale = 1.00f;
 
-    m_workWidth  = ((int)(m_width * m_resolutionScale + 0.5f) + 15) & ~15;
-    m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f) + 15) & ~15;
+    // 16'ya HIZALARKEN YUVARLAMA YONU KRITIK: yukari yuvarlama (+15) native
+    // genislikten BUYUK bir work boyutu uretebilir (orn. 1080 -> 1088). %100
+    // olcekte bu, D3D12Interop::BeginFrame'in 1:1 zero-copy kisayolunu
+    // (m_workWidth == m_width) kirar ve yerine gereksiz bir bilinear
+    // upscale/downscale gecisine duser -- kullanicinin "%100'de bulanik"
+    // sikayetinin sebebi buydu. Asagi yuvarlamak work boyutunu HICBIR ZAMAN
+    // native'i asmaz, boylece zaten-16-hizali cozunurluklerde %100 hala tam
+    // zero-copy/keskin kalir; hizali olmayanlarda bile en fazla 15px'lik cok
+    // hafif bir kucultmeyle NGX hizalama sarti korunur.
+    m_workWidth  = ((int)(m_width * m_resolutionScale + 0.5f)) & ~15;
+    m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f)) & ~15;
     if (m_workWidth < 64) m_workWidth = 64;
     if (m_workHeight < 64) m_workHeight = 64;
 
@@ -88,6 +100,9 @@ bool DLSSNRManager::Init(ID3D12Device* device, ID3D12CommandQueue* queue, int wi
         DLSS_Log("[DLSS-NR] ERROR: Failed to create Feature 18!");
         return false;
     }
+
+    m_builtWorkWidth  = m_workWidth;
+    m_builtWorkHeight = m_workHeight;
 
     DLSS_Log("[DLSS-NR] DLSS 5 Neural Rendering initialized successfully (Display: %dx%d, Model Work: %dx%d, Scale: %.0f%%)!",
         m_width, m_height, m_workWidth, m_workHeight, m_resolutionScale * 100.0f);
@@ -494,8 +509,9 @@ bool DLSSNRManager::Resize(int width, int height)
 
     m_width  = width;
     m_height = height;
-    m_workWidth  = ((int)(m_width * m_resolutionScale + 0.5f) + 15) & ~15;
-    m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f) + 15) & ~15;
+    // Asagi yuvarla, bkz. ApplyConfig() ustundeki not (%100'de zero-copy'yi kirmasin).
+    m_workWidth  = ((int)(m_width * m_resolutionScale + 0.5f)) & ~15;
+    m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f)) & ~15;
     if (m_workWidth < 64) m_workWidth = 64;
     if (m_workHeight < 64) m_workHeight = 64;
     m_firstFrame = true;
@@ -507,7 +523,10 @@ bool DLSSNRManager::Resize(int width, int height)
     m_chainTex[1].Reset();
     m_chainWidth  = 0;
     m_chainHeight = 0;
-    return CreateFeature();
+    if (!CreateFeature()) return false;
+    m_builtWorkWidth  = m_workWidth;
+    m_builtWorkHeight = m_workHeight;
+    return true;
 }
 
 void DLSSNRManager::Cleanup()
@@ -568,7 +587,8 @@ bool DLSSNRManager::Evaluate(
     ID3D12GraphicsCommandList* cmdList,
     ID3D12Resource* inputColor,
     ID3D12Resource* outputRes,
-    ID3D12Resource* motionVectors)
+    ID3D12Resource* motionVectors,
+    bool forceReset)
 {
     if (!m_enabled || !cmdList || !inputColor || !outputRes)
     {
@@ -585,6 +605,8 @@ bool DLSSNRManager::Evaluate(
                 m_resolutionScale * 100.0f, m_workWidth, m_workHeight, m_preset, m_style, m_intensity, m_localStructure, m_localTone, m_skinStructure, m_useAutoMask, m_passCount);
             CreateGuideTextures(m_workWidth, m_workHeight);
             CreateFeature();
+            m_builtWorkWidth  = m_workWidth;
+            m_builtWorkHeight = m_workHeight;
             m_firstFrame = true;
             m_needsRebuild = false;
         }
@@ -596,25 +618,82 @@ bool DLSSNRManager::Evaluate(
         return false;
     }
 
+    static uint64_t s_evalCount = 0;
+    s_evalCount++;
+
+    // Sahne kesmesi tespiti: bu Evaluate ile bir onceki arasinda gecen sure mantikli
+    // kare araligi disindaysa (yakalama uzun sure durdu -- alt-tab, yukleme ekrani,
+    // olum ekrani vb.) NvOF o bosluk boyunca CALISMADI, dolayisiyla motionVectors
+    // comp. Comp vektorle eski gecmisi yeniden yansitmak yerine burada kirp.
+    // Ilk karede zaten m_firstFrame reset'i zorluyor, o yuzden bu olcum orada atlanir.
+    static constexpr double kMinSaneEvalGapMs = 0.5;
+    static constexpr double kMaxSaneEvalGapMs = 200.0;
+
+    bool wasFirstFrame = m_firstFrame;
+    bool evalGapReset = false;
+    double evalGapMs = 0.0;
+    LARGE_INTEGER nowQpc;
+    QueryPerformanceCounter(&nowQpc);
+    if (!m_firstFrame && m_lastEvalQpc.QuadPart != 0 && m_qpcFreq.QuadPart != 0)
+    {
+        double dtMs = (double)(nowQpc.QuadPart - m_lastEvalQpc.QuadPart) * 1000.0 / (double)m_qpcFreq.QuadPart;
+        if (dtMs < kMinSaneEvalGapMs || dtMs > kMaxSaneEvalGapMs)
+        {
+            evalGapReset = true;
+            evalGapMs = dtMs;
+        }
+    }
+    m_lastEvalQpc = nowQpc;
+
     // Reset semantigi tek gecisteki ile ayni: optik akis varken yalnizca ilk
-    // karede 1, aksi halde her karede 1 (temporal birikim kapali).
-    int reset = m_firstFrame ? 1 : 0;
+    // karede (veya sahne kesmesinde / fotometrik supheli akiste) 1, aksi halde
+    // her karede 1 (temporal birikim kapali).
+    int reset = (m_firstFrame || evalGapReset || forceReset) ? 1 : 0;
     if (m_temporalStabilizer || !m_opticalFlow || !motionVectors)
         reset = 1;
     m_firstFrame = false;
+
+    // Bu satir KASITLI OLARAK verbose ornekleme disinda: reset nadir ve onemli bir
+    // olay (ilk kare, resize, rebuild, overlay-restore, sahne kesmesi, fotometrik
+    // supheli akis). #1-5 / %300 ornegine denk gelmezse tamamen kaybolurdu --
+    // alt-tab testinde tam da bu oldu. TemporalStabilizer/OpticalFlow-kapali
+    // modda reset zaten HER karede 1 oldugu icin o durumu burada loglamiyoruz
+    // (spam olurdu); yalnizca "gercek" sifirlama sebeplerini basiyoruz.
+    if (wasFirstFrame || evalGapReset || forceReset)
+    {
+        std::string cause;
+        if (wasFirstFrame) cause += "ilk kare/resize/rebuild/overlay-restore";
+        if (evalGapReset)
+        {
+            if (!cause.empty()) cause += ", ";
+            char gapBuf[64];
+            snprintf(gapBuf, sizeof(gapBuf), "kare araligi %.1f ms mantikli araligin (%.1f-%.1f ms) disinda", evalGapMs, kMinSaneEvalGapMs, kMaxSaneEvalGapMs);
+            cause += gapBuf;
+        }
+        if (forceReset)
+        {
+            if (!cause.empty()) cause += ", ";
+            cause += "fotometrik guven dusuk (akis supheli)";
+        }
+        DLSS_Log("[DLSS-NR] Evaluate #%llu: temporal gecmis sifirlaniyor (reset=1, sebep=%s)",
+            s_evalCount, cause.c_str());
+    }
 
     // Kac gecis gercekten calistirilabilir: istenen sayi, kurulmus handle sayisi
     // ve (>1 ise) zincir dokularinin varligi ile sinirli.
     int passes = (m_passCount < 1) ? 1 : ((m_passCount > kMaxPasses) ? kMaxPasses : m_passCount);
     while (passes > 1 && !m_features[passes - 1]) --passes;
+    // m_builtWorkWidth/Height ile karsilastir (feature'in GERCEK boyutu),
+    // m_workWidth/Height (HEDEF) ile degil -- aksi halde bir olcek
+    // degisiminin 400ms debounce penceresinde zincir dokulari aslinda
+    // GECERLI oldugu halde "eski" sanilip gereksiz yere passes=1'e
+    // dusuluyordu.
     if (passes > 1 && (!m_chainTex[0] || !m_chainTex[1] ||
-                       m_chainWidth != m_workWidth || m_chainHeight != m_workHeight))
+                       m_chainWidth != m_builtWorkWidth || m_chainHeight != m_builtWorkHeight))
     {
         passes = 1;
     }
 
-    static uint64_t s_evalCount = 0;
-    s_evalCount++;
     const bool verbose = (s_evalCount <= 5 || (s_evalCount % 300 == 0));
 
     bool ok = true;
@@ -649,11 +728,15 @@ bool DLSSNRManager::Evaluate(
 
     if (verbose || !ok)
     {
-        DLSS_Log("[DLSS-NR] Evaluate #%llu: res=0x%08X (%d), passes=%d (istenen %d), falloff=%.2f, reset=%d, optFlow=%s (mvD12=%p, cfgOptFlow=%d), workSize=%dx%d (Scale=%.0f%%), intensity=%.2f, stabilizer=%d",
+        // workSize burada m_builtWorkWidth/Height ile basiliyor: NGX'e
+        // GERCEKTEN gonderilen boyut budur (bkz. EvaluateSinglePass). Hedef
+        // ondan farkliysa (debounce penceresi) ayrica belirtiliyor.
+        DLSS_Log("[DLSS-NR] Evaluate #%llu: res=0x%08X (%d), passes=%d (istenen %d), falloff=%.2f, reset=%d, optFlow=%s (mvD12=%p, cfgOptFlow=%d), workSize=%dx%d (Scale=%.0f%%)%s, intensity=%.2f, stabilizer=%d",
             s_evalCount, m_lastEvalResult, m_lastEvalResult, passes, m_passCount, m_passFalloff, reset,
             (m_opticalFlow && motionVectors) ? "ACTIVE" : "OFF",
             motionVectors, m_opticalFlow ? 1 : 0,
-            m_workWidth, m_workHeight, m_resolutionScale * 100.0f,
+            m_builtWorkWidth, m_builtWorkHeight, m_resolutionScale * 100.0f,
+            (m_builtWorkWidth != m_workWidth || m_builtWorkHeight != m_workHeight) ? " [REBUILD BEKLENIYOR]" : "",
             m_intensity, m_temporalStabilizer ? 1 : 0);
     }
 
@@ -727,6 +810,18 @@ bool DLSSNRManager::EvaluateSinglePass(
     cmdList->ResourceBarrier(barrierCount, barriersIn);
 
     // 2. Evaluate Feature 18 at Model Work Resolution
+    //
+    // KASITLI OLARAK m_builtWorkWidth/Height (feature/guide dokularinin
+    // GERCEKTEN kurulu oldugu boyut) kullaniliyor, m_workWidth/Height
+    // (HEDEF, olcek degisince ApplyConfig'te aninda guncellenen, ama
+    // CreateFeature/CreateGuideTextures'in 400ms debounce ile ERTELEDIGI
+    // deger) DEGIL. Bunlar farkliyken (her olcek degisiminden sonraki
+    // ~400ms'lik pencerede) NGX'e "bu WxH" denip GERCEKTE eski boyutta
+    // kurulu olan feature/guide dokulari verilirse NVSDK_NGX_Result_
+    // FAIL_InvalidParameter (0xBAD00005) ile art arda basarisiz oluyor --
+    // loglarla dogrulandi (bkz. Evaluate #887-896). Onceki duzeltme
+    // (Renderer.cpp'deki D3D12Interop/MotionVectorManager senkronu) bu
+    // fonksiyonun kendisini kapsamiyordu; asil kaynak buradaydi.
     int res = m_pfnEvaluate(
         cmdList,
         feature,
@@ -735,10 +830,10 @@ bool DLSSNRManager::EvaluateSinglePass(
         m_depthTex.Get(),
         activeMotion,
         outputRes,
-        m_workWidth,
-        m_workHeight,
-        m_workWidth,
-        m_workHeight,
+        m_builtWorkWidth,
+        m_builtWorkHeight,
+        m_builtWorkWidth,
+        m_builtWorkHeight,
         m_depthInverted ? 1 : 0,
         reset,
         intensity,
@@ -808,8 +903,9 @@ void DLSSNRManager::ApplyConfig(const Dlss5Config& cfg)
     if (scaleChanged)
     {
         m_resolutionScale = newScale;
-        m_workWidth  = ((int)(m_width * m_resolutionScale + 0.5f) + 15) & ~15;
-        m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f) + 15) & ~15;
+        // Asagi yuvarla, bkz. ApplyConfig() basindaki not (%100'de zero-copy'yi kirmasin).
+        m_workWidth  = ((int)(m_width * m_resolutionScale + 0.5f)) & ~15;
+        m_workHeight = ((int)(m_height * m_resolutionScale + 0.5f)) & ~15;
         if (m_workWidth < 64) m_workWidth = 64;
         if (m_workHeight < 64) m_workHeight = 64;
     }

@@ -52,6 +52,10 @@ build/
 *.bak
 *.tmp
 
+# CI'nin git tag'inden ureterek yazdigi surum header'i (bkz. src/Version.h,
+# .github/workflows/release.yml) -- kasitli olarak commit'lenmez.
+src/VersionGenerated.h
+
 # ===================================================================
 # Binaries & Proprietary NVIDIA Model Weights
 # (nvngx_dlssnr.dll exceeds GitHub's 100MB limit)
@@ -61,6 +65,14 @@ build/
 *.rar
 *.zip
 *.7z
+
+# redist/nvngx.dll_dlssnr.dll ISTISNA: kucuk (114KB), dagitilabilir bir
+# yardimci DLL (OptiScaler_DLSSNR) -- her release'te zaten elle paylasilan
+# dosya, Inno Setup installer'inin (installer/VLSS5.iss) paketleyebilmesi
+# icin repoda tutuluyor. nvngx_dlssnr.dll (asil NGX model agirliklari,
+# >100MB, telifli) HALA ignore edilir -- kullanici tarafindan ayrica temin
+# edilmesi gerekir.
+!redist/nvngx.dll_dlssnr.dll
 
 # Runtime configuration & session logs
 vlss5_config.ini

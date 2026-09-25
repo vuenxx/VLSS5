@@ -46,11 +46,19 @@ public:
     int GetWidth()  const { return m_width;  }
     int GetHeight() const { return m_height; }
 
+    // Fotometrik kare-guveni: akisin GERCEKTEN dogru olup olmadigini olcer (Probe
+    // yalnizca buyukluk raporlar, dogruluk hakkinda bir sey soylemez). Async ring
+    // readback kullandigi icin kConfRingSize kare (~3 kare) gecikmelidir.
+    bool  IsFlowSuspect()               const { return m_flowSuspect; }
+    float GetLastPhotoConfidenceError() const { return m_lastPhotoConfErr; }
+
 private:
     void CleanupTextures();
     bool CreateResources(ID3D11Device* device, int width, int height);
     bool CompileShaders(ID3D11Device* device);
+    bool CompilePhotoConfidenceShader(ID3D11Device* device);
     void ProbeMotionVectors(ID3D11DeviceContext* ctx, ID3D11Texture2D* mvTex);
+    void UpdatePhotoConfidence(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* currentFrameSRV, ID3D11Texture2D* mvTex);
 
     struct ComputeCB
     {
@@ -81,6 +89,12 @@ private:
     ComPtr<ID3D11Texture2D>           m_depthTexture;
     ComPtr<ID3D11ShaderResourceView>  m_depthSRV;
 
+    // Tek 16x16 merkez blok yerine kareye yayilmis seyrek izgara: merkez blok
+    // TEK bir hareket yonunu ornekliyordu, bu yuzden p50/max hep esitti ve akis
+    // alaninin geri kalani hakkinda hicbir sey soylemiyordu (yanlis teshise yol
+    // acti). 32x18 = 576 nokta, her biri karenin farkli bir hucresinde.
+    static constexpr int              kProbeGridW = 32;
+    static constexpr int              kProbeGridH = 18;
     static constexpr int              kProbeRingSize = 3;
     ComPtr<ID3D11Texture2D>           m_stagingMvRing[kProbeRingSize];
     int                               m_probeRingIndex = 0;
@@ -92,4 +106,31 @@ private:
 
     std::unique_ptr<NvOFManager>      m_nvof;
     bool                              m_useHardwareNvOF = false;
+
+    // --- Fotometrik kare-guveni (Gorev 4) -----------------------------------
+    // QPC bosluk testi (DLSSNRManager) yalnizca "capture durdu mu" sorusuna
+    // bakar; bu ise "vektorler GERCEKTEN dogru mu" sorusuna bakar ve capture
+    // hic durmadan da olan ani sahne degisimlerini (kesme, patlama flası vb.)
+    // yakalar. Ayni 32x18 izgarayi (kProbeGridW/H) kullanir ama Probe'un
+    // aksine HER karede calisir -- sahne kesmesi 300 karede birde degil,
+    // herhangi bir karede olabilir.
+    ComPtr<ID3D11ComputeShader>       m_photoConfCS;
+    ComPtr<ID3D11Buffer>              m_photoConfCB;
+    ComPtr<ID3D11Texture2D>           m_confTexture;   // 32x18 R32_FLOAT UAV (GPU sonucu)
+    ComPtr<ID3D11UnorderedAccessView> m_confUAV;
+
+    // DLSS-NR ile hardware NvOF kullanilirken hareket vektorleri D3D12Interop'un
+    // PAYLASIMLI D3D11 dokusuna yaziliyor (m_mvTexture DEGIL). O dokunun SRV'si
+    // bize verilmiyor; pointer degismedigi surece burada bir kez olusturup
+    // onbellekliyoruz (her karede yeni view olusturmak pahali olurdu).
+    ComPtr<ID3D11ShaderResourceView>  m_externalMvSRV;
+    ID3D11Texture2D*                  m_cachedExternalMvTexPtr = nullptr;
+
+    static constexpr int              kConfRingSize = 3;
+    ComPtr<ID3D11Texture2D>           m_confStagingRing[kConfRingSize];
+    int                               m_confRingIndex = 0;
+    int                               m_confFramesPending = 0;
+
+    bool  m_flowSuspect      = false; // en son okunan (~kConfRingSize kare gecikmeli) sonuc
+    float m_lastPhotoConfErr = 0.0f;
 };

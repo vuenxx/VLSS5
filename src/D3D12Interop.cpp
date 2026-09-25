@@ -751,12 +751,29 @@ bool D3D12Interop::CreateDownscaleResources()
     static const char* s_psSource = R"HLSL(
     Texture2D<float4> gSrcTex : register(t0);
     SamplerState      gLinear : register(s0);
+
+    cbuffer DownscaleParams : register(b0)
+    {
+        float2 g_invDestDims; // 1 / (calisma cozunurlugu genislik,yukseklik)
+        float2 g_pad;
+    };
+
     float4 PS(float4 pos : SV_Position, float2 uv : TEXCOORD0) : SV_Target
     {
-        // 4-tap jittered box filter for smooth anti-aliased proxy downsampling
-        float2 dims;
-        gSrcTex.GetDimensions(dims.x, dims.y);
-        float2 halfTexel = 0.5f / dims;
+        // 4-tap jittered box filter for smooth anti-aliased proxy downsampling.
+        //
+        // Yaricap HEDEF (calisma cozunurlugu) piksel izdusumune gore olcekli
+        // olmak ZORUNDA. Eskiden gSrcTex.GetDimensions() (native/kaynak boyut)
+        // kullaniliyordu -- bu, olcek orani ne olursa olsun SABIT 1 kaynak
+        // pikselik bir kutu veriyordu. %50 gibi agresif kucultmede hedefin
+        // her pikseli aslinda ~2x2 kaynak pikseli temsil etmeli; sabit/dar
+        // kutu bu bilgiyi es geciyor, alias/gurultu birikiyor ve NVOF optik
+        // akis bu gurultulu proxy'den kestirim yaptigi icin hareket
+        // vektorleri gittikce yanlis cikip golgelerin "kaymasina" yol aciyor
+        // -- olcek dustukce bu etki (hedef/kaynak orani buyudukce) katlanarak
+        // artiyordu. Hedef piksel izdusumune gore yaricap kullanmak (yani
+        // g_invDestDims) kutuyu HER olcek oraninda doğru genislikte tutar.
+        float2 halfTexel = 0.5f * g_invDestDims;
 
         float4 s0 = gSrcTex.Sample(gLinear, uv + float2(-halfTexel.x, -halfTexel.y));
         float4 s1 = gSrcTex.Sample(gLinear, uv + float2( halfTexel.x, -halfTexel.y));
@@ -785,6 +802,13 @@ bool D3D12Interop::CreateDownscaleResources()
     sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
     sd.MaxLOD   = D3D11_FLOAT32_MAX;
     hr = m_d3d11Dev->CreateSamplerState(&sd, &m_downscaleSampler);
+    if (FAILED(hr)) return false;
+
+    D3D11_BUFFER_DESC cbd = {};
+    cbd.ByteWidth      = 16; // float2 g_invDestDims + float2 pad, 16-byte hizali
+    cbd.Usage          = D3D11_USAGE_DEFAULT;
+    cbd.BindFlags      = D3D11_BIND_CONSTANT_BUFFER;
+    hr = m_d3d11Dev->CreateBuffer(&cbd, nullptr, &m_downscaleCB);
     return SUCCEEDED(hr);
 }
 
@@ -1150,6 +1174,7 @@ void D3D12Interop::Cleanup()
     m_downscaleVS.Reset();
     m_downscalePS.Reset();
     m_downscaleSampler.Reset();
+    m_downscaleCB.Reset();
 
     m_fenceInD11.Reset();
     m_fenceInD12.Reset();
@@ -1225,6 +1250,13 @@ bool D3D12Interop::BeginFrame(
 
             m_d3d11Ctx->VSSetShader(m_downscaleVS.Get(), nullptr, 0);
             m_d3d11Ctx->PSSetShader(m_downscalePS.Get(), nullptr, 0);
+
+            if (m_downscaleCB)
+            {
+                float cb[4] = { 1.0f / static_cast<float>(m_workWidth), 1.0f / static_cast<float>(m_workHeight), 0.0f, 0.0f };
+                m_d3d11Ctx->UpdateSubresource(m_downscaleCB.Get(), 0, nullptr, cb, 0, 0);
+                m_d3d11Ctx->PSSetConstantBuffers(0, 1, m_downscaleCB.GetAddressOf());
+            }
 
             ID3D11ShaderResourceView* inSRVs[1] = { srcCapturedSRV };
             m_d3d11Ctx->PSSetShaderResources(0, 1, inSRVs);

@@ -127,6 +127,7 @@ private:
     ComPtr<ID3D11VertexShader>         m_downscaleVS;
     ComPtr<ID3D11PixelShader>          m_downscalePS;
     ComPtr<ID3D11SamplerState>         m_downscaleSampler;
+    ComPtr<ID3D11Buffer>               m_downscaleCB;
 
     // Shared resources (Motion Vectors: Optical Flow)
     ComPtr<ID3D11Texture2D>            m_sharedMvD11;

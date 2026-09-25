@@ -32,6 +32,7 @@ Texture2D<float4> gProxyTex    : register(t1);
 Texture2D<float4> gOriginalTex : register(t2);
 Texture2D<float4> gFpsTex      : register(t3);
 Texture2D<float4> gWarningTex  : register(t4);
+Texture2D<float4> gCursorTex   : register(t5);
 
 SamplerState      gPointSamp   : register(s0);
 SamplerState      gLinearSamp  : register(s1);
@@ -52,7 +53,9 @@ cbuffer FpsConfig : register(b0)
     int    g_stretchActive;    // 1 = cikis cozunurlugu yakalamadan buyuk (Tam Ekran Yap)
     int    g_warningEnabled;   // 1 = uyari goster
     float2 g_warningBoxSize;   // uyari kutusu boyutu
-    float2 g_padding2;         // 16-byte alignment (80 bytes total)
+    float2 g_cursorPos;        // imlec dokusunun sol-ust kosesi (cikis pikseli)
+    int    g_cursorEnabled;    // 1 = overlay kendi imlecini ciziyor
+    float  g_padding3;         // 16-byte alignment (96 bytes total)
 };
 
 float4 PS(float4 pos : SV_Position,
@@ -113,8 +116,19 @@ float4 PS(float4 pos : SV_Position,
             const float kRatioFloor = 1.0f / 512.0f;
             float rawRatio = (modelLuma + kRatioFloor) / (proxyLuma + kRatioFloor);
 
-            // Guard ratio against runaway highlights or extreme darkening
-            const float kMaxRatio = 2.0f;
+            // Guard ratio against runaway highlights or extreme darkening.
+            //
+            // ESKIDEN 2.0'DI (piksel basina +-2x parlaklik sapmasina izin
+            // veriyordu). boostedModel (t0) DLSS-NR'nin TEMPORAL biriktirilmis
+            // ciktisi -- optik akis kareler arasi golge/isik kenarini tam
+            // takip edemedigi anlarda (ozellikle hareket sirasinda) modelLuma
+            // proxyLuma'dan gecici olarak sapiyor. rawRatio bu sapmayi DOGRUDAN
+            // buyutup native karenin uzerine carpiyordu -- gecici bir izleme
+            // hatasi boylece "golgeler sapitiyor/yer degistiriyor" gibi cok
+            // goze batan bir gorsel sicramaya donusuyordu. Sinir daraltilinca
+            // (2.0 -> 1.35) DLSS-NR hala genel aydinlatma/golge duzeltmesi
+            // tasiyor ama tekil bir MV hatasi artik ekrani sicratamiyor.
+            const float kMaxRatio = 1.35f;
             float boundedRatio = clamp(rawRatio, 1.0f / kMaxRatio, kMaxRatio);
 
             // Detail strength modulation
@@ -206,12 +220,27 @@ float4 PS(float4 pos : SV_Position,
         }
     }
 
+    // Fare eslemesi acikken gercek OS imleci oyun dikdortgenine tasinir ve
+    // SetSystemCursor ile bosaltilir; kullanicinin gordugu imlec budur.
+    // Doku PREMULTIPLIED alfa tasir (MouseMapper::RenderCursorToPixels).
+    if (g_cursorEnabled != 0)
+    {
+        float2 cur = pos.xy - g_cursorPos;
+        if (cur.x >= 0.0f && cur.x < 128.0f && cur.y >= 0.0f && cur.y < 128.0f)
+        {
+            // Nokta ornekleme: imlec kenarlari keskin kalsin.
+            float4 c = gCursorTex.Sample(gPointSamp, cur / 128.0f);
+            color = c.rgb + color * (1.0f - c.a);
+        }
+    }
+
     return float4(saturate(color), 1.0f);
 }
 )HLSL";
 
 static constexpr int kFpsWidth  = 300;
 static constexpr int kFpsHeight = 120;
+static constexpr int kCursorTexSize = 128;   // MouseMapper::kCursorTexSize ile AYNI olmak zorunda
 static constexpr int kWarningWidth = 600;
 static constexpr int kWarningHeight = 40;
 
@@ -231,7 +260,9 @@ struct FpsCBufferData
     int   stretchActive;       // offset 56 (4 bytes)
     int   warningEnabled;      // offset 60 (4 bytes) -> 64 bytes
     float warningBoxSize[2];   // offset 64 (8 bytes)
-    float padding2[2];         // offset 72 (8 bytes) -> 80 bytes
+    float cursorPos[2];        // offset 72 (8 bytes) -> 80 bytes
+    int   cursorEnabled;       // offset 80 (4 bytes)
+    float padding3[3];         // offset 84 (12 bytes) -> 96 bytes
 };
 
 // -----------------------------------------------------------------------
@@ -289,8 +320,8 @@ bool Renderer::Init(ID3D11Device* device, HWND overlayHwnd, int width, int heigh
     float initScale = initialCfg.resolutionScale / 100.0f;
     if (initScale < 0.50f) initScale = 0.50f;
     if (initScale > 1.00f) initScale = 1.00f;
-    int initWorkW = ((int)(width * initScale + 0.5f) + 15) & ~15;
-    int initWorkH = ((int)(height * initScale + 0.5f) + 15) & ~15;
+    int initWorkW = ((int)(width * initScale + 0.5f) + 1) & ~1;
+    int initWorkH = ((int)(height * initScale + 0.5f) + 1) & ~1;
 
     if (m_d3d12Interop->Init(device, ctx.Get(), width, height, initWorkW, initWorkH))
     {
@@ -648,6 +679,16 @@ bool Renderer::CreateFpsResources(ID3D11Device* device)
     m_hWarningBmp = CreateDIBSection(m_hWarningDC, &wBmi, DIB_RGB_COLORS, &m_pWarningBits, nullptr, 0);
     SelectObject(m_hWarningDC, m_hWarningBmp);
 
+    // 5. Overlay imlec dokusu (128x128 premultiplied BGRA)
+    td.Width  = kCursorTexSize;
+    td.Height = kCursorTexSize;
+    hr = device->CreateTexture2D(&td, nullptr, &m_cursorTexture);
+    if (FAILED(hr)) return false;
+    hr = device->CreateShaderResourceView(m_cursorTexture.Get(), &srvd, &m_cursorSRV);
+    if (FAILED(hr)) return false;
+    m_cursorHasImage = false;
+    m_cursorEnabled  = false;
+
     m_lastRenderedFps  = -1;
     m_dlssnrActive     = false;
     m_isSubNative      = false;
@@ -807,7 +848,7 @@ void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, 
         SetBkMode(m_hWarningDC, TRANSPARENT);
         SetTextColor(m_hWarningDC, RGB(255, 255, 255));
         
-        const wchar_t* wText = L"YÜKSEK GPU YÜKÜ! FPS'İ SABİTLEYİN! (Kapatmak İçin F2)";
+        const wchar_t* wText = L"YÜKSEK GPU YÜKÜ! FPS'İ SABİTLEYİN! (F2)  |  Uyarıyı Kapat (F3)";
         if (!calibMessage.empty())
         {
             wText = calibMessage.c_str();
@@ -845,6 +886,34 @@ void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, 
 }
 
 // -----------------------------------------------------------------------
+// UpdateCursorImage / SetCursorOverlay
+//
+// Imlec goruntusu YALNIZCA sekil degistiginde yuklenir (MouseMapper handle
+// degisimini izler); konum her kare sabit bir cbuffer alanindan gelir.
+// -----------------------------------------------------------------------
+void Renderer::UpdateCursorImage(ID3D11DeviceContext* ctx, const uint32_t* pixels)
+{
+    if (!ctx || !pixels || !m_cursorTexture) return;
+
+    ctx->UpdateSubresource(m_cursorTexture.Get(), 0, nullptr, pixels,
+                           kCursorTexSize * sizeof(uint32_t), 0);
+    m_cursorHasImage = true;
+    m_cbufferDirty   = true;
+}
+
+void Renderer::SetCursorOverlay(bool enabled, float x, float y)
+{
+    if (m_cursorEnabled == enabled &&
+        fabsf(m_cursorPos[0] - x) < 0.01f && fabsf(m_cursorPos[1] - y) < 0.01f)
+        return;
+
+    m_cursorEnabled = enabled;
+    m_cursorPos[0]  = x;
+    m_cursorPos[1]  = y;
+    m_cbufferDirty  = true;
+}
+
+// -----------------------------------------------------------------------
 // UpdateFpsConstantBuffer
 // -----------------------------------------------------------------------
 void Renderer::UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx)
@@ -873,6 +942,9 @@ void Renderer::UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx)
     cb.warningEnabled    = m_lastRenderedWarning ? 1 : 0;
     cb.warningBoxSize[0] = static_cast<float>(kWarningWidth);
     cb.warningBoxSize[1] = static_cast<float>(kWarningHeight);
+    cb.cursorEnabled     = (m_cursorEnabled && m_cursorHasImage) ? 1 : 0;
+    cb.cursorPos[0]      = m_cursorPos[0];
+    cb.cursorPos[1]      = m_cursorPos[1];
 
     ctx->UpdateSubresource(m_fpsCBuffer.Get(), 0, nullptr, &cb, 0, 0);
     m_cbufferDirty       = false;
@@ -935,8 +1007,20 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     bool usedDlssNr = false;
     if (m_dlssnrManager && m_dlssnrManager->IsEnabled() && m_d3d12Interop)
     {
-        int targetWorkW = m_dlssnrManager->GetWorkWidth();
-        int targetWorkH = m_dlssnrManager->GetWorkHeight();
+        // KASITLI OLARAK GetWorkWidth/Height (HEDEF/pending) DEGIL,
+        // GetBuiltWorkWidth/Height (feature'in GERCEKTEN kurulu oldugu
+        // boyut) kullaniliyor. Olcek slider'i degisince DLSSNRManager
+        // hedefi hemen gunceller ama feature/guide dokularini 400ms
+        // debounce ile yeniden kurar (bkz. DLSSNRManager::Evaluate). Eger
+        // burada hedefe gore hemen resize edersek, D3D12Interop/
+        // MotionVectorManager YENI boyuta gecer ama NGX feature hala ESKI
+        // boyutta kurulu kalir -- o pencerede Evaluate() NGX'e "bu WxH"
+        // der, gercekte guide/feature ESKI boyuttadir; sonuc goze "her sey
+        // yer degistirmis golge" gibi gorunen bir bozulmadir. Ikisini ayni
+        // anda, feature GERCEKTEN yeniden kurulunca degistirmek bu yarisi
+        // ortadan kaldirir.
+        int targetWorkW = m_dlssnrManager->GetBuiltWorkWidth();
+        int targetWorkH = m_dlssnrManager->GetBuiltWorkHeight();
         if (targetWorkW > 0 && targetWorkH > 0 &&
             (m_d3d12Interop->GetWorkWidth() != targetWorkW || m_d3d12Interop->GetWorkHeight() != targetWorkH))
         {
@@ -961,11 +1045,15 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
             if (m_d3d12Interop->BeginFrame(inputTex.Get(), srv, mvMgr))
             {
                 ID3D12Resource* mvD12 = mvMgr ? m_d3d12Interop->GetMotionD12() : nullptr;
+                // Fotometrik guven dustuyse (akis suphe -- Gorev 4) NR'ye zehirli
+                // vektor beslemeden once temporal gecmisi burada kirdir.
+                bool flowSuspect = mvMgr && mvMgr->IsFlowSuspect();
                 if (m_dlssnrManager->Evaluate(
                     m_d3d12Interop->GetCommandList(),
                     m_d3d12Interop->GetInputD12(),
                     m_d3d12Interop->GetOutputD12(),
-                    mvD12))
+                    mvD12,
+                    flowSuspect))
                 {
                     if (m_d3d12Interop->EndFrame())
                     {
@@ -1042,13 +1130,40 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     ctx->PSSetShader(m_ps.Get(), nullptr, 0);
 
     bool dlssnrActive = usedDlssNr;
-    bool isSubNative = (usedDlssNr && m_dlssnrManager && m_dlssnrManager->GetResolutionScale() < 0.999f);
     float intensity = (m_dlssnrManager && usedDlssNr) ? m_dlssnrManager->GetIntensity() : 1.0f;
-    float colourStrength = 1.0f;
-    int workW = (m_dlssnrManager && usedDlssNr) ? m_dlssnrManager->GetWorkWidth() : m_width;
-    int workH = (m_dlssnrManager && usedDlssNr) ? m_dlssnrManager->GetWorkHeight() : m_height;
+    // PS()'teki modelChroma = boostedModel * chromaScale adimina bak: darkFade
+    // ve bu deger 1.0 oldugunda (ki cogu aydinlik sahnede oyle) nihai renk
+    // NEREDEYSE TAMAMEN boostedModel'in (t0, DLSS-NR'nin TEMPORAL/optik-akis
+    // bagimli ciktisi) kendi kroma desenini tasiyor -- yalnizca parlaklik
+    // buyuklugu original'e (native, ani/gecmissiz kare) ceki. Yorumdaki "kenar/
+    // detay %100 native'ten gelir" iddiasi bu yuzden ciplak matematikte tam
+    // gerceklesmiyordu: golgenin UZAYSAL/renk deseni hala modelden geliyordu,
+    // model MV hatasiyla kaydiginda o kayma direkt gorunuyordu. Bu degeri
+    // dusurmek agirligi transferredLuma'ya (native luma, yalnizca oran ile
+    // olceklenmis -- uzaysal olarak HEP native) kaydirip golge/isik kaymasinin
+    // gorunurlugunu azaltir; renk doygunlugundan kucuk bir odun verir.
+    float colourStrength = 0.45f;
+    // Burada da HEDEF degil, D3D12Interop'un (yukarida senkronize edilen)
+    // GERCEK boyutuyla ayni kaynaktan gelen built boyutu kullan.
+    int workW = (m_dlssnrManager && usedDlssNr) ? m_dlssnrManager->GetBuiltWorkWidth() : m_width;
+    int workH = (m_dlssnrManager && usedDlssNr) ? m_dlssnrManager->GetBuiltWorkHeight() : m_height;
     if (workW <= 0) workW = m_width;
     if (workH <= 0) workH = m_height;
+
+    // "%100'de bulanik" hatasinin gercek kaynagi: bu bayrak DAHA ONCE
+    // yalnizca cfg.resolutionScale < %100 mu diye bakiyordu. Fakat DLSS-NR
+    // calisma cozunurlugu NGX kararliligi icin 16 piksele hizalanir (bkz.
+    // DLSSNRManager), yani native cozunurluk 16'nin kati DEGILSE work
+    // boyutu %100 SECILSE BILE native'ten farkli kalir. gModelTex/gProxyTex
+    // (t0/t1) PS()'te HER ZAMAN dogrusal (bilinear) ornekleniyor; boyutlar
+    // eslesmezse bu, ekranin tamaminda goz ardi edilemez bir yumusamaya
+    // (blur) yol acar -- ozellikle HUD/metinde. isSubNative==1 dalindaki
+    // "luminance-ratio transfer" tam olarak bu durum icin var: yuksek
+    // frekansli detayi (kenar, metin) dogrudan native karadan alir, model
+    // cikisindan yalnizca isik oranini tasir. O yuzden bayrak GERCEK piksel
+    // uyusmazligina gore secilmeli, yapilandirilan yuzdeye gore degil.
+    bool isSubNative = (usedDlssNr && m_dlssnrManager &&
+        (workW != m_width || workH != m_height));
 
     float texelX = (workW > 0) ? (1.0f / static_cast<float>(workW)) : 0.0f;
     float texelY = (workH > 0) ? (1.0f / static_cast<float>(workH)) : 0.0f;
@@ -1077,24 +1192,23 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     // t2: Original Native Game Frame (full display resolution)
     // t3: FPS Counter Texture
     // t4: Warning Texture
-    ID3D11ShaderResourceView* srvs[5];
+    ID3D11ShaderResourceView* srvs[6];
     if (usedDlssNr && m_d3d12Interop)
     {
         srvs[0] = m_d3d12Interop->GetOutputSRV();
         srvs[1] = m_d3d12Interop->GetRawInputSRV();
         srvs[2] = srv;
-        srvs[3] = m_fpsSRV.Get();
-        srvs[4] = m_warningSRV.Get();
     }
     else
     {
         srvs[0] = renderSRV;
         srvs[1] = renderSRV;
         srvs[2] = renderSRV;
-        srvs[3] = m_fpsSRV.Get();
-        srvs[4] = m_warningSRV.Get();
     }
-    ctx->PSSetShaderResources(0, 5, srvs);
+    srvs[3] = m_fpsSRV.Get();
+    srvs[4] = m_warningSRV.Get();
+    srvs[5] = m_cursorSRV.Get();
+    ctx->PSSetShaderResources(0, 6, srvs);
 
     // Bind samplers: s0 = Point sampler (for native original), s1 = Linear sampler (for model/proxy)
     ID3D11SamplerState* samplers[2] = { m_sampler.Get(), m_linearSampler.Get() };
@@ -1107,8 +1221,8 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     ctx->Draw(3, 0);
 
     // Clear SRVs to prevent pipeline hazards
-    ID3D11ShaderResourceView* nullSRVs[4] = { nullptr, nullptr, nullptr, nullptr };
-    ctx->PSSetShaderResources(0, 4, nullSRVs);
+    ID3D11ShaderResourceView* nullSRVs[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
+    ctx->PSSetShaderResources(0, 6, nullSRVs);
 }
 
 // -----------------------------------------------------------------------
@@ -1192,6 +1306,11 @@ void Renderer::Cleanup()
 
     m_lastRenderedFps = -1;
     m_lastRenderedWarning = false;
+
+    m_cursorSRV.Reset();
+    m_cursorTexture.Reset();
+    m_cursorEnabled  = false;
+    m_cursorHasImage = false;
 
     m_warningSRV.Reset();
     m_warningTexture.Reset();

@@ -2,6 +2,9 @@
 #include "Common.h"
 #include "ConfigManager.h"
 #include "RTSSManager.h"
+#include "WebViewHost.h"
+#include "../third_party/json/json.hpp"
+#include <memory>
 
 class RtssWindow
 {
@@ -10,30 +13,14 @@ public:
     static void Show(HWND parent = nullptr);
     static void Hide();
     static bool IsOpen();
-    static HWND GetHwnd() { return s_hwnd; }
+    static HWND GetHwnd();
 
 private:
-    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-    static void CreateControls(HWND hwnd);
-    static void PopulateRTSSList();
+    static void OnWebMessage(const std::wstring& json);
+    static void DispatchMessage(const nlohmann::json& msg);
+    static void PushDirToJs();
+    static void PushProfilesToJs();
 
-    static HWND s_hwnd;
+    static std::unique_ptr<WebViewHost> s_host;
     static HINSTANCE s_hInstance;
-
-    // Controls
-    static HWND s_lblRtssDirTitle;
-    static HWND s_btnRtssDir;
-    static HWND s_lblRtssProfTitle;
-    static HWND s_comboRtssProf;
-    static HWND s_btnRefresh;
-    static HWND s_btnDelete;
-    static HWND s_btnClose;
-
-    // GDI resources
-    static HFONT s_fontTitle;
-    static HFONT s_fontNormal;
-    static HFONT s_fontBold;
-    static HBRUSH s_brBg;
-    static HBRUSH s_brCard;
-    static HBRUSH s_brBorder;
 };

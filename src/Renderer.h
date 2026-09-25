@@ -55,6 +55,14 @@ public:
     // FPS counter controls & updates
     void UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, bool showWarning, const double* gapHistory, int gapHistoryIdx, bool forceRedraw = false, const std::wstring& calibMessage = L"", bool fgMarkerActive = false);
     void SetFpsEnabled(bool enabled) { m_fpsEnabled = enabled; }
+
+    // ---- Overlay imleci (bkz. MouseMapper) ----
+    // Fare eslemesi acikken gercek OS imleci oyun dikdortgenine tasinir ve
+    // sistem imlecleri bosaltilir; ekranda gorunen imleci overlay cizer.
+    //  pixels : 128x128 premultiplied BGRA (nullptr = goruntu degismedi)
+    void UpdateCursorImage(ID3D11DeviceContext* ctx, const uint32_t* pixels);
+    //  enabled / x,y : cikis cozunurlugunde imlec dokusunun sol-ust kosesi
+    void SetCursorOverlay(bool enabled, float x, float y);
     bool IsFpsEnabled() const { return m_fpsEnabled; }
     void UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx);
 
@@ -115,6 +123,13 @@ private:
     HDC                              m_hFpsDC          = nullptr;
     HBITMAP                          m_hFpsBmp         = nullptr;
     void*                            m_pFpsBits        = nullptr;
+
+    // Overlay cursor resources
+    ComPtr<ID3D11Texture2D>          m_cursorTexture;
+    ComPtr<ID3D11ShaderResourceView> m_cursorSRV;
+    bool                             m_cursorEnabled = false;
+    bool                             m_cursorHasImage = false;
+    float                            m_cursorPos[2]  = { 0.0f, 0.0f };
 
     // Warning display resources
     ComPtr<ID3D11Texture2D>          m_warningTexture;
