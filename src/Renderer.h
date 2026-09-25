@@ -56,6 +56,12 @@ public:
     void UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, bool showWarning, const double* gapHistory, int gapHistoryIdx, bool forceRedraw = false, const std::wstring& calibMessage = L"", bool fgMarkerActive = false);
     void SetFpsEnabled(bool enabled) { m_fpsEnabled = enabled; }
 
+    // FPS gostergesi gorunum modu: 0 = Detayli (rozet + karezamani grafigi + VLSS5
+    // etiketi), 1 = Sade (yalnizca "IN/OUT" yazisi), 2 = Minimal (yalnizca cikis FPS'i).
+    // Deger degisince bir sonraki UpdateOSD tikinde yeniden cizilir.
+    void SetFpsDisplayMode(int mode) { if (m_fpsDisplayMode != mode) { m_fpsDisplayMode = mode; m_cbufferDirty = true; } }
+    int  GetFpsDisplayMode() const { return m_fpsDisplayMode; }
+
     // ---- Overlay imleci (bkz. MouseMapper) ----
     // Fare eslemesi acikken gercek OS imleci oyun dikdortgenine tasinir ve
     // sistem imlecleri bosaltilir; ekranda gorunen imleci overlay cizer.
@@ -139,6 +145,7 @@ private:
     void*                            m_pWarningBits    = nullptr;
 
     bool                             m_fpsEnabled          = true;
+    int                              m_fpsDisplayMode      = 0; // 0=Detayli 1=Sade 2=Minimal
     int                              m_lastRenderedFps     = -1;
     bool                             m_lastRenderedWarning = false;
     bool                             m_lastRenderedDlss    = false;

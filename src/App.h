@@ -72,6 +72,11 @@ public:
     // Update preferred GPU (resets D3D device if in menu so next capture uses new GPU)
     void SetPreferredGpu(const std::wstring& gpuName);
 
+    // FPS gostergesi gorunum modunu calisirken canli uygular (bkz. Renderer::SetFpsDisplayMode).
+    // Yakalama surmuyorsa (m_renderer == nullptr) no-op; bir sonraki StartOverlay
+    // zaten ConfigManager'dan guncel degeri okur.
+    void SetFpsDisplayMode(int mode) { if (m_renderer) m_renderer->SetFpsDisplayMode(mode); }
+
 private:
     // D3D11 device shared for the lifetime of the app.
     bool InitD3D();

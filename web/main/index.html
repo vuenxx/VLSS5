@@ -130,6 +130,22 @@
   }
   .targetToggles .toggle-row { padding: 5px 0; }
 
+  /* FPS Göstergesi altındaki mod seçici -- sadece gösterge açıkken anlamlı,
+     kapalıyken soluklaşıp tıklanamaz olur (görüntü kirliliği yapmasın diye
+     ayrı bir satıra değil, aynı toggle-row akışına gömülü). */
+  .fpsModeRow {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 3px 0 7px 0;
+    margin-top: -3px;
+    transition: opacity .15s ease;
+  }
+  .fpsModeRow.disabled { opacity: .4; pointer-events: none; }
+  .fpsModeRow .label { font-size: 11px; color: var(--text-dim); flex-shrink: 0; }
+  .fpsModeRow select { width: auto; flex: 0 1 auto; font-size: 11px; padding: 3px 6px; }
+
   .startBtn {
     flex-shrink: 0;
     padding: 13px;
@@ -524,6 +540,14 @@
             <div class="toggle-row" id="rowFps">
               <div class="label">FPS Göstergesi</div>
               <div class="switch" id="swFps"><div class="knob"></div></div>
+            </div>
+            <div class="fpsModeRow" id="rowFpsMode">
+              <div class="label">Gösterge Modu</div>
+              <select id="fpsModeSelect">
+                <option value="0">Detaylı (Grafik)</option>
+                <option value="1">Sade (IN / OUT)</option>
+                <option value="2">Minimal (Sadece FPS)</option>
+              </select>
             </div>
             <div class="toggle-row" id="rowDlss">
               <div class="label">VLSS5 (Nöral)</div>

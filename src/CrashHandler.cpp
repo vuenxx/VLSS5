@@ -13,13 +13,17 @@ namespace
         GetModuleFileNameW(nullptr, dir, MAX_PATH);
         PathRemoveFileSpecW(dir);
 
+        wchar_t reportDir[MAX_PATH] = {};
+        PathCombineW(reportDir, dir, L"crashreporter");
+        CreateDirectoryW(reportDir, nullptr);
+
         SYSTEMTIME st;
         GetLocalTime(&st);
         wchar_t fileName[128];
         swprintf_s(fileName, L"%s_%04u%02u%02u_%02u%02u%02u.dmp",
             prefix, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 
-        PathCombineW(outPath, dir, fileName);
+        PathCombineW(outPath, reportDir, fileName);
     }
 
     void WriteMiniDump(const wchar_t* path, EXCEPTION_POINTERS* exceptionPointers, DWORD threadId)
@@ -124,7 +128,7 @@ namespace CrashHandler
         wchar_t message[512];
         swprintf_s(message,
             L"VLSS5 yanıt vermiyor ('%hs' aşamasında takıldı) ve otomatik olarak kapatılacak.\n\n"
-            L"Teşhis dosyası uygulama klasörüne kaydedildi (vlss5_hang_*.dmp).\n"
+            L"Teşhis dosyası \"crashreporter\" klasörüne kaydedildi (vlss5_hang_*.dmp).\n"
             L"VLSS5'i yeniden başlatabilirsiniz.",
             stageName);
 

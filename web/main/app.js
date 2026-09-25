@@ -100,6 +100,9 @@ function applyState(state) {
   setToggle("swDlss", state.dlss);
   setToggle("swFullscreen", state.fullscreenStretch);
 
+  $("fpsModeSelect").value = String(state.fpsDisplayMode || 0);
+  $("rowFpsMode").classList.toggle("disabled", !state.fps);
+
   const btnStart = $("btnStart");
   if (state.isCapturing) {
     btnStart.textContent = "DURDUR  ■";
@@ -252,7 +255,11 @@ $("swVsync").addEventListener("click", () => {
 $("swFps").addEventListener("click", () => {
   const next = !$("swFps").classList.contains("on");
   setToggle("swFps", next);
+  $("rowFpsMode").classList.toggle("disabled", !next);
   vlss5.send("setFps", { value: next });
+});
+$("fpsModeSelect").addEventListener("change", () => {
+  vlss5.send("setFpsDisplayMode", { value: parseInt($("fpsModeSelect").value, 10) });
 });
 $("swDlss").addEventListener("click", () => {
   const next = !$("swDlss").classList.contains("on");

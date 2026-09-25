@@ -40,7 +40,7 @@ SamplerState      gLinearSamp  : register(s1);
 cbuffer FpsConfig : register(b0)
 {
     float2 g_screenSize;       // (width, height)
-    float2 g_fpsBoxSize;       // (180, 36)
+    float2 g_fpsBoxSize;       // on-screen kutu boyutu (moda gore kuculur)
     int    g_fpsEnabled;       // 1 = enabled, 0 = disabled
     float  g_boostFactor;      // 1.0 = normal, >1.0 = linear extrapolation boost
     int    g_dlssnrActive;     // 1 = DLSS-NR active, 0 = passthrough
@@ -55,6 +55,12 @@ cbuffer FpsConfig : register(b0)
     float2 g_warningBoxSize;   // uyari kutusu boyutu
     float2 g_cursorPos;        // imlec dokusunun sol-ust kosesi (cikis pikseli)
     int    g_cursorEnabled;    // 1 = overlay kendi imlecini ciziyor
+    float2 g_fpsTexSize;       // gFpsTex'in gercek doku boyutu (300, 120) -- SABIT.
+                                // g_fpsBoxSize'dan AYRI tutulur: UV normalizasyonu
+                                // buradan yapilir, boylece kucuk moddaki kutu dokunun
+                                // sol-ust kosesini gerdirmeden (1 piksel = 1 piksel)
+                                // KIRPAR. g_fpsBoxSize ile normalize edilseydi tum
+                                // doku (bos alan dahil) kucuk kutuya sikistirilirdi.
     float  g_padding3;         // 16-byte alignment (96 bytes total)
 };
 
@@ -198,7 +204,10 @@ float4 PS(float4 pos : SV_Position,
 
         if (pos.x >= left && pos.x < right && pos.y >= top && pos.y < bottom)
         {
-            float2 fpsUv = float2((pos.x - left) / g_fpsBoxSize.x, (pos.y - top) / g_fpsBoxSize.y);
+            // g_fpsTexSize (SABIT doku boyutu) ile normalize edilir, g_fpsBoxSize (moda
+            // gore kuculen ekran kutusu) ile DEGIL -- boylece kutu kuculunce doku
+            // gerilmez, sadece sol-ust kosesi 1:1 piksel eslesmesiyle kirpilir.
+            float2 fpsUv = float2((pos.x - left) / g_fpsTexSize.x, (pos.y - top) / g_fpsTexSize.y);
             float4 fpsColor = gFpsTex.Sample(gLinearSamp, fpsUv);
             color = fpsColor.rgb * fpsColor.a + color * (1.0f - fpsColor.a);
         }
@@ -244,6 +253,22 @@ static constexpr int kCursorTexSize = 128;   // MouseMapper::kCursorTexSize ile 
 static constexpr int kWarningWidth = 600;
 static constexpr int kWarningHeight = 40;
 
+// FPS gostergesinin EKRANDA KAPLADIGI kutu boyutu, gorunum moduna gore. gFpsTex
+// dokusu her zaman kFpsWidth x kFpsHeight kalir (yeniden olusturmaya gerek yok);
+// kucuk modlarda yalnizca dokunun sol-ust kosesindeki bu kadarlik kisim cizilip
+// 1:1 piksel eslesmesiyle kirpilir (bkz. shader'daki g_fpsTexSize notu) -- yani
+// "Sade"/"Minimal" gercekten daha kucuk bir kutu olarak gorunur, buyuk kutunun
+// icine sikistirilmis kucuk yazi degil.
+static void GetFpsBoxDimsForMode(int mode, int& outW, int& outH)
+{
+    switch (mode)
+    {
+    case 2:  outW = 130; outH = 46; break; // Minimal: yalnizca "N FPS"
+    case 1:  outW = 220; outH = 54; break; // Sade: yalnizca "IN: n | OUT: n"
+    default: outW = kFpsWidth; outH = kFpsHeight; break; // Detayli: rozet + grafik
+    }
+}
+
 struct FpsCBufferData
 {
     float screenSize[2];       // offset 0 (8 bytes)
@@ -262,7 +287,8 @@ struct FpsCBufferData
     float warningBoxSize[2];   // offset 64 (8 bytes)
     float cursorPos[2];        // offset 72 (8 bytes) -> 80 bytes
     int   cursorEnabled;       // offset 80 (4 bytes)
-    float padding3[3];         // offset 84 (12 bytes) -> 96 bytes
+    float fpsTexSize[2];       // offset 84 (8 bytes) -> 92 bytes -- gFpsTex'in SABIT doku boyutu (bkz. shader notu)
+    float padding3;            // offset 92 (4 bytes) -> 96 bytes
 };
 
 // -----------------------------------------------------------------------
@@ -728,13 +754,19 @@ void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, 
     m_lastRenderedWarning = showWarning;
     m_lastRenderedCalibMessage = calibMessage;
 
+    // gFpsTex her zaman kFpsWidth x kFpsHeight kalir; Sade/Minimal modlarda
+    // yalnizca dokunun sol-ust kosesindeki boxW x boxH kadari cizilir ve ekranda
+    // da o kucuk boyutta gosterilir (bkz. GetFpsBoxDimsForMode notu).
+    int boxW, boxH;
+    GetFpsBoxDimsForMode(m_fpsDisplayMode, boxW, boxH);
+
     // 1. Draw rounded badge background
     HBRUSH hBgBrush   = CreateSolidBrush(RGB(18, 18, 22));
     COLORREF borderColor = dlssnrOn ? RGB(0, 230, 115) : (dlssOn ? RGB(0, 180, 90) : RGB(70, 70, 80));
     HPEN   hBorderPen = CreatePen(PS_SOLID, 1, borderColor);
     HGDIOBJ oldBrush  = SelectObject(m_hFpsDC, hBgBrush);
     HGDIOBJ oldPen    = SelectObject(m_hFpsDC, hBorderPen);
-    RoundRect(m_hFpsDC, 0, 0, kFpsWidth, kFpsHeight, 10, 10);
+    RoundRect(m_hFpsDC, 0, 0, boxW, boxH, 10, 10);
     
     // 2. Draw crisp anti-aliased font
     HFONT hFont = CreateFontW(-16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
@@ -745,29 +777,45 @@ void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, 
     COLORREF textColor = dlssnrOn ? RGB(50, 255, 130) : (dlssOn ? RGB(40, 255, 110) : RGB(200, 205, 215));
     SetTextColor(m_hFpsDC, textColor);
 
-    std::wstring dlssLabelStr = L"⯀ OFF";
-    if (dlssnrOn) dlssLabelStr = L"⯀ VLSS5";
-    else if (dlssOn) dlssLabelStr = L"⯀ VLSS5";
-    
-    if (fgMarkerActive)
+    // Sade ve Minimal modlar VLSS5 etiketini ve karezamani grafigini atlar --
+    // amac goruntu kirliligini azaltmak, sadece istenen sayilari birakmak.
+    wchar_t text[64];
+    if (m_fpsDisplayMode == 2)
     {
-        dlssLabelStr += L" (DEV)";
+        // Minimal: yalnizca cikis FPS'i, buyuk ve tek basina.
+        swprintf_s(text, L"%d FPS", outputFps);
+    }
+    else if (m_fpsDisplayMode == 1)
+    {
+        // Sade: yalnizca IN/OUT yazisi, etiketsiz.
+        swprintf_s(text, L"IN: %d  |  OUT: %d", inputFps, outputFps);
+    }
+    else
+    {
+        std::wstring dlssLabelStr = L"⯀ OFF";
+        if (dlssnrOn) dlssLabelStr = L"⯀ VLSS5";
+        else if (dlssOn) dlssLabelStr = L"⯀ VLSS5";
+
+        if (fgMarkerActive)
+        {
+            dlssLabelStr += L" (DEV)";
+        }
+
+        swprintf_s(text, L" IN: %d FPS | OUT: %d FPS %s", inputFps, outputFps, dlssLabelStr.c_str());
     }
 
-    wchar_t text[64];
-    swprintf_s(text, L" IN: %d FPS | OUT: %d FPS %s", inputFps, outputFps, dlssLabelStr.c_str());
-    
-    RECT rc = { 0, 4, kFpsWidth, 24 };
+    const bool showGraph = (m_fpsDisplayMode == 0);
+    RECT rc = showGraph ? RECT{ 0, 4, boxW, 24 } : RECT{ 0, 0, boxW, boxH };
     DrawTextW(m_hFpsDC, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    
+
     // 3. Draw Frametime Graph
-    if (gapHistory)
+    if (gapHistory && showGraph)
     {
         HPEN hGraphPen = CreatePen(PS_SOLID, 1, RGB(0, 200, 255));
         SelectObject(m_hFpsDC, hGraphPen);
-        
+
         int graphTop = 30;
-        int graphHeight = kFpsHeight - graphTop - 10;
+        int graphHeight = boxH - graphTop - 10;
         int maxHistory = 120;
         
         // Find max gap to scale
@@ -786,7 +834,7 @@ void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, 
             double gap = gapHistory[idx];
             if (gap > 100.0) gap = 100.0;
             
-            int x = 10 + (i * (kFpsWidth - 20)) / maxHistory;
+            int x = 10 + (i * (boxW - 20)) / maxHistory;
             int y = graphTop + graphHeight - (int)((gap / maxGap) * graphHeight);
             
             if (i == 0) MoveToEx(m_hFpsDC, x, y, nullptr);
@@ -925,8 +973,14 @@ void Renderer::UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx)
     // kullanilmali; boylece kutu gerdirilmez, native boyutta ve keskin kalir.
     cb.screenSize[0]     = static_cast<float>(m_outWidth  > 0 ? m_outWidth  : m_width);
     cb.screenSize[1]     = static_cast<float>(m_outHeight > 0 ? m_outHeight : m_height);
-    cb.fpsBoxSize[0]     = static_cast<float>(kFpsWidth);
-    cb.fpsBoxSize[1]     = static_cast<float>(kFpsHeight);
+    {
+        int boxW, boxH;
+        GetFpsBoxDimsForMode(m_fpsDisplayMode, boxW, boxH);
+        cb.fpsBoxSize[0] = static_cast<float>(boxW);
+        cb.fpsBoxSize[1] = static_cast<float>(boxH);
+    }
+    cb.fpsTexSize[0]     = static_cast<float>(kFpsWidth);
+    cb.fpsTexSize[1]     = static_cast<float>(kFpsHeight);
     cb.fpsEnabled        = m_fpsEnabled ? 1 : 0;
     cb.boostFactor       = m_boostFactor;
     cb.dlssnrActive      = m_dlssnrActive ? 1 : 0;

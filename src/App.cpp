@@ -527,6 +527,7 @@ bool App::StartOverlayCommon(bool vsync, bool dlss, bool fps)
     const auto& initialCfg = ConfigManager::Get().Config();
     m_renderer->SetBoostFactor(initialCfg.boostFactor);
     m_renderer->SetSplitScreen(initialCfg.splitScreen, initialCfg.splitPos);
+    m_renderer->SetFpsDisplayMode(initialCfg.fpsDisplayMode);
 
     if (m_renderer->GetDLSSManager())
     {
@@ -1431,13 +1432,6 @@ void App::UpdateCalibration(const Dlss5Config& cfg)
 
         DLSS_Log("[Calib] Sinirsiz olcum: giris=%d cikis=%d | monitor=%d Hz -> ust sinir=%d",
                  inFps, outFps, refreshHz, m_calibHiBound);
-
-        if (CalibInSync(inFps, outFps))
-        {
-            // VLSS5 zaten oyunun tam hizina yetisiyor -> limit gereksiz.
-            CalibFinish(0);
-            return;
-        }
 
         // Kaba taramaya TABANDAN basla ve 10'ar 10'ar cik.
         //

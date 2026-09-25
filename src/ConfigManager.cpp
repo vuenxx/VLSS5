@@ -173,6 +173,9 @@ void ConfigManager::Load()
     if (m_config.splitPos < 0.0f) m_config.splitPos = 0.0f;
     if (m_config.splitPos > 1.0f) m_config.splitPos = 1.0f;
 
+    m_config.fpsDisplayMode = GetPrivateProfileIntW(sec, L"FpsDisplayMode", 0, ini.c_str());
+    if (m_config.fpsDisplayMode < 0 || m_config.fpsDisplayMode > 2) m_config.fpsDisplayMode = 0;
+
     m_config.settingsVk  = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"SettingsVk", VK_INSERT, ini.c_str()));
     m_config.settingsMod = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"SettingsMod", 0, ini.c_str()));
 
@@ -324,6 +327,7 @@ void ConfigManager::Save()
     writeInt(L"VLSS5", L"SuppressRtssRunningWarning", m_config.suppressRtssRunningWarning ? 1 : 0);
     writeInt(L"VLSS5", L"AutoCheckUpdates", m_config.autoCheckUpdates ? 1 : 0);
     writeFloat(L"VLSS5", L"SplitPos", m_config.splitPos);
+    writeInt(L"VLSS5", L"FpsDisplayMode", m_config.fpsDisplayMode);
 
     writeInt(L"Hotkeys", L"SettingsVk", static_cast<int>(m_config.settingsVk));
     writeInt(L"Hotkeys", L"SettingsMod", static_cast<int>(m_config.settingsMod));

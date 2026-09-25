@@ -98,6 +98,12 @@ struct Dlss5Config
 
     float splitPos           = 0.5f; // 0.0 - 1.0 (Bölünme Çizgisi Konumu, varsayılan %50)
 
+    // FPS göstergesi görünüm modu (bkz. Renderer::UpdateOSD).
+    // 0 = Detaylı (rozet + karezamanı grafiği + VLSS5 etiketi, varsayılan)
+    // 1 = Sade    (yalnızca "IN / OUT" yazısı)
+    // 2 = Minimal (yalnızca çıkış FPS'i)
+    int   fpsDisplayMode     = 0;
+
     // Settings window toggle hotkey (Default: INSERT)
     UINT  settingsVk     = VK_INSERT;
     UINT  settingsMod    = 0;       // MOD_CONTROL, MOD_ALT, MOD_SHIFT vs. (0 = bare key)

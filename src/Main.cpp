@@ -57,6 +57,18 @@ using json = nlohmann::json;
 #define WM_APP_UPDATES_DL_PROGRESS     (WM_APP + 6) // lParam = UpdateChecker::DownloadProgress*
 #define WM_APP_UPDATES_DL_DONE         (WM_APP + 7) // lParam = std::wstring* (basariliysa dosya yolu, degilse hata metni), wParam = basari (1/0)
 
+// BASLAT butonu: g_app->Run() TUM yakalama oturumu boyunca BLOKE OLAN bir
+// dongudur. Bunu dogrudan OnMainWebMessage ("startStop") icinden -- yani
+// WebView2'nin kendi WebMessageReceived COM callback'inin ICINDEN -- cagirmak,
+// WM_APP+4 aciklamasindaki (openSettings/openRtss/vs.) AYNI reentrant COM
+// tuzagina dusuyordu: Run() donene kadar (yani DURDUR'a basilip yakalama
+// bitene kadar) WebView2'nin callback yigini hic geri donmuyor, bu da o sure
+// boyunca JS -> native mesajlarinin (DURDUR dahil) guvenilmez/gec islenmesine
+// yol aciyordu. Cozum ayni: gercek baslatma WM_APP+8 ile ertelenir, boylece
+// Run() normal mesaj dongusune donulduktan SONRA, WebView2 callback yigininin
+// tamamen disinda calisir.
+#define WM_APP_START_CAPTURE           (WM_APP + 8) // wParam = g_windows[] indeksi
+
 // ---------------------------------------------------------------------------
 // Globals
 // ---------------------------------------------------------------------------
@@ -225,6 +237,7 @@ static json BuildStateJson()
     data["fps"]               = g_fpsEnabled;
     data["dlss"]              = g_dlssEnabled;
     data["fullscreenStretch"] = g_fullscreenStretch;
+    data["fpsDisplayMode"]    = ConfigManager::Get().Config().fpsDisplayMode;
 
     bool running = IsOverlayRunning();
     data["isCapturing"]        = running;
@@ -764,6 +777,7 @@ static void PopulateGpuList(HWND /*hwnd*/)
 // Hotkey & Capture Management
 // ---------------------------------------------------------------------------
 static DWORD g_lastHotkeyTick = 0;
+static bool  g_prevTimerStopKeyDown = false; // WM_TIMER fallback poller icin kenar (edge) takibi
 
 static void RegisterAppHotkey(HWND hwnd)
 {
@@ -1053,6 +1067,15 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
             g_fpsEnabled = msg.value("value", g_fpsEnabled);
             PushStateToJs();
         }
+        else if (cmd == "setFpsDisplayMode")
+        {
+            int mode = msg.value("value", ConfigManager::Get().Config().fpsDisplayMode);
+            if (mode < 0 || mode > 2) mode = 0;
+            ConfigManager::Get().Config().fpsDisplayMode = mode;
+            ConfigManager::Get().Save();
+            if (g_app) g_app->SetFpsDisplayMode(mode); // aktif yakalama varsa canli uygula
+            PushStateToJs();
+        }
         else if (cmd == "setDlss")
         {
             g_dlssEnabled = msg.value("value", g_dlssEnabled);
@@ -1168,10 +1191,11 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
                 else
                 {
                     g_selectedTargetIndex = sel;
-                    if (g_windows[sel].monitor)
-                        StartCaptureWithMonitor(hwnd, g_windows[sel].monitor);
-                    else
-                        StartCaptureWithTarget(hwnd, g_windows[sel].hwnd);
+                    // Bkz. WM_APP_START_CAPTURE aciklamasi: gercek baslatma (ve
+                    // onun ICINDEKI bloke edici g_app->Run() dongusu) burada
+                    // DEGIL, bu WebView2 callback'i tamamen bittikten sonra
+                    // calismali.
+                    PostMessageW(hwnd, WM_APP_START_CAPTURE, static_cast<WPARAM>(sel), 0);
                 }
             }
         }
@@ -1793,6 +1817,19 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         break;
     }
 
+    case WM_APP_START_CAPTURE:
+    {
+        int sel = static_cast<int>(wParam);
+        if (sel >= 0 && sel < static_cast<int>(g_windows.size()))
+        {
+            if (g_windows[sel].monitor)
+                StartCaptureWithMonitor(hwnd, g_windows[sel].monitor);
+            else
+                StartCaptureWithTarget(hwnd, g_windows[sel].hwnd);
+        }
+        break;
+    }
+
     case WM_APP_UPDATES_FETCH_DONE:
     {
         // Bkz. StartUpdatesCheck: FetchLatestReleases arka plan thread'inde
@@ -1916,10 +1953,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         {
             if (!InputForwarder::IsCapturing())
             {
-                if (InputForwarder::IsStopKeyDown())
+                // Kenar (edge) tetikleme: tus basiliyken her 50ms'de bir yeniden
+                // ates almasin -- aksi halde Alt+S'i 400ms'den uzun basili tutmak
+                // (sıradan bir basis suresi) DURDUR'un hemen ardindan BASLAT'i
+                // tekrar tetikliyor, kullanici "hic durmuyor, tekrar tekrar
+                // olcekleme yapiyor" olarak goruyordu.
+                const bool down = InputForwarder::IsStopKeyDown();
+                if (down && !g_prevTimerStopKeyDown)
                 {
                     TriggerCaptureToggle(hwnd);
                 }
+                g_prevTimerStopKeyDown = down;
             }
             return 0;
         }
