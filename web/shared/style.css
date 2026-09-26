@@ -185,18 +185,6 @@ button.danger {
 button.danger:hover { background: #b42828; }
 button.danger:disabled { background: #3c2d2d; cursor: default; }
 
-button.rebind {
-  min-width: 120px;
-  padding: 6px 10px;
-  border-radius: 6px;
-  border: 1px solid var(--border);
-  background: var(--card);
-  color: var(--text);
-  cursor: pointer;
-  font-family: inherit;
-}
-button.rebind.active { background: var(--border); border-color: var(--neon); }
-
 .hotkey-row {
   display: flex;
   align-items: center;
@@ -205,6 +193,29 @@ button.rebind.active { background: var(--border); border-color: var(--neon); }
   border-bottom: 1px solid var(--border);
 }
 .hotkey-row .label { font-weight: 600; }
+
+/* Tus atama: "tusa bas ve bekle" YERINE dropdown'dan secim (bkz. konusma) --
+   bekleyen bir yakalama durumu yok, secim aninda uygulanir. */
+.rebind-select {
+  width: auto;
+  min-width: 110px;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.hotkey-combo {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.mod-chk {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 11px;
+  color: var(--text-dim);
+  cursor: pointer;
+}
+.mod-chk input { cursor: pointer; }
 
 select#profileList, select#presetSourceList { }
 

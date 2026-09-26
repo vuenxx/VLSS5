@@ -24,14 +24,21 @@ public:
 
     static void SetExternalKeyCapturedCallback(KeyCapturedCallback cb);
 
-    // Faz 3: Main.cpp'nin ana pencere sekmesi WH_KEYBOARD_LL hook mekanizmasini
-    // TEKRAR YAZMAK yerine dogrudan bu ikisini cagirir (bkz. plan section 4).
+    // Ayri "Tuşları Değiştir" pop-up penceresi (web/hotkeys/*, artik UI'dan
+    // erisilmiyor ama sinif hala bu akisi destekliyor) icin "bas -> tusa bas"
+    // yakalama akisi.
     static void StartKeybindCapture(int hotkeyId);
     static void EndKeybindCapture(bool save, UINT vk, UINT mod);
 
-private:
-    static LRESULT CALLBACK RebindKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
+    // Ana pencerenin "Tuşları Değiştir" paneli artik "tusa bas ve bekle"
+    // YERINE bir dropdown'dan (F1, F2, ... gibi) secim yapiyor -- bekleyecek
+    // bir sey olmadigi icin StartKeybindCapture/EndKeybindCapture'daki
+    // s_rebindingKey durum makinesine hic girmeden, secilen vk/mod'u DOGRUDAN
+    // yazan bu yol kullaniliyor (bkz. web/main/app.js, Main.cpp "hotkeysSetKey").
+    static void SetKey(int hotkeyId, UINT vk, UINT mod);
 
+private:
+    static void ApplyAndNotify(int hotkeyId, UINT vk, UINT mod);
     static void OnWebMessage(const std::wstring& json);
     static void PushHotkeysToJs();
 
@@ -39,7 +46,6 @@ private:
     static HINSTANCE s_hInstance;
 
     static bool s_rebindingKey;
-    static HHOOK s_rebindHook;
     static int s_currentRebindId; // 0=Settings, 2=Focus, 3=FPS, 4=VLSS, 5=Calib, 6=Start, 7=DismissWarning
 
     static KeyCapturedCallback s_externalCallback;

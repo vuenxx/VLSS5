@@ -31,9 +31,16 @@ struct HotkeyConfig
 //    - ReShade, games, and every other app receive ALL keys untouched
 //    - Works for bare keys (Insert) and modifier combos (Alt+S)
 //
-//  A WH_KEYBOARD_LL hook is installed ONLY during the brief keybind-
-//  assignment flow in the menu UI (BeginCapture / EndCapture), and it is
-//  removed the moment the user presses a key.
+//  The keybind-assignment flow (BeginCapture / EndCapture) used to install a
+//  temporary WH_KEYBOARD_LL hook while the menu UI waited for a key. That is
+//  GONE too now -- a system-wide keyboard hook, even a short-lived one, is
+//  one of the single strongest behavioral signals AV heuristics (incl.
+//  Defender's Wacatac.B!ml) associate with keyloggers, especially from an
+//  elevated/admin process. Rebinding is now done entirely via the WebView2
+//  UI's own "keydown" DOM event (bkz. HotkeysWindow.cpp, web/hotkeys/app.js,
+//  web/main/app.js) -- zero Win32 hook APIs anywhere in this codebase.
+//  BeginCapture/EndCapture below just track "are we currently waiting for a
+//  key" state for that JS-driven flow; they install nothing.
 // ---------------------------------------------------------------------------
 class InputForwarder
 {
@@ -50,10 +57,7 @@ public:
     static bool IsCapturing() { return s_capturing; }
 
 private:
-    static LRESULT CALLBACK CaptureKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam);
-
     static HotkeyConfig                       s_config;
     static bool                               s_capturing;
-    static HHOOK                              s_captureHook;
     static std::function<void(HotkeyConfig)>  s_captureCallback;
 };

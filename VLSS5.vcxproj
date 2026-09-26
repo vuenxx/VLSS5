@@ -150,7 +150,6 @@
     <ClCompile Include="src\ConfirmDialog.cpp" />
     <ClCompile Include="src\CrashHandler.cpp" />
     <ClCompile Include="src\WebViewHost.cpp" />
-    <ClCompile Include="src\UpdateChecker.cpp" />
   </ItemGroup>
 
   <!-- ======================================================= -->
@@ -180,7 +179,6 @@
     <ClInclude Include="src\ConfirmDialog.h" />
     <ClInclude Include="src\CrashHandler.h" />
     <ClInclude Include="src\WebViewHost.h" />
-    <ClInclude Include="src\UpdateChecker.h" />
     <ClInclude Include="src\Version.h" />
     <ClInclude Include="src\nvOpticalFlowCommon.h" />
     <ClInclude Include="src\nvOpticalFlowD3D11.h" />

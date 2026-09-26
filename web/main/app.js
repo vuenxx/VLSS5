@@ -137,110 +137,21 @@ function applyState(state) {
 vlss5.on("state", (msg) => applyState(msg.data));
 
 // ---------------------------------------------------------------------------
-// nvngx_dlssnr.dll durum isigi + surukle-birak yukleme -- BASLAT'in USTUNDE,
-// sag altta ayri bir bolum (bkz. web/main/index.html .homeBottom).
-//
-// WebView2 (standart web File API gibi) suruklenen dosyanin GERCEK dosya
-// sistemi YOLUNU vermiyor -- sadece icerigini (File nesnesi) veriyor. Bu
-// yuzden yol native'e gonderilmiyor; dosya PARCALARA bolunup base64 ile
-// IPC uzerinden native'e akitiliyor (bkz. Main.cpp "nvngxDropBegin/Chunk/End"),
-// native de bunlari nvngx_dlssnr.dll olarak diske yaziyor. Buyuk (>100MB)
-// dosyalarda tek seferde tum icerigi belleğe/JSON'a almamak icin 4MB'lik
-// parcalar kullanilir.
+// nvngx_dlssnr.dll durum isigi -- BASLAT'in USTUNDE, sag altta ayri bir
+// bolum (bkz. web/main/index.html .homeBottom). Salt bilgi amacli: dosya
+// exe'nin yanindaysa yesil/"hazir", degilse ne yapilmasi gerektigini soyler.
+// Surukle-birak yukleme kaldirildi -- dosyayi kullanici exe klasorune KENDI
+// elle koyar (bkz. Main.cpp "nvngxStatus" -- IPC ile sadece durum okunur,
+// artik dosya icerigi hic native'e gonderilmiyor).
 // ---------------------------------------------------------------------------
 const NVNGX_DLSSNR_NAME = "nvngx_dlssnr.dll";
-const NVNGX_CHUNK_SIZE = 4 * 1024 * 1024;
-
-let nvngxReady = false;
-let nvngxUploading = false;
 
 function setNvngxStatus(ready) {
-  nvngxReady = ready;
-  if (nvngxUploading) return; // yukleme surerken ilerleme metnini ezme
-
   $("dllStatusPill").classList.toggle("ready", ready);
-  // Hazirsa dosya adi yeterli; degilse ne yapilmasi gerektigi HOVER OLMADAN
-  // dogrudan yazida gorunsun (tooltip'e gomulmez).
   $("dllStatusPillText").textContent = ready
     ? NVNGX_DLSSNR_NAME + " hazır"
-    : NVNGX_DLSSNR_NAME + " — buraya sürükleyip bırakın";
+    : NVNGX_DLSSNR_NAME + " bulunamadı — dosyayı VLSS5.exe'nin yanına kopyalayın";
 }
-
-function arrayBufferToBase64(buf) {
-  let binary = "";
-  const bytes = new Uint8Array(buf);
-  const step = 0x8000;
-  for (let i = 0; i < bytes.length; i += step) {
-    binary += String.fromCharCode.apply(null, bytes.subarray(i, i + step));
-  }
-  return btoa(binary);
-}
-
-async function uploadNvngxDlssnr(file) {
-  nvngxUploading = true;
-  const text = $("dllStatusPillText");
-
-  vlss5.send("nvngxDropBegin", { name: file.name, size: file.size });
-
-  let offset = 0;
-  let seq = 0;
-  while (offset < file.size) {
-    const slice = file.slice(offset, offset + NVNGX_CHUNK_SIZE);
-    const buf = await slice.arrayBuffer();
-    vlss5.send("nvngxDropChunk", { seq, dataB64: arrayBufferToBase64(buf) });
-    offset += buf.byteLength;
-    seq++;
-    text.textContent = "Yükleniyor... %" + Math.round((offset / file.size) * 100);
-  }
-  vlss5.send("nvngxDropEnd", {});
-}
-
-(function () {
-  const pill = $("dllStatusPill");
-
-  ["dragenter", "dragover"].forEach((evt) => {
-    pill.addEventListener(evt, (e) => {
-      e.preventDefault();
-      if (!nvngxUploading) pill.classList.add("dragover");
-    });
-  });
-  ["dragleave"].forEach((evt) => {
-    pill.addEventListener(evt, (e) => {
-      e.preventDefault();
-      pill.classList.remove("dragover");
-    });
-  });
-
-  pill.addEventListener("drop", (e) => {
-    e.preventDefault();
-    pill.classList.remove("dragover");
-    if (nvngxUploading) return;
-
-    const file = e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files[0];
-    if (!file) return;
-
-    if (file.name.toLowerCase() !== NVNGX_DLSSNR_NAME) {
-      const text = $("dllStatusPillText");
-      text.textContent = `Yalnızca "${NVNGX_DLSSNR_NAME}" kabul edilir`;
-      setTimeout(() => setNvngxStatus(nvngxReady), 3000);
-      return;
-    }
-
-    uploadNvngxDlssnr(file);
-  });
-
-  vlss5.on("nvngxDropResult", (msg) => {
-    nvngxUploading = false;
-    const data = msg.data || {};
-    if (data.ok) {
-      setNvngxStatus(true);
-    } else {
-      setNvngxStatus(nvngxReady);
-      $("dllStatusPillText").textContent = "Yükleme başarısız";
-      setTimeout(() => setNvngxStatus(nvngxReady), 3000);
-    }
-  });
-})();
 
 // ---------------------------------------------------------------------------
 // User interactions -> native
@@ -293,7 +204,7 @@ vlss5.send("getState");
 // ---------------------------------------------------------------------------
 // Faz 3: ust seviye gorunum gecisi -- Ana Sayfa / Ayarlar (salt JS)
 // ---------------------------------------------------------------------------
-const VIEW_NAMES = ["home", "updates", "settings"];
+const VIEW_NAMES = ["home", "settings"];
 
 function switchView(name) {
   VIEW_NAMES.forEach((n) => {
@@ -540,220 +451,91 @@ document.querySelectorAll(".accordionHeader").forEach((header) => {
 })();
 
 // ===========================================================================
-// TUSLARI DEGISTIR sekmesi (bkz. web/hotkeys/app.js) -- cmd/type "hotkeys" onekiyle
+// TUSLARI DEGISTIR paneli -- "tusa bas ve bekle" YOK: kullanici bir dropdown'dan
+// dogrudan bir tus SECIYOR (bkz. konusma). hotkeyId <-> native ile birebir ayni
+// (bkz. HotkeysWindow.cpp): 0=Settings, 2=Focus, 3=FPS, 4=VLSS, 5=Calib,
+// 6=Start, 7=DismissWarning. Sadece Settings(0) ve Start(6) modifier (Ctrl/
+// Alt/Shift) destekliyor -- digerleri native tarafta zaten bare-key.
 // ===========================================================================
 (function () {
-  // hotkeyId <-> native ile birebir ayni (bkz. HotkeysWindow.cpp StartKeybindCapture):
-  // 0=Settings, 2=Focus, 3=FPS, 4=VLSS, 5=Calib, 6=Start, 7=DismissWarning
-  const buttons = {
-    0: $("hkBtnSettings"),
-    2: $("hkBtnFocus"),
-    3: $("hkBtnFps"),
-    4: $("hkBtnVlss"),
-    5: $("hkBtnCalib"),
-    6: $("hkBtnStart"),
-    7: $("hkBtnDismissWarning"),
+  const MOD_ALT = 0x0001, MOD_CONTROL = 0x0002, MOD_SHIFT = 0x0004;
+
+  function buildKeyOptions() {
+    const opts = [];
+    for (let i = 1; i <= 12; i++) opts.push({ vk: 0x6F + i, label: "F" + i }); // F1=0x70
+    for (let i = 0; i <= 9; i++) opts.push({ vk: 0x30 + i, label: String(i) });
+    for (let i = 0; i < 26; i++) opts.push({ vk: 0x41 + i, label: String.fromCharCode(65 + i) });
+    [
+      [0x2D, "Insert"], [0x2E, "Delete"], [0x24, "Home"], [0x23, "End"],
+      [0x21, "Page Up"], [0x22, "Page Down"],
+      [0x25, "Sol Ok"], [0x26, "Yukarı Ok"], [0x27, "Sağ Ok"], [0x28, "Aşağı Ok"],
+      [0x09, "Tab"], [0x20, "Boşluk"], [0x14, "Caps Lock"],
+    ].forEach(([vk, label]) => opts.push({ vk, label }));
+    return opts;
+  }
+  const KEY_OPTIONS = buildKeyOptions();
+
+  function populateSelect(sel) {
+    KEY_OPTIONS.forEach(({ vk, label }) => {
+      const opt = document.createElement("option");
+      opt.value = String(vk);
+      opt.textContent = label;
+      sel.appendChild(opt);
+    });
+  }
+
+  const simpleRows = {
+    2: $("hkSelFocus"),
+    3: $("hkSelFps"),
+    4: $("hkSelVlss"),
+    5: $("hkSelCalib"),
+    7: $("hkSelDismissWarning"),
+  };
+  const comboRows = {
+    0: { select: $("hkSelSettings"), ctrl: $("hkModSettings-CTRL"), alt: $("hkModSettings-ALT"), shift: $("hkModSettings-SHIFT") },
+    6: { select: $("hkSelStart"),    ctrl: $("hkModStart-CTRL"),    alt: $("hkModStart-ALT"),    shift: $("hkModStart-SHIFT") },
   };
 
-  let capturingId = -1;
+  Object.values(simpleRows).forEach(populateSelect);
+  Object.values(comboRows).forEach((row) => populateSelect(row.select));
 
-  Object.entries(buttons).forEach(([id, btn]) => {
-    btn.addEventListener("click", () => {
-      if (capturingId !== -1) return;
-      capturingId = +id;
-      btn.textContent = "Tuşa Basın...";
-      btn.classList.add("active");
-      vlss5.send("hotkeysStartCapture", { hotkeyId: capturingId });
-    });
+  function sendSetKey(hotkeyId, vk, mods) {
+    vlss5.send("hotkeysSetKey", { hotkeyId, vk, mods });
+  }
+
+  Object.entries(simpleRows).forEach(([id, sel]) => {
+    sel.addEventListener("change", () => sendSetKey(+id, +sel.value, 0));
+  });
+
+  Object.entries(comboRows).forEach(([id, row]) => {
+    const onChange = () => {
+      let mods = 0;
+      if (row.ctrl.checked)  mods |= MOD_CONTROL;
+      if (row.alt.checked)   mods |= MOD_ALT;
+      if (row.shift.checked) mods |= MOD_SHIFT;
+      sendSetKey(+id, +row.select.value, mods);
+    };
+    row.select.addEventListener("change", onChange);
+    row.ctrl.addEventListener("change", onChange);
+    row.alt.addEventListener("change", onChange);
+    row.shift.addEventListener("change", onChange);
   });
 
   vlss5.on("hotkeysList", (msg) => {
-    const labels = msg.data || {};
-    for (const [id, btn] of Object.entries(buttons)) {
-      if (labels[id] !== undefined) btn.textContent = labels[id];
-    }
-  });
-
-  vlss5.on("hotkeysKeyCaptured", () => {
-    if (capturingId !== -1 && buttons[capturingId]) {
-      buttons[capturingId].classList.remove("active");
-    }
-    capturingId = -1;
-    vlss5.send("hotkeysGetHotkeys");
+    const data = msg.data || {};
+    Object.entries(simpleRows).forEach(([id, sel]) => {
+      const entry = data[id];
+      if (entry) sel.value = String(entry.vk);
+    });
+    Object.entries(comboRows).forEach(([id, row]) => {
+      const entry = data[id];
+      if (!entry) return;
+      row.select.value = String(entry.vk);
+      row.ctrl.checked  = !!(entry.mods & MOD_CONTROL);
+      row.alt.checked   = !!(entry.mods & MOD_ALT);
+      row.shift.checked = !!(entry.mods & MOD_SHIFT);
+    });
   });
 
   vlss5.send("hotkeysGetHotkeys");
-})();
-
-// ===========================================================================
-// GUNCELLEMELER sekmesi (bkz. src/UpdateChecker.h/.cpp, Main.cpp PushUpdatesStateToJs)
-// -- cmd/type "updates" onekiyle
-// ===========================================================================
-(function () {
-  let lastUpdatesState = null;
-
-  function fmtDate(iso) {
-    if (!iso) return "";
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return "";
-    return d.toLocaleDateString("tr-TR", { year: "numeric", month: "2-digit", day: "2-digit" });
-  }
-
-  function fmtBytes(n) {
-    if (!n) return "";
-    const units = ["B", "KB", "MB", "GB"];
-    let v = n, i = 0;
-    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
-    return v.toFixed(i === 0 || v >= 10 ? 0 : 1) + " " + units[i];
-  }
-
-  // Native UpdateChecker::IsAutoInstallableAsset ile AYNI kaba desen: adı
-  // ".exe" ile bitiyor ve içinde "setup" geçiyorsa bu bir Inno Setup
-  // installer'ıdır -- indirilince sessizce kurulup uygulama otomatik
-  // yeniden başlar (bkz. Main.cpp LaunchSilentInstallAndExit). Aksi halde
-  // (eski sürümlerin .rar asset'i) sadece varsayılan programla açılır.
-  function isAutoInstallable(name) {
-    const n = (name || "").toLowerCase();
-    return n.endsWith(".exe") && n.includes("setup");
-  }
-
-  function pickBestAsset(release) {
-    const assets = release.assets || [];
-    return assets.find((a) => isAutoInstallable(a.name)) || assets[0] || null;
-  }
-
-  function renderReleases(releases) {
-    const box = $("updReleaseList");
-    box.innerHTML = "";
-
-    if (!releases || releases.length === 0) {
-      const empty = document.createElement("div");
-      empty.className = "empty-msg";
-      empty.textContent = "Sürüm geçmişi yüklenemedi.";
-      box.appendChild(empty);
-      return;
-    }
-
-    // Sadece EN YENI (ilk) sürüm güncellenebilir/indirilebilir -- geçmiş
-    // sürümler yalnızca değişiklik notu (changelog) olarak okunur, ayrı
-    // ayrı indirme/güncelleme butonu YOK (bkz. üstteki "Şimdi Güncelle").
-    releases.forEach((r) => {
-      const item = document.createElement("div");
-      item.className = "updReleaseItem";
-
-      const header = document.createElement("div");
-      header.className = "updReleaseHeader";
-
-      const tag = document.createElement("span");
-      tag.className = "updReleaseTag";
-      tag.textContent = r.tag || r.name || "";
-      header.appendChild(tag);
-
-      if (r.prerelease) {
-        const badge = document.createElement("span");
-        badge.className = "updReleaseBadge";
-        badge.textContent = "ÖN SÜRÜM";
-        header.appendChild(badge);
-      }
-
-      const date = document.createElement("span");
-      date.className = "updReleaseDate";
-      date.textContent = fmtDate(r.publishedAt);
-      header.appendChild(date);
-
-      item.appendChild(header);
-
-      const body = document.createElement("div");
-      body.className = "updReleaseBody";
-      // GitHub API'nin ONCEDEN kendi tarafinda render ettigi HTML (bkz.
-      // UpdateChecker::FetchLatestReleases "Accept: application/vnd.github.html+json") --
-      // burada uretici/attacker kontrolunde degil, kendi GitHub reposumuzun
-      // resmi API yaniti.
-      body.innerHTML = r.bodyHtml || "";
-      item.appendChild(body);
-
-      box.appendChild(item);
-    });
-  }
-
-  function applyUpdatesState(data) {
-    lastUpdatesState = data;
-    $("updCurrentVersion").textContent = "v" + (data.currentVersion || "?");
-    setToggle("updSwAutoCheck", data.autoCheck);
-
-    const btn = $("updBtnCheck");
-    btn.disabled = !!data.checking;
-    btn.textContent = data.checking ? "Kontrol ediliyor..." : "Güncelleme Kontrol Et";
-
-    if (!data.downloading) {
-      const banner = $("updStatusBanner");
-      banner.classList.remove("newer", "error");
-      if (data.error) {
-        banner.textContent = "Kontrol edilemedi: " + data.error;
-        banner.classList.add("error");
-      } else if (data.checking) {
-        banner.textContent = "Güncellemeler kontrol ediliyor...";
-      } else if (data.hasUpdate) {
-        banner.textContent = "Yeni güncelleme mevcut: " + data.latestTag;
-        banner.classList.add("newer");
-      } else if (data.latestTag) {
-        banner.textContent = "En güncel sürümü kullanıyorsunuz.";
-      } else {
-        banner.textContent = "";
-      }
-    }
-
-    renderReleases(data.releases);
-
-    const updateBtn = $("updBtnUpdateNow");
-    const latest = (data.releases || [])[0];
-    const latestAsset = latest ? pickBestAsset(latest) : null;
-    updateBtn.classList.toggle("hidden", !(data.hasUpdate && latestAsset));
-    if (latestAsset) {
-      updateBtn.disabled = !!data.downloading;
-      updateBtn.textContent = data.downloading
-        ? "Güncelleniyor..."
-        : (isAutoInstallable(latestAsset.name) ? "Şimdi Güncelle" : "Şimdi İndir");
-    }
-  }
-
-  $("updBtnCheck").addEventListener("click", () => vlss5.send("updatesCheckNow"));
-
-  $("updBtnUpdateNow").addEventListener("click", () => {
-    const latest = lastUpdatesState ? (lastUpdatesState.releases || [])[0] : null;
-    const asset = latest ? pickBestAsset(latest) : null;
-    if (asset) vlss5.send("updatesDownload", { url: asset.url, name: asset.name });
-  });
-
-  $("updSwAutoCheck").addEventListener("click", () => {
-    const next = !$("updSwAutoCheck").classList.contains("on");
-    setToggle("updSwAutoCheck", next);
-    vlss5.send("updatesSetAutoCheck", { value: next });
-  });
-
-  vlss5.on("updatesState", (msg) => applyUpdatesState(msg.data));
-
-  vlss5.on("updatesDownloadProgress", (msg) => {
-    const d = msg.data || {};
-    const pct = d.total ? Math.round((d.received / d.total) * 100) : null;
-    const banner = $("updStatusBanner");
-    banner.classList.remove("newer", "error");
-    banner.textContent = pct !== null ? ("İndiriliyor... %" + pct) : ("İndiriliyor... " + fmtBytes(d.received));
-  });
-
-  vlss5.on("updatesDownloadDone", (msg) => {
-    const data = msg.data || {};
-    const banner = $("updStatusBanner");
-    banner.classList.remove("newer", "error");
-    if (data.ok && data.autoInstalling) {
-      banner.textContent = "İndirme tamamlandı. Güncelleme kuruluyor, VLSS5 birazdan otomatik olarak yeniden başlayacak...";
-    } else if (data.ok) {
-      banner.textContent = "İndirme tamamlandı, dosya açılıyor... (bu sürüm için otomatik kurulum yok, elle kurmanız gerekiyor)";
-    } else {
-      banner.textContent = "İndirme başarısız: " + (data.error || "");
-      banner.classList.add("error");
-    }
-  });
-
-  vlss5.send("updatesGetState");
 })();

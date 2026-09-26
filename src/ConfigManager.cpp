@@ -166,7 +166,6 @@ void ConfigManager::Load()
     m_config.cursorLock        = (GetPrivateProfileIntW(sec, L"CursorLock", 1, ini.c_str()) != 0);
     m_config.hideSystemCursor  = (GetPrivateProfileIntW(sec, L"HideSystemCursor", 1, ini.c_str()) != 0);
     m_config.suppressRtssRunningWarning = (GetPrivateProfileIntW(sec, L"SuppressRtssRunningWarning", 0, ini.c_str()) != 0);
-    m_config.autoCheckUpdates = (GetPrivateProfileIntW(sec, L"AutoCheckUpdates", 1, ini.c_str()) != 0);
 
     GetPrivateProfileStringW(sec, L"SplitPos", L"0.5", buf, _countof(buf), ini.c_str());
     m_config.splitPos = static_cast<float>(_wtof(buf));
@@ -325,7 +324,6 @@ void ConfigManager::Save()
     writeInt(L"VLSS5", L"CursorLock", m_config.cursorLock ? 1 : 0);
     writeInt(L"VLSS5", L"HideSystemCursor", m_config.hideSystemCursor ? 1 : 0);
     writeInt(L"VLSS5", L"SuppressRtssRunningWarning", m_config.suppressRtssRunningWarning ? 1 : 0);
-    writeInt(L"VLSS5", L"AutoCheckUpdates", m_config.autoCheckUpdates ? 1 : 0);
     writeFloat(L"VLSS5", L"SplitPos", m_config.splitPos);
     writeInt(L"VLSS5", L"FpsDisplayMode", m_config.fpsDisplayMode);
 

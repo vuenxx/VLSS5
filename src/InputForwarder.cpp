@@ -5,7 +5,6 @@
 // -----------------------------------------------------------------------
 HotkeyConfig                       InputForwarder::s_config{};
 bool                               InputForwarder::s_capturing     = false;
-HHOOK                              InputForwarder::s_captureHook   = nullptr;
 std::function<void(HotkeyConfig)>  InputForwarder::s_captureCallback;
 
 // -----------------------------------------------------------------------
@@ -83,56 +82,14 @@ void InputForwarder::BeginCapture(std::function<void(HotkeyConfig)> callback)
     if (s_capturing) EndCapture();
     s_captureCallback = std::move(callback);
     s_capturing       = true;
-    s_captureHook     = SetWindowsHookExW(
-        WH_KEYBOARD_LL, CaptureKeyboardProc,
-        GetModuleHandleW(nullptr), 0);
+    // Bu yol artik cagrilmiyor (bkz. HotkeysWindow.cpp / web/hotkeys/app.js'teki
+    // JS-keydown tabanli yakalama) -- WH_KEYBOARD_LL burada da KASITLI OLARAK
+    // kurulmuyor; dosya basindaki "NO WH_KEYBOARD_LL hook" iddiasi boylece
+    // gercekten dogru.
 }
 
 void InputForwarder::EndCapture()
 {
-    if (s_captureHook)
-    {
-        UnhookWindowsHookEx(s_captureHook);
-        s_captureHook = nullptr;
-    }
     s_captureCallback = nullptr;
     s_capturing       = false;
-}
-
-LRESULT CALLBACK InputForwarder::CaptureKeyboardProc(
-    int nCode, WPARAM wParam, LPARAM lParam)
-{
-    if (nCode == HC_ACTION &&
-        (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN))
-    {
-        auto* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
-        UINT  vk = kb->vkCode;
-
-        // Ignore bare modifier keys
-        const bool isMod =
-            (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL ||
-             vk == VK_MENU    || vk == VK_LMENU    || vk == VK_RMENU    ||
-             vk == VK_SHIFT   || vk == VK_LSHIFT   || vk == VK_RSHIFT   ||
-             vk == VK_LWIN    || vk == VK_RWIN);
-
-        if (!isMod)
-        {
-            UINT mods = MOD_NOREPEAT;
-            if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mods |= MOD_CONTROL;
-            if (GetAsyncKeyState(VK_MENU)    & 0x8000) mods |= MOD_ALT;
-            if (GetAsyncKeyState(VK_SHIFT)   & 0x8000) mods |= MOD_SHIFT;
-            if ((GetAsyncKeyState(VK_LWIN) |
-                 GetAsyncKeyState(VK_RWIN)) & 0x8000)  mods |= MOD_WIN;
-
-            HotkeyConfig newCfg = { mods, vk };
-            s_config = newCfg;
-
-            auto cb = std::move(s_captureCallback);
-            EndCapture();   // unhook BEFORE firing callback
-            if (cb) cb(newCfg);
-
-            return 1;       // consume during capture only
-        }
-    }
-    return CallNextHookEx(s_captureHook, nCode, wParam, lParam);
 }

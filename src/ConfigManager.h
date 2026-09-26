@@ -139,10 +139,6 @@ struct Dlss5Config
     // "Bir daha gösterme" ile kapatilan RTSS calismiyor uyarisi (bkz. Main.cpp CheckRivaTunerRunning).
     bool suppressRtssRunningWarning = false;
 
-    // Uygulama her acildiginda GitHub Releases'ten otomatik surum kontrolu
-    // yapsin mi (bkz. Main.cpp UpdateChecker cagrisi, "Güncellemeler" sekmesi).
-    bool autoCheckUpdates = true;
-
     std::wstring FormatHotkey() const;
     static std::wstring FormatKey(UINT vk, UINT mod = 0);
 };

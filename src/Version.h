@@ -1,7 +1,9 @@
 #pragma once
 
-// VLSS5 surum numarasi -- UpdateChecker bunu en son yayimlanan GitHub release
-// etiketiyle (tag_name) karsilastirip yeni surum olup olmadigina karar verir.
+// VLSS5 surum numarasi -- su an derlenmis binary'de sadece bir sabit olarak
+// tasinir (orn. ileride bir Hakkinda/crash-report ekranina koymak icin);
+// uygulama kendi icinde bunu hicbir yerde okuyup GitHub'la karsilastirmiyor
+// (eski otomatik guncelleme ozelligi kaldirildi).
 //
 // ELLE DOKUNMANIZA GEREK YOK: .github/workflows/release.yml, "git tag vX.Y.Z"
 // ile push ettiginiz tag'in surumunu derlemeden ONCE src/VersionGenerated.h

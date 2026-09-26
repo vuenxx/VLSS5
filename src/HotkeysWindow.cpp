@@ -6,7 +6,6 @@ using json = nlohmann::json;
 std::unique_ptr<WebViewHost> HotkeysWindow::s_host;
 HINSTANCE HotkeysWindow::s_hInstance = nullptr;
 bool HotkeysWindow::s_rebindingKey = false;
-HHOOK HotkeysWindow::s_rebindHook = nullptr;
 int HotkeysWindow::s_currentRebindId = -1;
 HotkeysWindow::KeyCapturedCallback HotkeysWindow::s_externalCallback = nullptr;
 
@@ -123,36 +122,16 @@ void HotkeysWindow::OnWebMessage(const std::wstring& jsonStr)
             int id = msg.value("hotkeyId", -1);
             StartKeybindCapture(id);
         }
-    }
-    catch (...) { /* Hatali/beklenmedik JSON alani -- bu mesaji yoksay, uygulamayi cokertme. */ }
-}
-
-LRESULT CALLBACK HotkeysWindow::RebindKeyboardProc(int nCode, WPARAM wParam, LPARAM lParam)
-{
-    if (nCode == HC_ACTION && s_rebindingKey && (wParam == WM_KEYDOWN || wParam == WM_SYSKEYDOWN))
-    {
-        auto* kb = reinterpret_cast<KBDLLHOOKSTRUCT*>(lParam);
-        UINT vk = kb->vkCode;
-
-        if (vk == VK_ESCAPE)
+        else if (cmd == "keyPicked")
+        {
+            EndKeybindCapture(true, msg.value("vk", 0u), msg.value("mods", 0u));
+        }
+        else if (cmd == "cancelCapture")
         {
             EndKeybindCapture(false, 0, 0);
-            return 1;
-        }
-        else if (vk != VK_LSHIFT && vk != VK_RSHIFT && vk != VK_SHIFT &&
-                 vk != VK_LCONTROL && vk != VK_RCONTROL && vk != VK_CONTROL &&
-                 vk != VK_LMENU && vk != VK_RMENU && vk != VK_MENU)
-        {
-            UINT mods = 0;
-            if (GetAsyncKeyState(VK_CONTROL) & 0x8000) mods |= MOD_CONTROL;
-            if (GetAsyncKeyState(VK_MENU)    & 0x8000) mods |= MOD_ALT;
-            if (GetAsyncKeyState(VK_SHIFT)   & 0x8000) mods |= MOD_SHIFT;
-
-            EndKeybindCapture(true, vk, mods);
-            return 1;
         }
     }
-    return CallNextHookEx(s_rebindHook, nCode, wParam, lParam);
+    catch (...) { /* Hatali/beklenmedik JSON alani -- bu mesaji yoksay, uygulamayi cokertme. */ }
 }
 
 void HotkeysWindow::StartKeybindCapture(int hotkeyId)
@@ -160,36 +139,14 @@ void HotkeysWindow::StartKeybindCapture(int hotkeyId)
     if (s_rebindingKey) return;
     s_currentRebindId = hotkeyId;
     s_rebindingKey = true;
-    s_rebindHook = SetWindowsHookExW(WH_KEYBOARD_LL, RebindKeyboardProc, GetModuleHandle(nullptr), 0);
 }
 
 void HotkeysWindow::EndKeybindCapture(bool save, UINT vk, UINT mod)
 {
     if (!s_rebindingKey) return;
     s_rebindingKey = false;
-    if (s_rebindHook)
-    {
-        UnhookWindowsHookEx(s_rebindHook);
-        s_rebindHook = nullptr;
-    }
 
-    if (save)
-    {
-        auto& cfg = ConfigManager::Get().Config();
-        if (s_currentRebindId == 0) { cfg.settingsVk = vk; cfg.settingsMod = mod; }
-        if (s_currentRebindId == 2) { cfg.vkFocus = vk; }
-        if (s_currentRebindId == 3) { cfg.vkFps = vk; }
-        if (s_currentRebindId == 4) { cfg.vkToggleVlss = vk; }
-        if (s_currentRebindId == 5) { cfg.vkCalib = vk; }
-        if (s_currentRebindId == 6) { cfg.vkStart = vk; cfg.modStart = mod; }
-        if (s_currentRebindId == 7) { cfg.vkDismissWarning = vk; }
-
-        ConfigManager::Get().Save();
-
-        // Let Main window know we updated start key
-        HWND hMain = FindWindowW(L"VLSS5Main", nullptr);
-        if (hMain) PostMessageW(hMain, WM_APP + 1, 0, 0);
-    }
+    if (save) ApplyAndNotify(s_currentRebindId, vk, mod);
 
     if (s_host)
     {
@@ -204,4 +161,30 @@ void HotkeysWindow::EndKeybindCapture(bool save, UINT vk, UINT mod)
     // Main.cpp bu callback'i bir kez register eder (WinMain, Initialize sonrasi).
     if (s_externalCallback)
         s_externalCallback(save, vk, mod);
+}
+
+void HotkeysWindow::SetKey(int hotkeyId, UINT vk, UINT mod)
+{
+    ApplyAndNotify(hotkeyId, vk, mod);
+
+    if (s_externalCallback)
+        s_externalCallback(true, vk, mod);
+}
+
+void HotkeysWindow::ApplyAndNotify(int hotkeyId, UINT vk, UINT mod)
+{
+    auto& cfg = ConfigManager::Get().Config();
+    if (hotkeyId == 0) { cfg.settingsVk = vk; cfg.settingsMod = mod; }
+    if (hotkeyId == 2) { cfg.vkFocus = vk; }
+    if (hotkeyId == 3) { cfg.vkFps = vk; }
+    if (hotkeyId == 4) { cfg.vkToggleVlss = vk; }
+    if (hotkeyId == 5) { cfg.vkCalib = vk; }
+    if (hotkeyId == 6) { cfg.vkStart = vk; cfg.modStart = mod; }
+    if (hotkeyId == 7) { cfg.vkDismissWarning = vk; }
+
+    ConfigManager::Get().Save();
+
+    // Let Main window know we updated start key
+    HWND hMain = FindWindowW(L"VLSS5Main", nullptr);
+    if (hMain) PostMessageW(hMain, WM_APP + 1, 0, 0);
 }

@@ -12,8 +12,6 @@
 #include "WebViewHost.h"
 #include "ConfirmDialog.h"
 #include "PresetsManager.h"
-#include "UpdateChecker.h"
-#include "Version.h"
 #include "resource.h"
 #include "../third_party/json/json.hpp"
 #include <shlwapi.h>
@@ -23,8 +21,6 @@
 #include <uxtheme.h>
 #include <objidl.h>
 #include <gdiplus.h>
-#include <thread>
-#include <fstream>
 #pragma comment(lib, "gdiplus.lib")
 
 using json = nlohmann::json;
@@ -50,13 +46,6 @@ using json = nlohmann::json;
 // ---------------------------------------------------------------------------
 #define ID_GLOBAL_HOTKEY      201   // Global capture toggle hotkey
 #define IDT_HOTKEY_TIMER      301   // Fallback hotkey poller (50ms)
-
-// UpdateChecker arka plan thread'lerinin UI thread'ine geri bildirim mesajlari
-// (bkz. WM_APP+4 icin yorum -- reentrant WebView2 COM cagrisi sorunuyla ayni
-// gerekceyle: agir/asenkron isler her zaman mesaj dongusune dondukten sonra islenir).
-#define WM_APP_UPDATES_FETCH_DONE      (WM_APP + 5) // lParam = UpdateChecker::FetchResult*, wParam = 1 ise sessiz (startup) kontrol
-#define WM_APP_UPDATES_DL_PROGRESS     (WM_APP + 6) // lParam = UpdateChecker::DownloadProgress*
-#define WM_APP_UPDATES_DL_DONE         (WM_APP + 7) // lParam = std::wstring* (basariliysa dosya yolu, degilse hata metni), wParam = basari (1/0)
 
 // BASLAT butonu: g_app->Run() TUM yakalama oturumu boyunca BLOKE OLAN bir
 // dongudur. Bunu dogrudan OnMainWebMessage ("startStop") icinden -- yani
@@ -113,29 +102,6 @@ static bool                    g_fullscreenStretch = false;
 static std::vector<PresetEntry> g_presetsTabCache;
 
 // ---------------------------------------------------------------------------
-// "Güncellemeler" sekmesi -- bkz. UpdateChecker.h/.cpp. Ag cagrilari her zaman
-// bir arka plan thread'inde yapilir, sonuclar WM_APP_UPDATES_* mesajlariyla
-// UI thread'ine (WndProc) geri doner (bkz. WM_APP+4 reentrancy notu).
-// ---------------------------------------------------------------------------
-static bool                                    g_updatesChecking    = false;
-static bool                                    g_updatesDownloading = false;
-static bool                                    g_updatesHasNewer    = false;
-static std::wstring                            g_updatesLatestTag;
-static std::wstring                            g_updatesLastError;
-static std::vector<UpdateChecker::ReleaseInfo> g_updatesCache;
-
-// ---------------------------------------------------------------------------
-// nvngx_dlssnr.dll surukle-birak yukleme durumu (bkz. dllStatusBar, Main.cpp
-// "nvngxDropBegin/Chunk/End"). Tek seferde tek transfer varsayimi yeterli --
-// JS tarafi zaten kendi "uploading" bayragiyla ikinci bir surumeyi engelliyor.
-// ---------------------------------------------------------------------------
-static HANDLE        g_nvngxUploadFile         = INVALID_HANDLE_VALUE;
-static std::wstring  g_nvngxUploadTempPath;
-static uint64_t      g_nvngxUploadExpectedSize = 0;
-static uint64_t      g_nvngxUploadReceivedSize = 0;
-static int           g_nvngxUploadNextSeq      = 0;
-
-// ---------------------------------------------------------------------------
 // UTF-8 helpers (JSON string alanlari icin) -- Faz 1'deki 4 pencerede oldugu
 // gibi burada da AYRI kopyalanir, ortak bir header'a cikarilmaz.
 // ---------------------------------------------------------------------------
@@ -156,9 +122,10 @@ static std::wstring FromUtf8(const std::string& s)
     return out;
 }
 
-// nvngx_dlssnr.dll (telifli NGX model agirliklari) -- kullanici tarafindan
-// Ana Sayfa'daki durum/surukle-birak cubugundan eklenir (bkz. dllStatusBar,
-// "nvngxDropBegin/Chunk/End"). Yoksa BASLAT hem JS'te hem burada engellenir.
+// nvngx_dlssnr.dll (telifli NGX model agirliklari) -- exe klasorune KULLANICI
+// tarafindan elle konur (redist/ altinda dagitilir); biz sadece varligini
+// okuruz (bkz. Ana Sayfa durum isigi, dllStatusBar). Yoksa BASLAT hem JS'te
+// hem burada engellenir.
 static std::wstring GetNvngxDlssnrPath()
 {
     wchar_t exePath[MAX_PATH] = {};
@@ -272,17 +239,20 @@ static void PushStateToJs()
 // ile AYNI mantik (bkz. plan mimari karari: kod tekrari > riskli paylasim).
 // s_host'a degil g_mainWebView'e postalar.
 // ---------------------------------------------------------------------------
+// Dropdown+checkbox tabanli "Tuşları Değiştir" paneli JS tarafinda kendi
+// secenek listesini olusturup dogru secimi isaretlemek icin BIÇIMLENMİŞ
+// METIN degil HAM vk/mods degerlerine ihtiyac duyar (bkz. web/main/app.js).
 static json BuildHotkeyLabelsJson()
 {
     auto& cfg = ConfigManager::Get().Config();
     json labels;
-    labels["0"] = ToUtf8(Dlss5Config::FormatKey(cfg.settingsVk, cfg.settingsMod));
-    labels["2"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkFocus));
-    labels["3"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkFps));
-    labels["4"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkToggleVlss));
-    labels["5"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkCalib));
-    labels["6"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkStart, cfg.modStart));
-    labels["7"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkDismissWarning));
+    labels["0"] = { {"vk", cfg.settingsVk},    {"mods", cfg.settingsMod} };
+    labels["2"] = { {"vk", cfg.vkFocus},        {"mods", 0} };
+    labels["3"] = { {"vk", cfg.vkFps},          {"mods", 0} };
+    labels["4"] = { {"vk", cfg.vkToggleVlss},   {"mods", 0} };
+    labels["5"] = { {"vk", cfg.vkCalib},        {"mods", 0} };
+    labels["6"] = { {"vk", cfg.vkStart},        {"mods", cfg.modStart} };
+    labels["7"] = { {"vk", cfg.vkDismissWarning}, {"mods", 0} };
     return labels;
 }
 
@@ -293,342 +263,6 @@ static void PushHotkeysTabListToJs()
     msg["type"] = "hotkeysList";
     msg["data"] = BuildHotkeyLabelsJson();
     g_mainWebView->PostJson(FromUtf8(msg.dump()));
-}
-
-// ---------------------------------------------------------------------------
-// "Güncellemeler" sekmesi (bkz. UpdateChecker.h/.cpp) -- cmd/type "updates"
-// onekiyle, diger sekmelerle (RTSS/Ön Ayarlar/Tuşlar) AYNI IPC deseni.
-// ---------------------------------------------------------------------------
-static void PushUpdatesStateToJs()
-{
-    if (!g_mainWebView) return;
-
-    json data;
-    data["currentVersion"] = ToUtf8(VLSS5_VERSION_STRING);
-    data["autoCheck"]      = ConfigManager::Get().Config().autoCheckUpdates;
-    data["checking"]       = g_updatesChecking;
-    data["downloading"]    = g_updatesDownloading;
-    data["hasUpdate"]      = g_updatesHasNewer;
-    data["latestTag"]      = ToUtf8(g_updatesLatestTag);
-    data["error"]          = ToUtf8(g_updatesLastError);
-
-    json releases = json::array();
-    for (auto& r : g_updatesCache)
-    {
-        json item;
-        item["tag"]         = ToUtf8(r.tag);
-        item["name"]        = ToUtf8(r.name);
-        item["bodyHtml"]    = ToUtf8(r.bodyHtml);
-        item["publishedAt"] = ToUtf8(r.publishedAt);
-        item["htmlUrl"]     = ToUtf8(r.htmlUrl);
-        item["prerelease"]  = r.prerelease;
-
-        json assets = json::array();
-        for (auto& a : r.assets)
-        {
-            json aj;
-            aj["name"] = ToUtf8(a.name);
-            aj["url"]  = ToUtf8(a.downloadUrl);
-            aj["size"] = a.size;
-            assets.push_back(aj);
-        }
-        item["assets"] = assets;
-
-        releases.push_back(item);
-    }
-    data["releases"] = releases;
-
-    json msg;
-    msg["type"] = "updatesState";
-    msg["data"] = data;
-    g_mainWebView->PostJson(FromUtf8(msg.dump()));
-}
-
-// hwnd'ye WM_APP_UPDATES_FETCH_DONE ile geri donmek uzere arka planda GitHub
-// Releases'i ceker. silentStartupCheck=true ise (uygulama acilisindaki otomatik
-// kontrol) ve yeni bir surum bulunursa, sonuc geldiginde kullaniciya
-// indirme/kurulum onay dialogu gosterilir (bkz. WM_APP_UPDATES_FETCH_DONE isleyicisi).
-static void StartUpdatesCheck(HWND hwnd, bool silentStartupCheck)
-{
-    if (g_updatesChecking) return;
-    g_updatesChecking = true;
-    g_updatesLastError.clear();
-    PushUpdatesStateToJs();
-
-    std::thread([hwnd, silentStartupCheck]()
-    {
-        auto* result = new UpdateChecker::FetchResult(UpdateChecker::FetchLatestReleases(5));
-        PostMessageW(hwnd, WM_APP_UPDATES_FETCH_DONE, silentStartupCheck ? 1 : 0, reinterpret_cast<LPARAM>(result));
-    }).detach();
-}
-
-// Indirilen "VLSS5-X.Y.Z-portable.zip"yi %TEMP%'deki bir staging klasorune
-// tar.exe (Windows 10 1803+'ta System32'de hazir gelir, bsdtar -- zip formatini
-// da okur) ile acar. destDir ONCEDEN var olmali. Basarisizlikta false + error.
-static bool ExtractZip(const std::wstring& zipPath, const std::wstring& destDir, std::wstring& error)
-{
-    wchar_t sysDir[MAX_PATH] = {};
-    GetSystemDirectoryW(sysDir, MAX_PATH);
-    std::wstring tarPath = std::wstring(sysDir) + L"\\tar.exe";
-
-    std::wstring cmdLine = L"\"" + tarPath + L"\" -xf \"" + zipPath + L"\" -C \"" + destDir + L"\"";
-    std::vector<wchar_t> mutableCmd(cmdLine.begin(), cmdLine.end());
-    mutableCmd.push_back(L'\0');
-
-    STARTUPINFOW si = { sizeof(si) };
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi = {};
-    if (!CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
-                         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
-    {
-        error = L"tar.exe baslatilamadi (hata=" + std::to_wstring(GetLastError()) + L")";
-        return false;
-    }
-
-    WaitForSingleObject(pi.hProcess, 60000);
-    DWORD exitCode = 1;
-    GetExitCodeProcess(pi.hProcess, &exitCode);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-
-    if (exitCode != 0)
-    {
-        error = L"tar.exe cikis kodu " + std::to_wstring(exitCode);
-        return false;
-    }
-    return true;
-}
-
-// Indirilen portable ZIP'i acar, kurulu dosyalarin (VLSS5.exe + web/*) UZERINE
-// yazacak bir "bekle -> kopyala -> yeniden baslat -> kendini sil" betigini
-// %TEMP%'e yazip arka planda calistirir, ardindan kendi surecimizi TEMIZ
-// kapatir. Eskiden burada indirilen bir Inno Setup installer.exe'si /VERYSILENT
-// ile calistiriliyordu -- self-extracting/elevated-silent-installer sekli AV
-// heuristiklerinin (bkz. Wacatac.B!ml tartismasi) tam olarak avladigi kalip
-// oldugu icin, hicbir installer.exe INDIRMIYOR/CALISTIRMIYORUZ artik: sadece
-// bir ZIP acip dosya kopyaliyoruz -- cmd.exe/robocopy disinda YENI bir binary
-// yok.
-//
-// VLSS5.exe calisirken kendi uzerine yazilamadigi icin (dosya kilitli) kopyalama
-// bu surec KAPANDIKTAN SONRA, PID'imizi bekleyen ayri bir cmd betiginden yapilir
-// -- ayni "bitirmeyi baskasina devret, biz temiz cikalim" deseni eski Inno Setup
-// akisinda da vardi.
-static void LaunchPortableUpdateAndExit(HWND hwnd, const std::wstring& zipPath)
-{
-    wchar_t exeDirBuf[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exeDirBuf, MAX_PATH);
-    PathRemoveFileSpecW(exeDirBuf);
-    const std::wstring exeDir(exeDirBuf);
-
-    wchar_t tempDir[MAX_PATH] = {};
-    GetTempPathW(MAX_PATH, tempDir);
-    const std::wstring stagingDir = std::wstring(tempDir) + L"VLSS5_update_staging";
-
-    // Onceki basarisiz bir denemeden kalmis olabilir -- temiz baslamak icin sil.
-    {
-        std::wstring rmCmd = L"cmd.exe /c rmdir /s /q \"" + stagingDir + L"\"";
-        std::vector<wchar_t> mutableRm(rmCmd.begin(), rmCmd.end());
-        mutableRm.push_back(L'\0');
-        STARTUPINFOW rsi = { sizeof(rsi) };
-        rsi.dwFlags = STARTF_USESHOWWINDOW;
-        rsi.wShowWindow = SW_HIDE;
-        PROCESS_INFORMATION rpi = {};
-        if (CreateProcessW(nullptr, mutableRm.data(), nullptr, nullptr, FALSE,
-                            CREATE_NO_WINDOW, nullptr, nullptr, &rsi, &rpi))
-        {
-            WaitForSingleObject(rpi.hProcess, 10000);
-            CloseHandle(rpi.hThread);
-            CloseHandle(rpi.hProcess);
-        }
-    }
-
-    if (!CreateDirectoryW(stagingDir.c_str(), nullptr) && GetLastError() != ERROR_ALREADY_EXISTS)
-    {
-        DLSS_Log("[Updates] Staging klasoru olusturulamadi: %ls", stagingDir.c_str());
-        return;
-    }
-
-    std::wstring extractError;
-    if (!ExtractZip(zipPath, stagingDir, extractError))
-    {
-        DLSS_Log("[Updates] ZIP acilamadi: %ls", extractError.c_str());
-        return; // basarisizsa kendimizi kapatmayalim -- kullanici elle deneyebilsin
-    }
-
-    // Sagliklik kontrolu: acilan pakette gercekten VLSS5.exe var mi?
-    if (GetFileAttributesW((stagingDir + L"\\VLSS5.exe").c_str()) == INVALID_FILE_ATTRIBUTES)
-    {
-        DLSS_Log("[Updates] Acilan pakette VLSS5.exe bulunamadi, guncelleme iptal: %ls", stagingDir.c_str());
-        return;
-    }
-
-    const DWORD myPid = GetCurrentProcessId();
-    const std::wstring scriptPath = std::wstring(tempDir) + L"vlss5_update_relaunch.cmd";
-
-    std::wstring script;
-    script += L"@echo off\r\n";
-    script += L"setlocal\r\n";
-    script += L"set PID=" + std::to_wstring(myPid) + L"\r\n";
-    script += L":wait\r\n";
-    script += L"tasklist /FI \"PID eq %PID%\" 2>NUL | find \"%PID%\" >NUL\r\n";
-    script += L"if not errorlevel 1 (\r\n";
-    script += L"    timeout /t 1 /nobreak >NUL\r\n";
-    script += L"    goto wait\r\n";
-    script += L")\r\n";
-    // /E: alt klasorler dahil (bos olanlar da). /IS /IT: ayni boyut/tarihli
-    // dosyalari da yeniden kopyala (tar bazen zaman damgasini korumaz). MIR
-    // KULLANMIYORUZ -- bu, hedefte olup kaynakta olmayan dosyalari (vlss5_config.ini,
-    // vlss5_logs.log, crashreporter\, kullanicinin kendi nvngx*.dll'leri) SILERDI.
-    script += L"robocopy \"" + stagingDir + L"\" \"" + exeDir + L"\" /E /IS /IT /R:3 /W:1 >NUL\r\n";
-    script += L"rmdir /s /q \"" + stagingDir + L"\" >NUL 2>&1\r\n";
-    script += L"del \"" + zipPath + L"\" >NUL 2>&1\r\n";
-    script += L"start \"\" \"" + exeDir + L"\\VLSS5.exe\"\r\n";
-    script += L"del \"%~f0\"\r\n";
-
-    {
-        HANDLE hFile = CreateFileW(scriptPath.c_str(), GENERIC_WRITE, 0, nullptr,
-            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (hFile == INVALID_HANDLE_VALUE)
-        {
-            DLSS_Log("[Updates] Relaunch betigi yazilamadi: %ls", scriptPath.c_str());
-            return;
-        }
-        // cmd.exe betikleri ANSI/OEM bekler -- yol isimlerinde Turkce/aksanli
-        // karakter olabilecegi icin (kullanici adi, kurulum dizini) basit
-        // wchar_t->char daraltmasi yerine dogru kod sayfasina cevir.
-        int narrowLen = WideCharToMultiByte(CP_ACP, 0, script.c_str(), (int)script.size(),
-            nullptr, 0, nullptr, nullptr);
-        std::string narrow(narrowLen, '\0');
-        WideCharToMultiByte(CP_ACP, 0, script.c_str(), (int)script.size(),
-            narrow.data(), narrowLen, nullptr, nullptr);
-        DWORD written = 0;
-        WriteFile(hFile, narrow.data(), (DWORD)narrow.size(), &written, nullptr);
-        CloseHandle(hFile);
-    }
-
-    // VLSS5.exe zaten YUKSELTILMIS calisiyor (RequireAdministrator manifest) --
-    // CreateProcessW ile baslatilan bir alt surec ayni token'i devralir, ekstra
-    // UAC TETIKLEMEZ. Betik gorunmez calisir (CREATE_NO_WINDOW).
-    std::wstring cmdLine = L"cmd.exe /c \"" + scriptPath + L"\"";
-    std::vector<wchar_t> mutableCmd(cmdLine.begin(), cmdLine.end());
-    mutableCmd.push_back(L'\0');
-
-    STARTUPINFOW si = { sizeof(si) };
-    si.dwFlags = STARTF_USESHOWWINDOW;
-    si.wShowWindow = SW_HIDE;
-    PROCESS_INFORMATION pi = {};
-    if (!CreateProcessW(nullptr, mutableCmd.data(), nullptr, nullptr, FALSE,
-                         CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
-    {
-        DLSS_Log("[Updates] Relaunch betigi baslatilamadi (hata=%lu)", GetLastError());
-        return; // baslatilamadiysa kendimizi kapatmayalim -- kullanici elle deneyebilsin
-    }
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-    DLSS_Log("[Updates] Guncelleme betigi baslatildi, uygulama kapatiliyor.");
-
-    // WM_CLOSE -> varsayilan DefWindowProc DestroyWindow cagirir -> WM_DESTROY
-    // (mevcut WebView2/hotkey/InputForwarder temizligi + PostQuitMessage) --
-    // pencerenin X butonuna basilmasiyla AYNI, zaten var olan temiz kapanis yolu.
-    PostMessageW(hwnd, WM_CLOSE, 0, 0);
-}
-
-// g_updatesCache'deki release'ler arasinda assetName + ".sha256" adinda bir
-// asset arar (bkz. .github/workflows/release.yml -- Setup.exe'nin yaninda
-// yayimlanan checksum dosyasi). Bulunamazsa bos string doner (eski surumler
-// bu asset'i yayimlamadan once cikmisti -- geriye donuk uyumluluk icin
-// dogrulama o durumda atlanir, bkz. StartUpdatesDownload).
-static std::wstring FindChecksumUrl(const std::wstring& assetName)
-{
-    if (assetName.empty()) return L"";
-    const std::wstring checksumName = assetName + L".sha256";
-    for (auto& release : g_updatesCache)
-        for (auto& asset : release.assets)
-            if (asset.name == checksumName)
-                return asset.downloadUrl;
-    return L"";
-}
-
-// hwnd'ye WM_APP_UPDATES_DL_PROGRESS (tekrar tekrar) ve WM_APP_UPDATES_DL_DONE
-// (bir kez) ile geri donmek uzere arka planda dosyayi %TEMP%'e indirir.
-//
-// Otomatik kurulacak (bkz. IsAutoInstallableAsset) bir installer, YUKSELTILMIS
-// ve SESSIZCE calistirilmadan once butunlugu dogrulanir: release'de yayimlanan
-// .sha256 asset'i de indirilip yerel SHA256 ile karsilastirilir. Bozuk bir
-// indirme ya da (repo/CDN seviyesinde) degistirilmis bir dosya bu sekilde
-// CALISTIRILMADAN ONCE elenir -- "indirilen exe'yi dogrulamadan sessizce
-// calistiran" davranisi (dropper deseni, AV heuristiklerinin de tam olarak
-// avladigi sey) kaldirmak icindir.
-static void StartUpdatesDownload(HWND hwnd, const std::wstring& url, const std::wstring& assetName)
-{
-    if (g_updatesDownloading || url.empty()) return;
-    g_updatesDownloading = true;
-    PushUpdatesStateToJs();
-
-    const std::wstring checksumUrl = FindChecksumUrl(assetName);
-
-    std::thread([hwnd, url, assetName, checksumUrl]()
-    {
-        wchar_t tempDir[MAX_PATH] = {};
-        GetTempPathW(MAX_PATH, tempDir);
-        std::wstring outPath = std::wstring(tempDir) + (assetName.empty() ? L"VLSS5_update.bin" : assetName);
-
-        std::wstring error;
-        bool ok = UpdateChecker::DownloadFile(url, outPath,
-            [hwnd](const UpdateChecker::DownloadProgress& p)
-            {
-                auto* prog = new UpdateChecker::DownloadProgress(p);
-                PostMessageW(hwnd, WM_APP_UPDATES_DL_PROGRESS, 0, reinterpret_cast<LPARAM>(prog));
-            },
-            error);
-
-        if (ok && !checksumUrl.empty())
-        {
-            const std::wstring checksumPath = outPath + L".sha256";
-            std::wstring checksumError;
-            if (UpdateChecker::DownloadFile(checksumUrl, checksumPath, nullptr, checksumError))
-            {
-                std::ifstream in(checksumPath);
-                std::string expectedNarrow;
-                in >> expectedNarrow; // "hex" ya da "hex  dosyaadi" -- ilk token yeterli
-                in.close();
-                DeleteFileW(checksumPath.c_str());
-
-                std::wstring expectedHex(expectedNarrow.begin(), expectedNarrow.end());
-                for (auto& ch : expectedHex) ch = towlower(ch);
-
-                std::wstring actualHex, hashError;
-                if (!expectedHex.empty() &&
-                    UpdateChecker::ComputeSha256Hex(outPath, actualHex, hashError) &&
-                    expectedHex == actualHex)
-                {
-                    DLSS_Log("[Updates] SHA256 dogrulandi: %ls", assetName.c_str());
-                }
-                else
-                {
-                    DLSS_Log("[Updates] SHA256 UYUSMUYOR, indirilen dosya siliniyor: %ls "
-                        "(beklenen=%ls hesaplanan=%ls hataOnHash=%ls)",
-                        assetName.c_str(), expectedHex.c_str(), actualHex.c_str(), hashError.c_str());
-                    DeleteFileW(outPath.c_str());
-                    ok = false;
-                    error = L"Bütünlük doğrulaması başarısız oldu -- indirilen dosya güvenilir değil. "
-                            L"Lütfen resmi GitHub sayfasından elle indirin.";
-                }
-            }
-            else
-            {
-                DLSS_Log("[Updates] Checksum indirilemedi, dogrulama atlaniyor: %ls", checksumError.c_str());
-            }
-        }
-        else if (ok)
-        {
-            DLSS_Log("[Updates] Bu surum icin checksum yayimlanmamis, dogrulama atlaniyor: %ls", assetName.c_str());
-        }
-
-        auto* resultStr = new std::wstring(ok ? outPath : error);
-        PostMessageW(hwnd, WM_APP_UPDATES_DL_DONE, ok ? 1 : 0, reinterpret_cast<LPARAM>(resultStr));
-    }).detach();
 }
 
 // ---------------------------------------------------------------------------
@@ -696,41 +330,6 @@ static std::string Base64Encode(const std::vector<BYTE>& data)
         out += tbl[(v >> 12) & 0x3F];
         out += tbl[(v >> 6) & 0x3F];
         out += "=";
-    }
-    return out;
-}
-
-// nvngx_dlssnr.dll surukle-birak yuklemesi icin ters yon -- JS tarafi dosya
-// parcalarini base64 ile gonderiyor (bkz. "nvngxDropChunk"), burada cozulup
-// diske yaziliyor. Base64Encode'un (yukarida, ikon data-URI'leri icin) TERSI.
-static std::vector<BYTE> Base64Decode(const std::string& in)
-{
-    static int table[256];
-    static bool tableInit = false;
-    if (!tableInit)
-    {
-        std::fill(std::begin(table), std::end(table), -1);
-        static const char tbl[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-        for (int i = 0; i < 64; ++i) table[static_cast<unsigned char>(tbl[i])] = i;
-        tableInit = true;
-    }
-
-    std::vector<BYTE> out;
-    out.reserve((in.size() / 4) * 3);
-
-    int val = 0, bits = -8;
-    for (unsigned char c : in)
-    {
-        if (c == '=') break;
-        if (table[c] == -1) continue; // satir sonu vb. guvenli sekilde atlanir
-
-        val = (val << 6) + table[c];
-        bits += 6;
-        if (bits >= 0)
-        {
-            out.push_back(static_cast<BYTE>((val >> bits) & 0xFF));
-            bits -= 8;
-        }
     }
     return out;
 }
@@ -983,6 +582,14 @@ static void RegisterAppHotkey(HWND hwnd)
     UnregisterHotKey(hwnd, ID_GLOBAL_HOTKEY);
     auto& cfg = ConfigManager::Get().Config();
     RegisterHotKey(hwnd, ID_GLOBAL_HOTKEY, cfg.modStart | MOD_NOREPEAT, cfg.vkStart);
+
+    // InputForwarder::s_config, App::Update icinde capture SIRASINDA
+    // "durdur" tusunu algilamak icin ayrica tutulan bir kopya (bkz.
+    // App.cpp:992 IsStopKeyDown) -- RegisterHotKey'in yukardaki WM_HOTKEY
+    // kaydiyla AYNI tusu izlemesi lazim. Bu satir olmadan varsayilan degeri
+    // (Alt+S) hic degismiyordu: kullanici Baslat/Durdur kisayolunu Ctrl+S'e
+    // cevirse bile capture aktifken hep eski Alt+S calisiyordu.
+    InputForwarder::Config() = HotkeyConfig{ cfg.modStart | MOD_NOREPEAT, cfg.vkStart };
 }
 
 static void UnregisterAppHotkey(HWND hwnd)
@@ -1378,7 +985,7 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
             {
                 // Bkz. dllStatusBar (Ana Sayfa) -- JS tarafi zaten BASLAT'i
                 // devre disi birakiyor, burasi sadece savunmaci ikinci kontrol.
-                SetStatus(L"nvngx_dlssnr.dll bulunamadı -- lütfen üstteki alana sürükleyip bırakın.");
+                SetStatus(L"nvngx_dlssnr.dll bulunamadı -- dosyayı VLSS5.exe'nin bulunduğu klasöre kopyalayın.");
             }
             else
             {
@@ -1771,155 +1378,23 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
             }
         }
         // -------------------------------------------------------------
-        // Faz 3: "Tuşları Değiştir" sekmesi -- WH_KEYBOARD_LL hook mekanizmasi
-        // HotkeysWindow'un KENDI statik uyeleri uzerinde calisiyor; burada
-        // TEKRAR YAZILMAZ, dogrudan (artik public olan) StartKeybindCapture
-        // cagrilir. Sonuc HotkeysWindow::SetExternalKeyCapturedCallback ile
-        // WinMain'de bir kez baglanan geri cagirma uzerinden g_mainWebView'e
-        // asenkron olarak (RebindKeyboardProc -> EndKeybindCapture) geri doner.
+        // "Tuşları Değiştir" paneli -- tus BEKLEMIYOR: kullanici acilan bir
+        // dropdown'dan (F1, F2, ... gibi) dogrudan bir tus seciyor, JS de
+        // secimi aninda "hotkeysSetKey" ile gonderiyor (bkz. web/main/app.js).
         // -------------------------------------------------------------
         else if (cmd == "hotkeysGetHotkeys")
         {
             PushHotkeysTabListToJs();
         }
-        else if (cmd == "hotkeysStartCapture")
+        else if (cmd == "hotkeysSetKey")
         {
-            int id = msg.value("hotkeyId", -1);
-            HotkeysWindow::StartKeybindCapture(id);
+            HotkeysWindow::SetKey(msg.value("hotkeyId", -1), msg.value("vk", 0u), msg.value("mods", 0u));
         }
-        // -------------------------------------------------------------
-        // "Güncellemeler" sekmesi (bkz. UpdateChecker.h/.cpp, PushUpdatesStateToJs).
-        // -------------------------------------------------------------
-        else if (cmd == "updatesGetState")
-        {
-            PushUpdatesStateToJs();
-        }
-        else if (cmd == "updatesSetAutoCheck")
-        {
-            bool value = msg.value("value", true);
-            ConfigManager::Get().Config().autoCheckUpdates = value;
-            ConfigManager::Get().Save();
-            PushUpdatesStateToJs();
-        }
-        else if (cmd == "updatesCheckNow")
-        {
-            StartUpdatesCheck(hwnd, /*silentStartupCheck*/false);
-        }
-        else if (cmd == "updatesDownload")
-        {
-            std::wstring url  = FromUtf8(msg.value("url", std::string()));
-            std::wstring name = FromUtf8(msg.value("name", std::string()));
-            StartUpdatesDownload(hwnd, url, name);
-        }
-        // -------------------------------------------------------------
-        // nvngx_dlssnr.dll surukle-birak yuklemesi (bkz. Ana Sayfa dllStatusBar,
-        // web/main/app.js uploadNvngxDlssnr). WebView2 suruklenen dosyanin
-        // gercek yolunu vermedigi icin icerik PARCALAR halinde base64 ile
-        // akitiliyor -- bkz. Base64Decode.
-        // -------------------------------------------------------------
-        else if (cmd == "nvngxDropBegin")
-        {
-            std::wstring name = FromUtf8(msg.value("name", std::string()));
-            for (auto& ch : name) ch = towlower(ch);
-
-            if (g_nvngxUploadFile != INVALID_HANDLE_VALUE)
-            {
-                CloseHandle(g_nvngxUploadFile);
-                g_nvngxUploadFile = INVALID_HANDLE_VALUE;
-            }
-
-            if (name != L"nvngx_dlssnr.dll")
-            {
-                json out; out["type"] = "nvngxDropResult";
-                json d; d["ok"] = false; d["error"] = "Sadece nvngx_dlssnr.dll kabul edilir.";
-                out["data"] = d;
-                if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
-                return;
-            }
-
-            g_nvngxUploadTempPath     = GetNvngxDlssnrPath() + L".part";
-            g_nvngxUploadFile         = CreateFileW(g_nvngxUploadTempPath.c_str(), GENERIC_WRITE, 0, nullptr,
-                                                     CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-            g_nvngxUploadExpectedSize = msg.value("size", static_cast<uint64_t>(0));
-            g_nvngxUploadReceivedSize = 0;
-            g_nvngxUploadNextSeq      = 0;
-
-            if (g_nvngxUploadFile == INVALID_HANDLE_VALUE)
-            {
-                json out; out["type"] = "nvngxDropResult";
-                json d; d["ok"] = false; d["error"] = "Geçici dosya oluşturulamadı.";
-                out["data"] = d;
-                if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
-            }
-        }
-        else if (cmd == "nvngxDropChunk")
-        {
-            if (g_nvngxUploadFile == INVALID_HANDLE_VALUE) return;
-
-            int seq = msg.value("seq", -1);
-            if (seq != g_nvngxUploadNextSeq)
-            {
-                CloseHandle(g_nvngxUploadFile);
-                g_nvngxUploadFile = INVALID_HANDLE_VALUE;
-                DeleteFileW(g_nvngxUploadTempPath.c_str());
-
-                json out; out["type"] = "nvngxDropResult";
-                json d; d["ok"] = false; d["error"] = "Aktarım sırası bozuldu, tekrar deneyin.";
-                out["data"] = d;
-                if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
-                return;
-            }
-
-            auto bytes = Base64Decode(msg.value("dataB64", std::string()));
-            DWORD written = 0;
-            WriteFile(g_nvngxUploadFile, bytes.data(), static_cast<DWORD>(bytes.size()), &written, nullptr);
-            g_nvngxUploadReceivedSize += written;
-            g_nvngxUploadNextSeq++;
-        }
-        else if (cmd == "nvngxDropEnd")
-        {
-            bool ok = false;
-            std::wstring error;
-
-            if (g_nvngxUploadFile != INVALID_HANDLE_VALUE)
-            {
-                CloseHandle(g_nvngxUploadFile);
-                g_nvngxUploadFile = INVALID_HANDLE_VALUE;
-
-                if (g_nvngxUploadExpectedSize != 0 && g_nvngxUploadReceivedSize != g_nvngxUploadExpectedSize)
-                {
-                    error = L"Dosya boyutu uyuşmadı, aktarım bozuk olabilir.";
-                    DeleteFileW(g_nvngxUploadTempPath.c_str());
-                }
-                else
-                {
-                    std::wstring finalPath = GetNvngxDlssnrPath();
-                    DeleteFileW(finalPath.c_str()); // eskisi varsa uzerine yazabilmek icin
-                    if (MoveFileW(g_nvngxUploadTempPath.c_str(), finalPath.c_str()))
-                    {
-                        ok = true;
-                        DLSS_Log("[Main] nvngx_dlssnr.dll surukle-birak ile eklendi (%llu bayt).",
-                                 static_cast<unsigned long long>(g_nvngxUploadReceivedSize));
-                    }
-                    else
-                    {
-                        error = L"Dosya taşınamadı (hata=" + std::to_wstring(GetLastError()) + L").";
-                    }
-                }
-            }
-            else
-            {
-                error = L"Aktarım durumu bulunamadı.";
-            }
-
-            json out; out["type"] = "nvngxDropResult";
-            json d; d["ok"] = ok;
-            if (!ok) d["error"] = ToUtf8(error);
-            out["data"] = d;
-            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
-
-            if (ok) PushStateToJs(); // BASLAT butonu/durum cubugu aninda guncellensin
-        }
+        // nvngx_dlssnr.dll durum isigi (bkz. Ana Sayfa dllStatusBar, web/main/app.js
+        // setNvngxStatus) -- surukle-birak yukleme kaldirildi, kullanici dosyayi
+        // kendi elle exe klasorune kopyalar. Durum zaten her "state" push'unda
+        // (BuildStateJson "nvngxDlssnrReady") otomatik gonderiliyor, ayri bir
+        // komuta gerek yok.
     }
     catch (...) { /* Hatali/beklenmedik JSON alani -- bu mesaji yoksay, uygulamayi cokertme. */ }
 }
@@ -2026,117 +1501,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
             else
                 StartCaptureWithTarget(hwnd, g_windows[sel].hwnd);
         }
-        break;
-    }
-
-    case WM_APP_UPDATES_FETCH_DONE:
-    {
-        // Bkz. StartUpdatesCheck: FetchLatestReleases arka plan thread'inde
-        // calisti, sonuc heap'te bize devredildi -- sahiplik burada, tek
-        // cikis yolunda delete edilir.
-        std::unique_ptr<UpdateChecker::FetchResult> result(
-            reinterpret_cast<UpdateChecker::FetchResult*>(lParam));
-        bool silentStartupCheck = (wParam == 1);
-
-        g_updatesChecking = false;
-        if (result->ok)
-        {
-            g_updatesCache = result->releases;
-            g_updatesLastError.clear();
-            g_updatesLatestTag = g_updatesCache.empty() ? L"" : g_updatesCache.front().tag;
-            g_updatesHasNewer = !g_updatesLatestTag.empty() &&
-                UpdateChecker::CompareVersions(g_updatesLatestTag, VLSS5_VERSION_STRING) > 0;
-        }
-        else
-        {
-            g_updatesLastError = result->error;
-            DLSS_Log("[Updates] Surum kontrolu basarisiz: %ls", result->error.c_str());
-        }
-        PushUpdatesStateToJs();
-
-        if (silentStartupCheck && g_updatesHasNewer)
-        {
-            std::wstring mainInstruction = L"Yeni güncelleme mevcut: " + g_updatesLatestTag + L". İndirilip kurulsun mu?";
-            std::wstring content = L"Mevcut sürümünüz: " + std::wstring(VLSS5_VERSION_STRING);
-
-            if (ConfirmDialog::AskYesNo(hwnd, L"VLSS5 - Güncelleme Mevcut",
-                    mainInstruction.c_str(), content.c_str(),
-                    L"Evet", L"Hayır", /*defaultIsYes*/true, /*warningIcon*/false))
-            {
-                if (!g_updatesCache.empty())
-                {
-                    if (const auto* asset = UpdateChecker::PickBestAsset(g_updatesCache.front()))
-                        StartUpdatesDownload(hwnd, asset->downloadUrl, asset->name);
-                }
-            }
-        }
-        break;
-    }
-
-    case WM_APP_UPDATES_DL_PROGRESS:
-    {
-        std::unique_ptr<UpdateChecker::DownloadProgress> prog(
-            reinterpret_cast<UpdateChecker::DownloadProgress*>(lParam));
-        if (g_mainWebView)
-        {
-            json data;
-            data["received"] = prog->received;
-            data["total"]    = prog->total;
-            json msg;
-            msg["type"] = "updatesDownloadProgress";
-            msg["data"] = data;
-            g_mainWebView->PostJson(FromUtf8(msg.dump()));
-        }
-        break;
-    }
-
-    case WM_APP_UPDATES_DL_DONE:
-    {
-        std::unique_ptr<std::wstring> pathOrError(reinterpret_cast<std::wstring*>(lParam));
-        bool ok = (wParam == 1);
-        g_updatesDownloading = false;
-
-        json data;
-        data["ok"] = ok;
-        if (ok)
-        {
-            data["path"] = ToUtf8(*pathOrError);
-
-            std::wstring fileName = *pathOrError;
-            size_t slash = fileName.find_last_of(L"\\/");
-            if (slash != std::wstring::npos) fileName = fileName.substr(slash + 1);
-
-            if (UpdateChecker::IsAutoInstallableAsset(fileName))
-            {
-                // Yeni surumler (bkz. .github/workflows/release.yml):
-                // VLSS5-X.Y.Z-portable.zip -- ZIP'i ac, dosyalari uzerine
-                // kopyala, VLSS5'i yeniden baslat. Elle mudahale YOK. Artik
-                // hicbir installer.exe indirilmiyor/calistirilmiyor.
-                data["autoInstalling"] = true;
-                LaunchPortableUpdateAndExit(hwnd, *pathOrError);
-            }
-            else
-            {
-                // Eski surumlerin .exe/.rar asset'i (henuz portable ZIP pipeline'iyla
-                // yayimlanmamis) -- otomatik kuramayiz, kullanicinin varsayilan
-                // programina devrediyoruz (bkz. presetsOpenFolder ile ayni desen).
-                ShellExecuteW(hwnd, L"open", pathOrError->c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-            }
-        }
-        else
-        {
-            data["error"] = ToUtf8(*pathOrError);
-            DLSS_Log("[Updates] Indirme basarisiz: %ls", pathOrError->c_str());
-        }
-
-        if (g_mainWebView)
-        {
-            json msg;
-            msg["type"] = "updatesDownloadDone";
-            msg["data"] = data;
-            g_mainWebView->PostJson(FromUtf8(msg.dump()));
-        }
-        PushUpdatesStateToJs();
         break;
     }
 
@@ -2256,11 +1620,12 @@ void CheckRequiredFiles()
         ExitProcess(1);
     }
 
-    // nvngx_dlssnr.dll (telifli NGX model agirliklari) ARTIK burada sert bir
-    // hata/ExitProcess ile zorunlu tutulmuyor -- Ana Sayfa'daki durum/surukle-
-    // birak cubugu (bkz. dllStatusBar, NvngxDlssnrExists) kullaniciya dosyayi
-    // uygulama ICINDEN eklemesini saglar. Dosya yoksa sadece BASLAT devre disi
-    // kalir (bkz. BuildStateJson "nvngxDlssnrReady" ve "startStop" isleyicisi).
+    // nvngx_dlssnr.dll (telifli NGX model agirliklari) burada sert bir
+    // hata/ExitProcess ile zorunlu tutulmuyor -- Ana Sayfa'daki durum isigi
+    // (bkz. dllStatusBar, NvngxDlssnrExists) kullaniciya dosyanin eksik
+    // oldugunu gosterir, kullanici dosyayi exe klasorune elle kopyalar.
+    // Dosya yoksa sadece BASLAT devre disi kalir (bkz. BuildStateJson
+    // "nvngxDlssnrReady" ve "startStop" isleyicisi).
 }
 
 // ---------------------------------------------------------------------------
@@ -2499,10 +1864,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     HotkeysWindow::Initialize(hInstance);
     PresetsWindow::Initialize(hInstance);
 
-    // Faz 3: "Tuşları Değiştir" sekmesi HotkeysWindow'un KENDI WH_KEYBOARD_LL
-    // hook'unu kullanir (bkz. OnMainWebMessage'daki hotkeysStartCapture) ama
-    // ana pencere sekmesi HotkeysWindow'un s_host'undan FARKLI bir WebViewHost
-    // (g_mainWebView) kullandigi icin sonucu bu callback ile ayrica alir.
+    // Ana pencere sekmesi HotkeysWindow'un s_host'undan FARKLI bir WebViewHost
+    // (g_mainWebView) kullandigi icin tus secim sonucunu (bkz. OnMainWebMessage
+    // "hotkeysSetKey") bu callback ile ayrica alir.
     HotkeysWindow::SetExternalKeyCapturedCallback([](bool /*save*/, UINT /*vk*/, UINT /*mod*/)
     {
         if (!g_mainWebView) return;
@@ -2553,15 +1917,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     // Create App instance
     g_app = std::make_unique<App>(hInstance);
     SettingsWindow::SetAppInstance(g_app.get());
-
-    // "Güncellemeler" sekmesi: kullanici acmasa bile her baslangicta sessizce
-    // GitHub Releases kontrol edilir (ayar kapatilabilir, bkz. ConfigManager
-    // autoCheckUpdates / web/main "Güncellemeler" sekmesindeki anahtar).
-    // Yeni surum bulunursa WM_APP_UPDATES_FETCH_DONE isleyicisi onay dialogu gosterir.
-    if (ConfigManager::Get().Config().autoCheckUpdates)
-    {
-        StartUpdatesCheck(hwnd, /*silentStartupCheck*/true);
-    }
 
     // Standard Win32 message loop
     MSG msg = {};
