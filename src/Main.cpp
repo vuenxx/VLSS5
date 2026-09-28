@@ -1560,47 +1560,22 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 // ---------------------------------------------------------------------------
 static void EnsureNvofapiAvailable()
 {
-    wchar_t exePath[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exePath, MAX_PATH);
-    PathRemoveFileSpecW(exePath);
-
-    wchar_t targetNvof[MAX_PATH] = {};
-    PathCombineW(targetNvof, exePath, L"nvofapi64.dll");
-
+    // System32'den .exe klasorune kopyalamiyoruz -- Windows Defender bu davranisi
+    // (sistem dizininden dosya cekip yerel klasore yazma) Wacatac.B!ml heuristigiyle
+    // "dropper" gibi degerlendiriyordu. Dogrudan System32'den LoadLibrary yeterli.
     wchar_t sysDir[MAX_PATH] = {};
     GetSystemDirectoryW(sysDir, MAX_PATH);
     wchar_t srcNvof[MAX_PATH] = {};
     PathCombineW(srcNvof, sysDir, L"nvofapi64.dll");
 
-    // If nvofapi64.dll is missing in the .exe directory, automatically copy from System32
-    if (GetFileAttributesW(targetNvof) == INVALID_FILE_ATTRIBUTES)
-    {
-        if (GetFileAttributesW(srcNvof) != INVALID_FILE_ATTRIBUTES)
-        {
-            if (CopyFileW(srcNvof, targetNvof, FALSE))
-            {
-                DLSS_Log("[Init] nvofapi64.dll System32'den basariyla uygulama klasorune kopyalandi.");
-            }
-            else
-            {
-                DLSS_Log("[Init] nvofapi64.dll kopyalanamadi (hata=%lu), dogrudan System32'den yuklenecek.", GetLastError());
-            }
-        }
-        else
-        {
-            DLSS_Log("[Init] Bilgi: System32 altinda nvofapi64.dll bulunamadi.");
-        }
-    }
-
-    // Preload nvofapi64.dll into process memory
-    HMODULE hNvof = LoadLibraryW(targetNvof);
-    if (!hNvof && GetFileAttributesW(srcNvof) != INVALID_FILE_ATTRIBUTES)
-    {
-        hNvof = LoadLibraryW(srcNvof);
-    }
+    HMODULE hNvof = LoadLibraryW(srcNvof);
     if (hNvof)
     {
-        DLSS_Log("[Init] nvofapi64.dll basariyla bellege yuklendi (0x%p).", hNvof);
+        DLSS_Log("[Init] nvofapi64.dll dogrudan System32'den bellege yuklendi (0x%p).", hNvof);
+    }
+    else
+    {
+        DLSS_Log("[Init] nvofapi64.dll System32'den yuklenemedi (hata=%lu).", GetLastError());
     }
 }
 

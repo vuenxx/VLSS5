@@ -134,64 +134,12 @@ bool FindNvidiaDriverStorePath(wchar_t* outPath, size_t maxLen)
 // ---------------------------------------------------------------------------
 void EnsureNGXAvailable()
 {
-    wchar_t exeDir[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, exeDir, MAX_PATH);
-    PathRemoveFileSpecW(exeDir);
-
-    wchar_t driverDir[MAX_PATH] = {};
-    if (!FindNvidiaDriverStorePath(driverDir, MAX_PATH))
-    {
-        DLSS_Log("[Init] NVIDIA DriverStore dizini bulunamadi, DLL kopyalama atlandi.");
-        return;
-    }
-
-    const wchar_t* dllsToCopy[] = { L"_nvngx.dll", L"nvngx.dll" };
-    for (const wchar_t* dllName : dllsToCopy)
-    {
-        wchar_t srcPath[MAX_PATH] = {};
-        wchar_t dstPath[MAX_PATH] = {};
-        PathCombineW(srcPath, driverDir, dllName);
-        PathCombineW(dstPath, exeDir, dllName);
-
-        if (GetFileAttributesW(srcPath) != INVALID_FILE_ATTRIBUTES)
-        {
-            bool needCopy = true;
-            if (GetFileAttributesW(dstPath) != INVALID_FILE_ATTRIBUTES)
-            {
-                WIN32_FILE_ATTRIBUTE_DATA srcAttr, dstAttr;
-                if (GetFileAttributesExW(srcPath, GetFileExInfoStandard, &srcAttr) &&
-                    GetFileAttributesExW(dstPath, GetFileExInfoStandard, &dstAttr))
-                {
-                    if (srcAttr.nFileSizeLow == dstAttr.nFileSizeLow &&
-                        srcAttr.nFileSizeHigh == dstAttr.nFileSizeHigh &&
-                        CompareFileTime(&srcAttr.ftLastWriteTime, &dstAttr.ftLastWriteTime) == 0)
-                    {
-                        needCopy = false;
-                    }
-                }
-            }
-
-            if (needCopy)
-            {
-                if (CopyFileW(srcPath, dstPath, FALSE))
-                {
-                    DLSS_Log("[Init] %ls DriverStore'dan uygulama klasorune basariyla kopyalandi.", dllName);
-                }
-                else
-                {
-                    DLSS_Log("[Init] %ls kopyalanamadi (LastError=%lu).", dllName, GetLastError());
-                }
-            }
-            else
-            {
-                DLSS_Log("[Init] %ls zaten guncel sekilde uygulama klasorunde mevcut.", dllName);
-            }
-        }
-        else
-        {
-            DLSS_Log("[Init] DriverStore'da %ls bulunamadi (%ls)", dllName, srcPath);
-        }
-    }
+    // DriverStore'dan .exe klasorune DLL kopyalamiyoruz -- Windows Defender bu
+    // davranisi (sistem/driver dizinlerinden dosya cekip yerel klasore yazma)
+    // Wacatac.B!ml heuristigiyle "dropper" gibi degerlendiriyordu. LoadNGXLibrary
+    // zaten DriverStore'dan dogrudan LoadLibrary ile yukleyebildigi icin kopyalama
+    // gereksizdi.
+    DLSS_Log("[Init] EnsureNGXAvailable: DriverStore kopyalama devre disi, dogrudan yukleme kullanilacak.");
 }
 
 // ---------------------------------------------------------------------------

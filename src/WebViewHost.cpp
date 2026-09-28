@@ -1,4 +1,5 @@
 #include "WebViewHost.h"
+#include "WebView2EnvironmentOptions.h"
 #include <shlwapi.h>
 
 #pragma comment(lib, "shlwapi.lib")
@@ -55,8 +56,25 @@ bool WebViewHost::EnsureEnvironment(HINSTANCE /*hInstance*/)
     bool done = false;
     HRESULT createHr = E_FAIL;
 
+    // WebView2, kendi gomulu Edge motorunun VARSAYILAN ayarlariyla acilirsa
+    // Microsoft'un arka plan servislerine (telemetri, component updater, sync,
+    // crash reporting vb.) kendiliginden baglanir -- bu uygulamanin kendi
+    // kodundan tamamen bagimsiz bir network trafigi. Icerigimiz zaten sadece
+    // SetVirtualHostNameToFolderMapping ile yerelden sunuluyor (bkz. yukarisi),
+    // yani gercek internet erisimine hic ihtiyac yok. --proxy-server ile TUM
+    // gercek network isteklerini hicbir seyin dinlemedigi yerel bir porta
+    // yonlendirip kesin olarak basarisiz kiliyoruz; sanal host eslemesi network
+    // yiginina hic girmeden erken yakalandigi icin bundan etkilenmez.
+    auto envOptions = Microsoft::WRL::Make<CoreWebView2EnvironmentOptions>();
+    envOptions->put_AdditionalBrowserArguments(
+        L"--disable-background-networking --disable-component-update "
+        L"--disable-domain-reliability --disable-sync --disable-breakpad "
+        L"--disable-features=msEdgeTranslate,OptimizationHints,HardwareMediaKeyHandling,"
+        L"MediaRouter,AutofillServerCommunication "
+        L"--proxy-server=\"127.0.0.1:9\"");
+
     HRESULT hr = CreateCoreWebView2EnvironmentWithOptions(
-        nullptr, GetUserDataFolder().c_str(), nullptr,
+        nullptr, GetUserDataFolder().c_str(), envOptions.Get(),
         Callback<ICoreWebView2CreateCoreWebView2EnvironmentCompletedHandler>(
             [&done, &createHr](HRESULT result, ICoreWebView2Environment* env) -> HRESULT
             {
