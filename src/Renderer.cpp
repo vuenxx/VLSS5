@@ -1196,7 +1196,10 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     // dusurmek agirligi transferredLuma'ya (native luma, yalnizca oran ile
     // olceklenmis -- uzaysal olarak HEP native) kaydirip golge/isik kaymasinin
     // gorunurlugunu azaltir; renk doygunlugundan kucuk bir odun verir.
-    float colourStrength = 0.45f;
+    // Artik kullanicidan (Settings > Renk Gucu) geliyor -- varsayilan 0.45,
+    // isteyen 1.0'a cekip eski (daha canli, ama flicker riskine acik) davranisi
+    // geri getirebilir.
+    float colourStrength = ConfigManager::Get().Config().colourStrength;
     // Burada da HEDEF degil, D3D12Interop'un (yukarida senkronize edilen)
     // GERCEK boyutuyla ayni kaynaktan gelen built boyutu kullan.
     int workW = (m_dlssnrManager && usedDlssNr) ? m_dlssnrManager->GetBuiltWorkWidth() : m_width;

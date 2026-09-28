@@ -2,7 +2,7 @@ const $ = (id) => document.getElementById(id);
 
 document.getElementById("btnClose").onclick = () => vlss5.send("close");
 
-const sliders = ["intensity", "boost", "structure", "tone", "skin", "resScale", "passCount", "passFalloff", "splitPos"];
+const sliders = ["intensity", "boost", "structure", "tone", "skin", "colourStrength", "resScale", "passCount", "passFalloff", "splitPos"];
 const selects = ["style", "preset"];
 const toggles = [
   { id: "swAutoMask", field: "useAutoMask" },
@@ -25,6 +25,7 @@ function fmtSkin(v) {
   if (val <= -0.99) return "Otomatik";
   return val.toFixed(2) + "x";
 }
+function fmtColourStrength(v) { return `%${v}`; }
 function fmtResScale(v) {
   if (v >= 100) return "%100 (Kalite)";
   if (v >= 85) return `%${v} (Dengeli)`;
@@ -50,6 +51,7 @@ function updateLiveLabels() {
   $("structureVal").textContent = fmtStructure(+$("structure").value);
   $("toneVal").textContent = fmtTone(+$("tone").value);
   $("skinVal").textContent = fmtSkin(+$("skin").value);
+  $("colourStrengthVal").textContent = fmtColourStrength(+$("colourStrength").value);
   $("resScaleVal").textContent = fmtResScale(+$("resScale").value);
   $("passCountVal").textContent = fmtPassCount(+$("passCount").value);
   $("passFalloffVal").textContent = fmtPassFalloff(+$("passFalloff").value);
@@ -73,6 +75,7 @@ function readConfigFromForm() {
       const v = +$("skin").value / 100 - 1.0;
       return v <= -0.99 ? -1.0 : v;
     })(),
+    colourStrength: +$("colourStrength").value / 100,
     resolutionScale: +$("resScale").value,
     passCount: Math.min(4, Math.max(1, +$("passCount").value)),
     passFalloff: Math.min(1.0, Math.max(0.25, +$("passFalloff").value / 100)),
@@ -92,6 +95,7 @@ function applyConfigToForm(cfg) {
   $("structure").value = Math.round(cfg.localStructure * 100);
   $("tone").value = Math.round(cfg.localTone * 100);
   $("skin").value = cfg.skinStructure <= -0.99 ? 0 : Math.round((cfg.skinStructure + 1.0) * 100);
+  $("colourStrength").value = Math.round(cfg.colourStrength * 100);
   $("resScale").value = cfg.resolutionScale;
   $("passCount").value = cfg.passCount;
   $("passFalloff").value = Math.round(cfg.passFalloff * 100);

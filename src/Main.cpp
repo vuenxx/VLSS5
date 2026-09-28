@@ -1097,6 +1097,7 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
             data["localStructure"]  = cfg.localStructure;
             data["localTone"]       = cfg.localTone;
             data["skinStructure"]   = cfg.skinStructure;
+            data["colourStrength"]  = cfg.colourStrength;
             data["resolutionScale"] = cfg.resolutionScale;
             data["passCount"]       = cfg.passCount;
             data["passFalloff"]     = cfg.passFalloff;
@@ -1153,6 +1154,7 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
                 cfg.localTone       = d.value("localTone", cfg.localTone);
                 cfg.skinStructure   = d.value("skinStructure", cfg.skinStructure);
                 if (cfg.skinStructure <= -0.99f) cfg.skinStructure = -1.0f;
+                cfg.colourStrength  = std::clamp(d.value("colourStrength", cfg.colourStrength), 0.0f, 1.0f);
                 cfg.resolutionScale = d.value("resolutionScale", cfg.resolutionScale);
                 cfg.passCount       = std::clamp(d.value("passCount", cfg.passCount), 1, 4);
                 cfg.passFalloff     = std::clamp(d.value("passFalloff", cfg.passFalloff), 0.25f, 1.0f);
@@ -1190,6 +1192,7 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
                     cfg.localStructure  = loaded.localStructure;
                     cfg.localTone       = loaded.localTone;
                     cfg.skinStructure   = loaded.skinStructure;
+                    cfg.colourStrength  = loaded.colourStrength;
                     cfg.resolutionScale = loaded.resolutionScale;
                     cfg.passCount       = loaded.passCount;
                     cfg.passFalloff     = loaded.passFalloff;
@@ -1208,6 +1211,7 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
                     data["localStructure"]  = cfg.localStructure;
                     data["localTone"]       = cfg.localTone;
                     data["skinStructure"]   = cfg.skinStructure;
+                    data["colourStrength"]  = cfg.colourStrength;
                     data["resolutionScale"] = cfg.resolutionScale;
                     data["passCount"]       = cfg.passCount;
                     data["passFalloff"]     = cfg.passFalloff;

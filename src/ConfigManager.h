@@ -9,6 +9,14 @@ struct Dlss5Config
     float localStructure = 1.0f;    // 0.0 - 2.0 (Yüzey detay ve geometri keskinliği)
     float localTone      = 1.0f;    // 0.0 - 2.0 (Mikro kontrast)
     float skinStructure  = -1.0f;   // -1.0 = Otomatik / takip et, 0.0 - 2.0 = Manuel ten ayarı
+
+    // Sub-native (isSubNative==1) luminance-ratio transfer dalinda nihai renk
+    // ne kadar modelden (DLSS 5), ne kadar ham/orijinal kareden gelsin.
+    // 0.0 = tamamen ham renk (yalnizca isik oranini tasi), 1.0 = tamamen model
+    // rengi. Eskiden 1.0'a sabitliydi; sonra golge/isik sicramasini azaltmak
+    // icin 0.45'e sabitlendi (bkz. Renderer.cpp PS() yorumlari) -- bu da
+    // DLSS 5'in canliligini gozle gorulur sekilde azaltti. Artik ayarlanabilir.
+    float colourStrength = 0.45f;   // 0.0 - 1.0 (Renk Gücü)
     bool  useAutoMask    = true;    // Otomatik ten maskesi
     int   resolutionScale = 100;    // 50 - 100 (% Model Çözünürlüğü / Performans Modu)
 

@@ -250,7 +250,7 @@ document.querySelectorAll(".accordionHeader").forEach((header) => {
 // AYARLAR sekmesi (bkz. web/settings/app.js) -- cmd/type "settings" onekiyle
 // ===========================================================================
 (function () {
-  const stgSliders = ["stgIntensity", "stgBoost", "stgStructure", "stgTone", "stgSkin", "stgResScale", "stgPassCount", "stgPassFalloff", "stgSplitPos"];
+  const stgSliders = ["stgIntensity", "stgBoost", "stgStructure", "stgTone", "stgSkin", "stgColourStrength", "stgResScale", "stgPassCount", "stgPassFalloff", "stgSplitPos"];
   const stgSelects = ["stgStyle", "stgPreset"];
   const stgToggles = ["stgSwAutoMask", "stgSwOpticalFlow", "stgSwSplit"];
 
@@ -267,6 +267,7 @@ document.querySelectorAll(".accordionHeader").forEach((header) => {
     if (val <= -0.99) return "Oto";
     return val.toFixed(2) + "x";
   }
+  function fmtColourStrength(v) { return `%${v}`; }
   function fmtResScale(v) { return `%${v}`; }
   function fmtPassCount(v) { return String(v); }
   function fmtPassFalloff(v) { return (v / 100).toFixed(2) + "x"; }
@@ -278,6 +279,7 @@ document.querySelectorAll(".accordionHeader").forEach((header) => {
     $("stgStructureVal").textContent = fmtStructure(+$("stgStructure").value);
     $("stgToneVal").textContent = fmtTone(+$("stgTone").value);
     $("stgSkinVal").textContent = fmtSkin(+$("stgSkin").value);
+    $("stgColourStrengthVal").textContent = fmtColourStrength(+$("stgColourStrength").value);
     $("stgResScaleVal").textContent = fmtResScale(+$("stgResScale").value);
     $("stgPassCountVal").textContent = fmtPassCount(+$("stgPassCount").value);
     $("stgPassFalloffVal").textContent = fmtPassFalloff(+$("stgPassFalloff").value);
@@ -301,6 +303,7 @@ document.querySelectorAll(".accordionHeader").forEach((header) => {
         const v = +$("stgSkin").value / 100 - 1.0;
         return v <= -0.99 ? -1.0 : v;
       })(),
+      colourStrength: +$("stgColourStrength").value / 100,
       resolutionScale: +$("stgResScale").value,
       passCount: Math.min(4, Math.max(1, +$("stgPassCount").value)),
       passFalloff: Math.min(1.0, Math.max(0.25, +$("stgPassFalloff").value / 100)),
@@ -320,6 +323,7 @@ document.querySelectorAll(".accordionHeader").forEach((header) => {
     $("stgStructure").value = Math.round(cfg.localStructure * 100);
     $("stgTone").value = Math.round(cfg.localTone * 100);
     $("stgSkin").value = cfg.skinStructure <= -0.99 ? 0 : Math.round((cfg.skinStructure + 1.0) * 100);
+    $("stgColourStrength").value = Math.round(cfg.colourStrength * 100);
     $("stgResScale").value = cfg.resolutionScale;
     $("stgPassCount").value = cfg.passCount;
     $("stgPassFalloff").value = Math.round(cfg.passFalloff * 100);

@@ -123,6 +123,11 @@ void ConfigManager::Load()
     if (m_config.skinStructure < -1.0f) m_config.skinStructure = -1.0f;
     if (m_config.skinStructure > 2.0f)  m_config.skinStructure = 2.0f;
 
+    GetPrivateProfileStringW(sec, L"ColourStrength", L"0.45", buf, _countof(buf), ini.c_str());
+    m_config.colourStrength = static_cast<float>(_wtof(buf));
+    if (m_config.colourStrength < 0.0f) m_config.colourStrength = 0.0f;
+    if (m_config.colourStrength > 1.0f) m_config.colourStrength = 1.0f;
+
     m_config.useAutoMask = (GetPrivateProfileIntW(sec, L"UseAutoMask", 1, ini.c_str()) != 0);
 
     m_config.resolutionScale = GetPrivateProfileIntW(sec, L"ResolutionScale", 100, ini.c_str());
@@ -307,6 +312,7 @@ void ConfigManager::Save()
     writeFloat(L"VLSS5", L"LocalStructure", m_config.localStructure);
     writeFloat(L"VLSS5", L"LocalTone", m_config.localTone);
     writeFloat(L"VLSS5", L"SkinStructure", m_config.skinStructure);
+    writeFloat(L"VLSS5", L"ColourStrength", m_config.colourStrength);
     writeInt(L"VLSS5", L"UseAutoMask", m_config.useAutoMask ? 1 : 0);
     writeInt(L"VLSS5", L"ResolutionScale", m_config.resolutionScale);
     writeInt(L"VLSS5", L"PassCount", m_config.passCount);

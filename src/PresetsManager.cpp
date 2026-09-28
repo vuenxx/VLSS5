@@ -238,6 +238,9 @@ bool PresetsManager::LoadPresetConfig(const std::wstring& folderName, Dlss5Confi
     GetPrivateProfileStringW(sec, L"SkinStructure", L"-1.0", buf, _countof(buf), cfgPath.c_str());
     outCfg.skinStructure = static_cast<float>(_wtof(buf));
 
+    GetPrivateProfileStringW(sec, L"ColourStrength", L"0.45", buf, _countof(buf), cfgPath.c_str());
+    outCfg.colourStrength = static_cast<float>(_wtof(buf));
+
     outCfg.resolutionScale = GetPrivateProfileIntW(sec, L"ResolutionScale", 100, cfgPath.c_str());
     outCfg.passCount       = GetPrivateProfileIntW(sec, L"PassCount", 1, cfgPath.c_str());
 
@@ -300,6 +303,7 @@ std::wstring PresetsManager::SavePreset(const PresetIdentity& id, const Dlss5Con
     writeFloat(L"LocalStructure", cfg.localStructure);
     writeFloat(L"LocalTone", cfg.localTone);
     writeFloat(L"SkinStructure", cfg.skinStructure);
+    writeFloat(L"ColourStrength", cfg.colourStrength);
     writeInt(L"ResolutionScale", cfg.resolutionScale);
     writeInt(L"PassCount", cfg.passCount);
     writeFloat(L"PassFalloff", cfg.passFalloff);
