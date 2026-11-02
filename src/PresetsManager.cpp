@@ -221,7 +221,7 @@ bool PresetsManager::LoadPresetConfig(const std::wstring& folderName, Dlss5Confi
     wchar_t buf[64] = {};
 
     outCfg.style  = GetPrivateProfileIntW(sec, L"Style", 0, cfgPath.c_str());
-    outCfg.preset = GetPrivateProfileIntW(sec, L"Preset", 0, cfgPath.c_str());
+    outCfg.preset = NormalizeModelPreset(GetPrivateProfileIntW(sec, L"Preset", 2, cfgPath.c_str()));
 
     GetPrivateProfileStringW(sec, L"Intensity", L"1.0", buf, _countof(buf), cfgPath.c_str());
     outCfg.intensity = static_cast<float>(_wtof(buf));

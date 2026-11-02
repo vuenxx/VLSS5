@@ -83,6 +83,19 @@ jobs:
           if (Test-Path "redist/nvngx.dll_dlssnr.dll") {
             Copy-Item "redist/nvngx.dll_dlssnr.dll" -Destination $staging
           }
+          # Dahili FPS limiter DLL'leri (opt-in enjeksiyon arka uci). VLSS5.vcxproj
+          # ProjectReference (64-bit) + BuildWin32Limiter hedefi (32-bit) ile uretir;
+          # hepsi exe yaninda bulunmali.
+          if (Test-Path "x64/Release/vlss5_limiter.dll") {
+            Copy-Item "x64/Release/vlss5_limiter.dll" -Destination $staging
+          }
+          # 32-bit oyunlar icin: 32-bit DLL + 32-bit enjeksiyon yardimcisi.
+          if (Test-Path "x64/Release/vlss5_limiter32.dll") {
+            Copy-Item "x64/Release/vlss5_limiter32.dll" -Destination $staging
+          }
+          if (Test-Path "x64/Release/vlss5_inject32.exe") {
+            Copy-Item "x64/Release/vlss5_inject32.exe" -Destination $staging
+          }
           if (Test-Path "beni oku.txt") {
             Copy-Item "beni oku.txt" -Destination $staging
           }

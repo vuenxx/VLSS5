@@ -196,7 +196,7 @@ void SettingsWindow::OnWebMessage(const std::wstring& jsonStr)
         auto& cfg = ConfigManager::Get().Config();
 
         cfg.style           = d.value("style", cfg.style);
-        cfg.preset          = d.value("preset", cfg.preset);
+        cfg.preset          = NormalizeModelPreset(d.value("preset", cfg.preset));
         cfg.intensity       = d.value("intensity", cfg.intensity);
         cfg.boostFactor     = std::clamp(d.value("boostFactor", cfg.boostFactor), 1.0f, 2.5f);
         cfg.localStructure  = d.value("localStructure", cfg.localStructure);

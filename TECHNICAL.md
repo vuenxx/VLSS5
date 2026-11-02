@@ -76,6 +76,9 @@ Hepsi opsiyoneldir; yoksa ilgili özellik sessizce devre dışı kalır ve log'a
 | `src/ConfigManager.cpp/h` | 212 | `Dlss5Config` + INI okuma/yazma (singleton) |
 | `src/InputForwarder.cpp/h` | 138 | Kısayol yakalama (hook **yalnızca** atama sırasında) |
 | `src/RTSSManager.cpp/h` | 112 | RTSS profil `.cfg` okuma/yazma |
+| `src/LimiterManager.cpp/h` | — | FPS limiter arka uc soyutlamasi (RTSS / dahili enjeksiyon). Kalibrasyon buradan gecer |
+| `limiter/vlss5_limiter.cpp` | — | Hedef oyuna yuklenen hook DLL'i (Present sarmalama + kare zamanlama). `vlss5_limiter.dll` |
+| `limiter/vlss5_limiter_shared.h` | — | Ana uygulama ↔ hook DLL paylasimli bellek protokolu |
 | `src/WindowEnumerator.cpp/h` | — | Görünür üst-seviye pencere listesi |
 | `src/Common.h` | — | Ortak include'lar, `#pragma comment(lib,...)`, `WindowInfo`, `DLSS_Log` bildirimi |
 
@@ -309,25 +312,30 @@ Waitable, `WS_EX_LAYERED` ile tam uyumludur; fare geçirgenliğinden ödün verm
 
 Oyunun kare üretim hızını, VLSS5'in işleyebildiği hıza **RTSS FPS limiti** ile kilitlemek. Giriş çıkıştan hızlıysa WGC kareleri kuyrukta birikip atılır → girdi gecikmesi + stutter.
 
-### Durum makinesi — ikili arama
+### Durum makinesi — kaba tarama + ikili arama
 
 ```
 Idle
  └─(kısayol)→ InitUncap    limit=0 (SINIRSIZ), ölç
        │       üst sınır = max(ölçülen giriş, MONİTÖR YENİLEME HIZI)
        │
-       ├─ senkron? → Finish(0)                    "limit gerekmiyor"
-       └─ değil    → Bisect   lo=kCalibMinFps, hi=üst sınır
-              │
-              │  her adımda hedef = (lo + hi) / 2
-              ├─ senkron + giriş < hedef-5 → Finish(giriş)   "oyunun kendi tavanı"
-              ├─ senkron                   → lo = hedef
-              └─ desenkron                 → hi = hedef
-              │
-              └─ hi - lo <= kCalibResolution → Finish(lo)
+       └─ CoarseUp   tabandan (kCalibMinFps) kCalibCoarseStep (10) adımlarla ÇIK
+              │   her hedef kCalibConfirmTicks tik DOĞRULANIR (senkron VE desenkron)
+              ├─ senkron + giriş < hedef-5 → Finish(giriş)      "oyunun kendi tavanı"
+              ├─ senkron + hedef >= üst sınır → Finish(üst sınır)
+              ├─ senkron (doğrulandı)      → lo = hedef, hedef += 10
+              └─ desenkron (doğrulandı)    → bant bulundu: [lo, hi=hedef]
+                      │
+                      └─ FineBisect   her adımda hedef = (lo + hi) / 2
+                              │   senkron/desenkron yine kCalibConfirmTicks ile doğrulanır
+                              ├─ senkron   → lo = hedef
+                              ├─ desenkron → hi = hedef
+                              └─ hi - lo <= 1 → Finish(lo)
 ```
 
-Her adım `kCalibStepMs = 3000` ms bekler (+ bir oturma tiki = pratikte 6 sn/sonda). Sabitler `App.h`'de.
+**Neden iki fazlı?** Kaba tarama gerçek senkron tavanının hangi 10'luk bantta olduğunu bulur; ikili arama o bandı ~log₂ adımda tarar. Eski sürüm bozulma anındaki çıkış FPS'ini çapa yapıp 1'er 1'er tırmanıyordu — bant genişse (ör. çapa 43, gerçek tavan 67) bu onlarca adım/dakika alıyordu (ölçülen gerçek bir hata: 43→67 birer birer, ~90 sn). Çapanın tek gürültülü bir okumadan düşmesini de engellemek için kaba taramada **desenkron da** (senkron gibi) ardışık doğrulanır.
+
+Her adım `kCalibStepMs = 1200` ms ölçer (+ bir oturma tiki). Doğrulama ile bir hedef pratikte ~3 tik ≈ 3.6 sn. Sabitler `App.h`'de.
 
 ### ⚠️ Üst sınır neden monitör yenileme hızı?
 
@@ -368,6 +376,29 @@ Sabit `<= 1` toleransı fazla dardı: 0.5 sn'lik pencerede tamsayıya yuvarlanan
 
 Kalibrasyon tuşuna **tekrar basmak** iptal eder ve kullanıcının limitini geri yükler.
 
+### Limiter arka uçları (`LimiterManager`)
+
+Kalibrasyon artık RTSS'e doğrudan bağlı değil; limiti `LimiterManager` üzerinden uygular. İki arka uç var:
+
+| Arka uç | Nasıl sınırlar | Enjeksiyon | Varsayılan |
+|---|---|---|---|
+| **RTSS** | RTSS profil `.cfg`'sine `Limit` yazar | Hayır | ✅ Evet |
+| **Dahili (enjeksiyon)** | `vlss5_limiter.dll`'i hedef oyuna yükler, Present'i sarmalayıp kareyi geciktirir — **DXGI (D3D10/11/12)**, **D3D9**, **D3D8** | Evet | — |
+
+Enjeksiyon arka ucu `Dlss5Config::injectionLimiter` ile açılır; **varsayılan kapalı** ve arayüzden açılırken kullanıcı bir ban-riski uyarısını onaylar (`Main.cpp` → `setInjectionLimiter`). Enjeksiyon kurulamazsa (32-bit hedef, erişim reddi, DLL yok) kalibrasyon sessizce RTSS'e düşer.
+
+**Yaşam döngüsü farkı:** RTSS limiti VLSS5'ten bağımsız, kalıcı bir ayardır — tamamlanan kalibrasyonun değeri bilerek bırakılır. Enjeksiyon limiti overlay oturumuna bağlıdır: `App::StopOverlay` her durumda `LimiterManager::Restore()` ile DLL'i çeker, oyun tam hıza döner.
+
+**İletişim:** PID'ye göre adlandırılmış paylaşımlı bellek (`SharedState`). Ana uygulama yalnızca `targetFps` + `shutdownSignal`'i yazar; DLL yalnızca `dllAttached` / `measuredFps` / `dllStatus` / `heartbeat`'i yazar. Tek alan / tek yazar olduğu için kilit yoktur.
+
+**Enjeksiyon yaşam döngüsü (önemli):** Enjeksiyon kalibrasyona değil, **overlay oturumuna** bağlıdır. İlk kalibrasyonda DLL yüklenir; sonraki kalibrasyonlar aynı yüklü DLL'i **yeniden kullanır** (`LimiterManager::Begin` reuse eder) — çünkü yüklü bir DLL'i ikinci kez `LoadLibrary` etmek `DllMain`'i tekrar çalıştırmaz, hook yeniden kurulmazdı. `Restore()` limit oturumunu bitirir ama DLL'i yüklü bırakır; tam sökme (`Shutdown()`, `shutdownSignal` → DLL kendini boşaltır) yalnızca `App::StopOverlay`'de olur. DLL içinde bir izleme thread'i `shutdownSignal`'i bekler ve hook kurulamamış olsa bile hedeften temizce ayrılır (uninject).
+
+**Kalıcılık / otomatik uygulama:** Kalibrasyon bitince bulunan FPS, exe adına göre ayrı bir dosyaya (`vlss5_calibrated.ini`, ana INI'nin onarım mantığından etkilenmesin diye ayrı) kaydedilir. Overlay bir sonraki sefer o oyunu yakalayınca ve enjeksiyon açıkken, kullanıcı F2'ye basmadan DLL yüklenip kayıtlı limit otomatik uygulanır (`App::UpdateAutoApplyLimit`, non-blocking). RTSS arka ucunda değer zaten RTSS profilinde kalır.
+
+> Enjeksiyon dizisi (`LoadRemoteModule`) `OpenProcess → VirtualAllocEx → WriteProcessMemory → CreateRemoteThread(LoadLibraryW)` standart kalıbıdır; başarı `GetExitCodeThread` ile DEĞİL, DLL'in yazdığı `dllAttached` bayrağı ile doğrulanır (x64'te çıkış kodu HMODULE'un yalnızca alt 32 bitini tutar).
+
+**32-bit (WOW64) oyunlar:** 64-bit DLL 32-bit sürece yüklenemez. Hedef `IsWow64Process` ile 32-bit çıkarsa, `LimiterManager` doğrudan enjeksiyon yerine 32-bit yardımcıyı (`vlss5_inject32.exe <pid> <dll>`) çalıştırır; o da `vlss5_limiter32.dll`'i KENDİ (32-bit) mimarisinde enjekte eder (64→32 çapraz `LoadLibraryW` adres problemi böyle aşılır). `SharedState` işaretçi içermediği için bellek düzeni x86/x64'te aynıdır — 64-bit uygulama ile 32-bit DLL tek named mapping üzerinden konuşur. Her iki 32-bit artefakt (`limiter/vlss5_limiter32.vcxproj`, `limiter/vlss5_inject32.vcxproj`) `VLSS5.vcxproj`'un `BuildWin32Limiter` hedefiyle ana derleme sonrası Win32 olarak üretilir ve exe yanına kopyalanır.
+
 ### `RTSSManager` sözleşmesi
 
 | Metot | Not |
@@ -388,10 +419,10 @@ INI bölümü `[VLSS5]`, kısayollar `[Hotkeys]`.
 
 | Alan | Varsayılan | Aralık / anlam |
 |---|---|---|
-| `preset` | 0 | 0=Varsayılan, 1-3 |
+| `preset` | 2 | 1=**A** eski model (`CC_SILVER_AARDWOLD`), 2=**B** hızlı FP8 model (`CC_SMALL_FP8`, `nvngx_dlssnr.dll` 310.9.16+). Başka değer yok: eski INI/ön ayarlardaki 0 ve 3 `NormalizeModelPreset` ile B olur. 310.8'de yalnızca 1 vardı; orada 2 sessizce A'ya düşer |
 | `style` | 0 | 0=Standart, 1=Doğal, 2=Film |
 | `intensity` | 1.0 | 0.0 – 2.0 |
-| `localStructure` | 1.0 | 0.0 – 2.0 · yüzey detayı |
+| `localStructure` | 1.0 | 0.0 – 2.0 · yüzey detayı. **Preset B'de modele en fazla 1.0 gider** (`DLSSNRManager::EffectiveLocalStructure`): B, 1'in üstünde sabit sahnede bile titriyor. INI değeri korunur |
 | `localTone` | 1.0 | 0.0 – 2.0 · mikro kontrast |
 | `skinStructure` | -1.0 | -1.0 = otomatik takip |
 | `useAutoMask` | true | otomatik ten maskesi |

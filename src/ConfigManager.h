@@ -3,7 +3,10 @@
 
 struct Dlss5Config
 {
-    int   preset         = 0;       // 0=Default, 1=Preset 1, 2=Preset 2, 3=Preset 3
+    int   preset         = 2;       // 1=A (eski model), 2=B (hizli FP8 model, 310.9.16+). Baska deger yok:
+                                    // nvngx_dlssnr.dll agirlik tablosu: 1=CC_SILVER_AARDWOLD, 2=CC_SMALL_FP8.
+                                    // 310.8'de yalnizca 1 vardi; olmayan preset DLL'in varsayilanina duser.
+                                    // Eski INI/on ayarlardaki 0 ("Default") ve 3 NormalizeModelPreset ile B olur.
     int   style          = 0;       // 0=Standard (Keskin), 1=Natural (Doğal), 2=Cinematic (Film)
     float intensity      = 1.0f;    // 0.0 - 1.0 (shader saturate() uyguluyor, ustu anlamsiz)
     float localStructure = 1.0f;    // 0.0 - 2.0 (Yüzey detay ve geometri keskinliği)
@@ -73,6 +76,19 @@ struct Dlss5Config
     // modunda hedef dikdortgene GPU-tarafi crop uygulanir). DuplicateOutput basarisiz
     // olursa CaptureManager otomatik WGC'ye duser.
     int   captureBackend     = 0;
+
+    // FPS limiter arka uci (bkz. LimiterManager). Kalibrasyonun oyunun kare
+    // uretim hizini NASIL sinirlayacagini secer:
+    //   false = RTSS (varsayilan) -- RTSS profiline yazar, oyuna enjeksiyon YOK.
+    //   true  = Dahili enjeksiyon  -- vlss5_limiter.dll hedef oyuna yuklenir ve
+    //           Present sarmalanarak FPS sinirlanir (RTSS gerekmez).
+    //
+    // VARSAYILAN KAPALI ve arayuzden acilirken kullanici bir ban-riski uyarisini
+    // ACIKCA onaylar (bkz. Main.cpp setInjectionLimiter). Enjeksiyon cekirdek-
+    // seviye anti-cheat'lerde risklidir; online oyunlarda kullanici kendi
+    // sorumlulugundadir. Acik olsa bile enjeksiyon kurulamazsa (32-bit hedef,
+    // erisim reddi) kalibrasyon sessizce RTSS'e duser.
+    bool  injectionLimiter   = false;
 
 
 
@@ -151,6 +167,11 @@ struct Dlss5Config
     static std::wstring FormatKey(UINT vk, UINT mod = 0);
 };
 
+// Model preset'ini yalnizca A (1) / B (2) olarak tutar. Eski surumlerin yazdigi
+// 0 ("Default") ve 3, ayrica bozuk degerler B'ye cevrilir. INI, oyun bazli on
+// ayar ve arayuzden gelen her deger buradan gecer.
+inline int NormalizeModelPreset(int preset) { return (preset == 1) ? 1 : 2; }
+
 class ConfigManager
 {
 public:
@@ -162,9 +183,20 @@ public:
     Dlss5Config& Config() { return m_config; }
     const Dlss5Config& Config() const { return m_config; }
 
+    // ---- Oyun bazli kalibre edilmis FPS limiti ----
+    // Kalibrasyon bitince (CalibFinish) bulunan deger exe adina gore AYRI bir
+    // dosyaya (vlss5_calibrated.ini) kaydedilir; overlay bir sonraki sefer o
+    // oyunu yakalayinca (enjeksiyon arka ucunda) otomatik uygulanir -- kullanici
+    // her acilista F2'ye basmak zorunda kalmaz. Ayri dosya: ana INI'nin onarim
+    // (RepairIni) mantigi bilmedigi bolumleri sildigi icin burada guvende.
+    // 0 = kayit yok.
+    int  GetCalibratedFps(const std::wstring& exeName) const;
+    void SetCalibratedFps(const std::wstring& exeName, int fps);
+
 private:
     ConfigManager() { Load(); }
     std::wstring GetIniPath() const;
+    std::wstring GetCalibratedIniPath() const;
 
     // INI dosyasi profil API'sinin dogru okuyamayacagi bir hale gelmis mi?
     // (UTF-8 BOM veya mukerrer [VLSS5] bolumu -- ayrinti icin .cpp'deki nota bak)

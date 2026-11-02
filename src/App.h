@@ -12,7 +12,7 @@
 // -----------------------------------------------------------------------
 // -----------------------------------------------------------------------
 enum class AppState { Menu, Capturing };
-enum class CalibState { Idle, InitUncap, CoarseUp, AnchorWait, FineUp, Done };
+enum class CalibState { Idle, InjectWait, InitUncap, CoarseUp, FineBisect, Done };
 
 // FPS kalibrasyon sinirlari.
 // kCalibMinFps: aramanin TABANI. RTSS'te 0 = SINIRSIZ oldugundan hedefin 0'a
@@ -24,10 +24,11 @@ static constexpr int kCalibStepMs     = 1200; // her adimin olcum penceresi
 // Kaba tarama adimi. 10'dan baslayip 10'ar 10'ar cikiyoruz: her sonda GERCEKTEN
 // ulasilabilir bir hizi test eder ve kullanici ne olup bittigini ekranda takip edebilir.
 static constexpr int kCalibCoarseStep = 10;
-// FineUp'ta bir hedefi "dogrulanmis" saymadan once ust uste kac tik senkron
-// kalmasi gerektigi. 1 yetersizdi: tek sansli bir 1.2s'lik pencere gecici
-// senkron gorunup hemen ardindan kalici desenkrona dusebiliyordu (bildirilen
-// "94'e kilitlendi ama out kalici 87'de kaldi" hatasi).
+// Bir hedefi "dogrulanmis" saymadan once ust uste kac tik AYNI sonucu (senkron
+// VEYA desenkron) vermesi gerektigi. 1 yetersizdi: tek sansli bir 1.2s'lik
+// pencere gecici bir sonuc gorunup hemen ardindan tersine donebiliyordu
+// (bildirilen "94'e kilitlendi ama out kalici 87'de kaldi" hatasi). Hem kaba
+// tarama hem ikili arama (FineBisect) iki yon icin de bunu uygular.
 static constexpr int kCalibConfirmTicks = 2;
 // Senkron sayilmasi icin izin verilen azami |giris-cikis| farki. Sabit ve kucuk:
 // yuzdesel tolerans yuksek FPS'te gozle gorulen farklari bile "senkron" sayiyordu.
@@ -36,6 +37,11 @@ static constexpr int kCalibSyncToleranceFps = 2;
 // degdigi noktada kilitler; dogal FPS titremesi bu sinirin hemen otesine
 // tasarsa bile senkron kalsin diye biraz altina iniyoruz.
 static constexpr int kCalibSafetyMarginFps = 2;
+// Enjeksiyon arka ucunda DLL hook'unun kurulmasi (dllAttached=1) icin beklenen
+// azami sure. Bu sure non-blocking yoklanir (render thread donmaz); asilirsa
+// kalibrasyon RTSS'e duser. DLL icinde WARP cihazi + vtable kurulumu birkac yuz
+// ms surebilir, 3 sn rahat yeter.
+static constexpr int kCalibInjectWaitMs = 3000;
 
 class App
 {
@@ -213,12 +219,29 @@ private:
                                                // Ince arama bunun altina inmez: zaten calistigini
                                                // biliyoruz, daha asagisi bilgi tasimaz.
     int           m_calibSteps            = 0; // adim sayaci (kacis emniyeti)
-    int           m_calibAnchorCandidate  = 0; // AnchorWait: ilk bozulma anindaki cikis FPS'i
-    int           m_calibConfirmCount     = 0; // FineUp: ust uste senkron tik sayaci
+    int           m_calibHiFine           = 0; // ikili arama: senkronun GERCEKTEN kirildigi
+                                               // dogrulanmis ust sinir (bad bound). lo=m_calibLoFps.
+    int           m_calibConfirmCount     = 0; // ust uste SENKRON tik sayaci (dogrulama)
+    int           m_calibDesyncCount      = 0; // ust uste DESENKRON tik sayaci (dogrulama)
     int           m_calibSettleTicks      = 0; // limit degisiminden sonra atlanacak tik
     int           m_calibNotApplied       = 0; // "RTSS limiti uygulamiyor" ust uste sayaci
+    ULONGLONG     m_calibInjectStart      = 0; // InjectWait: hook bekleme baslangici (tick)
+    DWORD         m_calibInjectPid        = 0; // InjectWait: RTSS'e dusulurse Begin icin hedef PID
     std::wstring  m_calibMessage          = L"";
     ULONGLONG     m_calibMessageTimer     = 0;
+
+    // ---- Kaydedilen limitin otomatik uygulanmasi (enjeksiyon) ----
+    // Overlay baslarken, enjeksiyon acik ve bu oyun icin kayitli bir FPS varsa,
+    // kullanici F2'ye basmadan DLL'i yukleyip o limiti uygularız. Kalibrasyon
+    // state makinesine DOKUNMAZ (ayri tutuldu); yalnizca m_calibState==Idle iken
+    // calisir, kullanici F2 ile kalibrasyona baslarsa ona birakir.
+    enum class AutoApply { Idle, Pending, WaitHook, Done };
+    AutoApply     m_autoApply             = AutoApply::Idle;
+    int           m_autoApplyFps          = 0;
+    std::wstring  m_autoApplyExe;
+    ULONGLONG     m_autoApplyStart        = 0;
+
+    void UpdateAutoApplyLimit();
 
     void StripTargetBorders();
     void RestoreTargetBorders();

@@ -33,6 +33,7 @@
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "d3dcompiler.lib")
 #pragma comment(lib, "avrt.lib")
+#pragma comment(lib, "version.lib")
 
 using Microsoft::WRL::ComPtr;
 

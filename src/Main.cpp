@@ -206,6 +206,7 @@ static json BuildStateJson()
     data["dlss"]              = g_dlssEnabled;
     data["fullscreenStretch"] = g_fullscreenStretch;
     data["fpsDisplayMode"]    = ConfigManager::Get().Config().fpsDisplayMode;
+    data["injectionLimiter"]  = ConfigManager::Get().Config().injectionLimiter;
 
     bool running = IsOverlayRunning();
     data["isCapturing"]        = running;
@@ -901,6 +902,38 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
             else
                 SetStatus(L"Tam Ekran Yap kapalı: Overlay pencerenin kendi boyutunda kalacak.");
         }
+        else if (cmd == "setInjectionLimiter")
+        {
+            const bool want = msg.value("value", false);
+            auto& cfg = ConfigManager::Get().Config();
+
+            // Yalnizca KAPALI -> ACIK gecisinde onay iste. Kapatma ve zaten acik
+            // durum onaysiz gecer.
+            if (want && !cfg.injectionLimiter)
+            {
+                const bool ok = ConfirmDialog::AskYesNo(
+                    hwnd,
+                    L"VLSS5 - Dahili FPS Limiter",
+                    L"Dahili FPS limiteri etkinleştirilsin mi?",
+                    L"Bu seçenek, FPS limitini uygulamak için VLSS5'in küçük bir modülünü "
+                    L"(vlss5_limiter.dll) oyunun içine yükler. RTSS / Special K / MSI Afterburner "
+                    L"ile aynı tekniktir.\n\n"
+                    L"⚠️ DİKKAT: Bazı çevrimiçi oyunların anti-cheat sistemleri her türlü modül "
+                    L"yüklemesini ihlal sayabilir ve HESABINIZI BANLAYABİLİR. (Örnek: 2023'te AMD "
+                    L"Anti-Lag+ aynı nedenle CS2'de banlara yol açtı.)\n\n"
+                    L"Yalnızca çevrimdışı / tek kişilik oyunlarda kullanmanız önerilir. Tüm "
+                    L"sorumluluk size aittir. RTSS kuruluysa onu kullanmak daha güvenlidir.",
+                    L"Anladım, Etkinleştir", L"Vazgeç",
+                    /*defaultIsYes*/false, /*warningIcon*/true);
+                cfg.injectionLimiter = ok;
+            }
+            else
+            {
+                cfg.injectionLimiter = want;
+            }
+            ConfigManager::Get().Save();
+            PushStateToJs(); // gercek durumu JS'e geri bas (onay reddedilebilir)
+        }
         else if (cmd == "setGpu")
         {
             int sel = msg.value("index", -1);
@@ -1147,7 +1180,7 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
                 auto& cfg = ConfigManager::Get().Config();
 
                 cfg.style           = d.value("style", cfg.style);
-                cfg.preset          = d.value("preset", cfg.preset);
+                cfg.preset          = NormalizeModelPreset(d.value("preset", cfg.preset));
                 cfg.intensity       = d.value("intensity", cfg.intensity);
                 cfg.boostFactor     = std::clamp(d.value("boostFactor", cfg.boostFactor), 1.0f, 2.5f);
                 cfg.localStructure  = d.value("localStructure", cfg.localStructure);

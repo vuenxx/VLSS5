@@ -120,6 +120,7 @@
     <ClCompile Include="src\MotionVectorManager.cpp" />
     <ClCompile Include="src\DLSSManager.cpp" />
     <ClCompile Include="src\RTSSManager.cpp" />
+    <ClCompile Include="src\LimiterManager.cpp" />
     <ClCompile Include="src\D3D12Interop.cpp" />
     <ClCompile Include="src\DLSSNRManager.cpp" />
     <ClCompile Include="src\ConfigManager.cpp" />
@@ -149,6 +150,8 @@
     <ClInclude Include="src\MotionVectorManager.h" />
     <ClInclude Include="src\DLSSManager.h" />
     <ClInclude Include="src\RTSSManager.h" />
+    <ClInclude Include="src\LimiterManager.h" />
+    <ClInclude Include="limiter\vlss5_limiter_shared.h" />
     <ClInclude Include="src\D3D12Interop.h" />
     <ClInclude Include="src\DLSSNRManager.h" />
     <ClInclude Include="src\ConfigManager.h" />
@@ -176,6 +179,35 @@
   <ItemGroup>
     <Image Include="app.ico" />
   </ItemGroup>
+  <!--
+    Dahili FPS limiter DLL'i. Yalnizca DERLEME SIRASI bagimliligi: exe bu DLL'e
+    LINK olmaz (calisma zamaninda enjeksiyonla yuklenir), bu yuzden
+    ReferenceOutputAssembly/LinkLibraryDependencies kapali. VLSS5.vcxproj
+    derlenince vlss5_limiter.dll de ayni cikti dizinine uretilir (release
+    workflow dogrudan bu vcxproj'u derledigi icin pakete otomatik dahil olur).
+  -->
+  <ItemGroup>
+    <ProjectReference Include="limiter\vlss5_limiter.vcxproj">
+      <Project>{3a7d9e14-2b86-4c05-9f3a-7e1c6d208b52}</Project>
+      <ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+      <LinkLibraryDependencies>false</LinkLibraryDependencies>
+      <UseLibraryDependencyInputs>false</UseLibraryDependencyInputs>
+    </ProjectReference>
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
+  <!--
+    32-bit limiter artefaktlarini (Win32) ana x64 derlemeden SONRA uret. x64 bir
+    projeden ProjectReference ile Win32 cikti uretilemedigi icin MSBuild gorevi
+    ile acikca Platform=Win32 derleriz. Ikisi de exe ile ayni dizine (x64\<Config>)
+    duser: vlss5_limiter32.dll (enjekte edilen) + vlss5_inject32.exe (yardimci).
+  -->
+  <Target Name="BuildWin32Limiter" AfterTargets="Build">
+    <MSBuild Projects="limiter\vlss5_limiter32.vcxproj"
+             Properties="Configuration=$(Configuration);Platform=Win32"
+             Targets="Build" />
+    <MSBuild Projects="limiter\vlss5_inject32.vcxproj"
+             Properties="Configuration=$(Configuration);Platform=Win32"
+             Targets="Build" />
+  </Target>
   <ImportGroup Label="ExtensionTargets" />
 </Project>

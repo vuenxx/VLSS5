@@ -387,6 +387,37 @@
   .accordionBody { padding: 14px 16px; }
   .accordionBody.collapsed { display: none; }
 
+  /* ============================================================
+     ENJEKSIYON MODU TEMASI -- inject acikken tum yesil KIRMIZI olur.
+     body.inject-mode eklenince --neon/--neon-dark kirmiziya dondurulur
+     (header, nav, BASLAT, baslik/val renkleri, scrollbar otomatik doner);
+     paylasilan style.css'teki SABIT yesiller ayrica ezilir.
+     ============================================================ */
+  body.inject-mode { --neon: #ff2f2f; --neon-dark: #c01818; }
+  body.inject-mode .mainHeader .titles .title { color: #ff5a5a; }
+  body.inject-mode .startBtn { color: #230606; }                 /* kirmizi zemin uzerine koyu yazi */
+  body.inject-mode .switch.on { background: #ff2f2f; border-color: #ff5a5a; }
+  body.inject-mode button.primary { background: #ff2f2f; color: #230606; }
+  body.inject-mode button.primary:hover { background: #c01818; }
+  body.inject-mode input[type=range]::-webkit-slider-thumb { background: #ff2f2f; border-color: #ff5a5a; }
+
+  /* Ana sayfa uyari seridi -- yalnizca inject modunda gorunur */
+  .injectWarn {
+    display: none;
+    flex-shrink: 0;
+    text-align: center;
+    padding: 9px 16px;
+    font-size: 13px;
+    font-weight: 800;
+    letter-spacing: .5px;
+    color: #fff;
+    background: #c01818;
+    border-bottom: 2px solid #ff5a5a;
+    animation: injectPulse 1.6s ease-in-out infinite;
+  }
+  body.inject-mode .injectWarn { display: block; }
+  @keyframes injectPulse { 0%,100% { background: #c01818; } 50% { background: #7a0f0f; } }
+
 </style>
 </head>
 <body>
@@ -404,6 +435,8 @@
     </div>
     <div class="hotkeyPill" id="hotkeyPill">[Alt] Odak | [F] FPS | [V] VLSS5 | [Alt+S] Başlat</div>
   </div>
+
+  <div class="injectWarn" id="injectWarn">⚠ INJECT MODU AÇIK — FPS limiti oyuna enjekte edilerek uygulanıyor. Çevrimiçi oyunlarda ban riski size aittir.</div>
 
   <div class="mainBody">
     <!-- ================= ANA SAYFA GORUNUMU ================= -->
@@ -514,6 +547,24 @@
           </div>
 
           <div class="accordion">
+            <div class="accordionHeader" data-acc="limiter">
+              <span>FPS Limiter (Gelişmiş)</span><span class="chev">&#9662;</span>
+            </div>
+            <div class="accordionBody collapsed" id="accBody-limiter">
+              <div class="toggle-row" id="rowInjectionLimiter">
+                <div class="label">Dahili FPS Limiter (Enjeksiyon)</div>
+                <div class="switch" id="swInjectionLimiter"><div class="knob"></div></div>
+              </div>
+              <p style="font-size:12px; line-height:1.5; opacity:.75; margin:10px 2px 0;">
+                <strong>Açık:</strong> FPS limiti için VLSS5 kendi modülünü oyuna yükler; RTSS gerekmez.<br>
+                <strong>Kapalı (varsayılan):</strong> limit RTSS ile uygulanır.<br><br>
+                ⚠️ Enjeksiyon bazı çevrimiçi oyunlarda anti-cheat <strong>banına</strong> yol açabilir.
+                Yalnızca çevrimdışı / tek kişilik oyunlarda kullanın. Sorumluluk size aittir.
+              </p>
+            </div>
+          </div>
+
+          <div class="accordion">
             <div class="accordionHeader" data-acc="presets">
               <span>Ön Ayarlar</span><span class="chev">&#9662;</span>
             </div>
@@ -584,10 +635,8 @@
               <div class="row">
                 <label class="field-title">Model Varyantı (Preset):</label>
                 <select id="stgPreset">
-                  <option value="0">Default (Önerilen)</option>
-                  <option value="1">Preset 1</option>
-                  <option value="2">Preset 2</option>
-                  <option value="3">Preset 3</option>
+                  <option value="1">A — Eski model</option>
+                  <option value="2">B — Hızlı model (310.9.16+)</option>
                 </select>
               </div>
 

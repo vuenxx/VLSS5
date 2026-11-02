@@ -156,7 +156,7 @@ private:
 
     bool      m_enabled               = true;
     float     m_intensity             = 1.0f;
-    int       m_preset                = 0;
+    int       m_preset                = 2;
     int       m_style                 = 0;
     float     m_localStructure        = 0.0f;
     float     m_localTone             = 1.0f;
@@ -242,4 +242,18 @@ private:
 
     std::wstring m_snippetPath;
     std::wstring m_dataPath;
+
+    // Preset B (CC_SMALL_FP8, nvngx_dlssnr.dll 310.9.16+) LocalStructureStrength
+    // 1'in ustunde sabit sahnede bile bozuluyor/titriyor (2 ile dogrulandi, 1 temiz).
+    // Kullanicinin INI degerine dokunmadan YALNIZCA modele giden deger kirpilir;
+    // A'ya donulunce kayitli deger aynen geri gelir. Snippet 310.9 oncesiyse
+    // preset 2 DLL'de yoktur ve A'ya duser -- o durumda kirpma UYGULANMAZ.
+    static constexpr float kPresetBMaxLocalStructure = 1.0f;
+    bool  m_snippetHasPresetB = false;
+    bool  IsPresetBActive() const { return m_preset == 2 && m_snippetHasPresetB; }
+    float EffectiveLocalStructure() const
+    {
+        return (IsPresetBActive() && m_localStructure > kPresetBMaxLocalStructure)
+            ? kPresetBMaxLocalStructure : m_localStructure;
+    }
 };

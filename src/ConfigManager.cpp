@@ -75,6 +75,48 @@ std::wstring ConfigManager::GetIniPath() const
     return path;
 }
 
+std::wstring ConfigManager::GetCalibratedIniPath() const
+{
+    wchar_t path[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, path, MAX_PATH);
+    PathRemoveFileSpecW(path);
+    PathCombineW(path, path, L"vlss5_calibrated.ini");
+    return path;
+}
+
+int ConfigManager::GetCalibratedFps(const std::wstring& exeName) const
+{
+    if (exeName.empty()) return 0;
+    const std::wstring ini = GetCalibratedIniPath();
+    int v = static_cast<int>(GetPrivateProfileIntW(L"Fps", exeName.c_str(), 0, ini.c_str()));
+    return (v > 0) ? v : 0;
+}
+
+void ConfigManager::SetCalibratedFps(const std::wstring& exeName, int fps)
+{
+    if (exeName.empty() || fps <= 0) return;
+    const std::wstring ini = GetCalibratedIniPath();
+
+    // Dosya yoksa UTF-16LE BOM ile olustur (bkz. PresetsManager::EnsureBom):
+    // BOM'suz dosya ANSI kabul edilir ve Turkce/ozel karakterli exe adlari bozulur.
+    if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES)
+    {
+        HANDLE h = CreateFileW(ini.c_str(), GENERIC_WRITE, 0, nullptr,
+                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            const unsigned char bom[2] = { 0xFF, 0xFE };
+            DWORD w = 0;
+            WriteFile(h, bom, sizeof(bom), &w, nullptr);
+            CloseHandle(h);
+        }
+    }
+
+    wchar_t buf[32];
+    swprintf_s(buf, L"%d", fps);
+    WritePrivateProfileStringW(L"Fps", exeName.c_str(), buf, ini.c_str());
+}
+
 void ConfigManager::Load()
 {
     std::wstring ini = GetIniPath();
@@ -94,8 +136,7 @@ void ConfigManager::Load()
         if (testBuf[0] != L'\0') sec = L"DLSS5";
     }
 
-    m_config.preset = GetPrivateProfileIntW(sec, L"Preset", 0, ini.c_str());
-    if (m_config.preset < 0 || m_config.preset > 3) m_config.preset = 0;
+    m_config.preset = NormalizeModelPreset(GetPrivateProfileIntW(sec, L"Preset", 2, ini.c_str()));
 
     m_config.style = GetPrivateProfileIntW(sec, L"Style", 0, ini.c_str());
     if (m_config.style < 0 || m_config.style > 2) m_config.style = 0;
@@ -164,6 +205,8 @@ void ConfigManager::Load()
     m_config.captureBackend = GetPrivateProfileIntW(sec, L"CaptureBackend", 0, ini.c_str());
     if (m_config.captureBackend < 0) m_config.captureBackend = 0;
     if (m_config.captureBackend > 1) m_config.captureBackend = 1;
+
+    m_config.injectionLimiter = (GetPrivateProfileIntW(sec, L"InjectionLimiter", 0, ini.c_str()) != 0);
 
     m_config.splitScreen = (GetPrivateProfileIntW(sec, L"SplitScreen", 0, ini.c_str()) != 0);
     m_config.fullscreenStretch = (GetPrivateProfileIntW(sec, L"FullscreenStretch", 0, ini.c_str()) != 0);
@@ -324,6 +367,7 @@ void ConfigManager::Save()
     writeFloat(L"VLSS5", L"BoostFactor", m_config.boostFactor);
     writeInt(L"VLSS5", L"OverlayMode", m_config.overlayMode);
     writeInt(L"VLSS5", L"CaptureBackend", m_config.captureBackend);
+    writeInt(L"VLSS5", L"InjectionLimiter", m_config.injectionLimiter ? 1 : 0);
     writeInt(L"VLSS5", L"SplitScreen", m_config.splitScreen ? 1 : 0);
     writeInt(L"VLSS5", L"FullscreenStretch", m_config.fullscreenStretch ? 1 : 0);
     writeInt(L"VLSS5", L"MouseMapping", m_config.mouseMapping ? 1 : 0);

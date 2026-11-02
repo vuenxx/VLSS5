@@ -99,6 +99,9 @@ function applyState(state) {
   setToggle("swFps", state.fps);
   setToggle("swDlss", state.dlss);
   setToggle("swFullscreen", state.fullscreenStretch);
+  setToggle("swInjectionLimiter", state.injectionLimiter);
+  // Inject modu: tema kirmiziya doner + ana sayfada uyari seridi gorunur.
+  document.body.classList.toggle("inject-mode", !!state.injectionLimiter);
 
   $("fpsModeSelect").value = String(state.fpsDisplayMode || 0);
   $("rowFpsMode").classList.toggle("disabled", !state.fps);
@@ -181,6 +184,14 @@ $("swFullscreen").addEventListener("click", () => {
   const next = !$("swFullscreen").classList.contains("on");
   setToggle("swFullscreen", next);
   vlss5.send("setFullscreen", { value: next });
+});
+
+// Dahili FPS limiter (enjeksiyon). Toggle'i HEMEN degistirmiyoruz: native
+// taraf ban-riski onayini gosterir, gercek durumu "state" mesajiyla geri
+// gonderir (reddedilirse kapali kalir).
+$("swInjectionLimiter").addEventListener("click", () => {
+  const next = !$("swInjectionLimiter").classList.contains("on");
+  vlss5.send("setInjectionLimiter", { value: next });
 });
 
 $("gpuSelect").addEventListener("change", () => {

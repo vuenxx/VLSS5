@@ -86,6 +86,24 @@ bool DLSSNRManager::Init(ID3D12Device* device, ID3D12CommandQueue* queue, int wi
     std::wstring appDir = exePath;
     m_snippetPath = appDir + L"nvngx_dlssnr.dll";
 
+    // Preset B ilk kez 310.9'da geldi (agirlik tablosunda preset 2 = CC_SMALL_FP8).
+    // Daha eski snippet'te 0 = A oldugundan B'ye ozel kirpmayi surume bagliyoruz.
+    {
+        DWORD verHandle = 0;
+        DWORD verSize = GetFileVersionInfoSizeW(m_snippetPath.c_str(), &verHandle);
+        std::vector<BYTE> verBuf(verSize);
+        VS_FIXEDFILEINFO* ffi = nullptr;
+        UINT ffiLen = 0;
+        if (verSize && GetFileVersionInfoW(m_snippetPath.c_str(), 0, verSize, verBuf.data()) &&
+            VerQueryValueW(verBuf.data(), L"\\", (void**)&ffi, &ffiLen) && ffi)
+        {
+            const DWORD major = HIWORD(ffi->dwFileVersionMS), minor = LOWORD(ffi->dwFileVersionMS);
+            m_snippetHasPresetB = (major > 310) || (major == 310 && minor >= 9);
+            DLSS_Log("[DLSS-NR] Snippet surumu %lu.%lu.%lu.%lu (Preset B %s)", major, minor,
+                HIWORD(ffi->dwFileVersionLS), LOWORD(ffi->dwFileVersionLS), m_snippetHasPresetB ? "var" : "yok");
+        }
+    }
+
     // 1. Load NGX Core
     if (!LoadNGXCore())
     {
@@ -425,6 +443,9 @@ bool DLSSNRManager::CreateFeature()
 
     DLSS_Log("[DLSS-NR] Calling dlssnr_call_create (Snippet=%ls, Work=%dx%d, Frame=%dx%d, Scale=%.0f%%, Passes=%d)...",
         m_snippetPath.c_str(), m_workWidth, m_workHeight, m_width, m_height, m_resolutionScale * 100.0f, passes);
+    if (EffectiveLocalStructure() != m_localStructure)
+        DLSS_Log("[DLSS-NR] Preset B: Yuzey detayi %.2f -> %.2f'e kirpildi (B modeli 1 ustunde bozuluyor).",
+            m_localStructure, EffectiveLocalStructure());
 
     // Gecis basina AYRI handle. Tek handle'i ayni kare icinde tekrar cagirmak
     // ozelligin temporal gecmisini bozar; ayri handle'larda her gecis kendi
@@ -443,7 +464,7 @@ bool DLSSNRManager::CreateFeature()
             m_preset,
             m_intensity,
             m_style,
-            m_localStructure,
+            EffectiveLocalStructure(),
             m_localTone,
             m_skinStructure,
             m_useAutoMask,
@@ -879,7 +900,7 @@ bool DLSSNRManager::EvaluateSinglePass(
         reset,
         intensity,
         m_style,
-        m_localStructure,
+        EffectiveLocalStructure(),
         m_localTone,
         m_skinStructure,
         m_useAutoMask,

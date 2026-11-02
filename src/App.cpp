@@ -2,6 +2,7 @@
 #include "SettingsWindow.h"
 #include "ConfigManager.h"
 #include "RTSSManager.h"
+#include "LimiterManager.h"
 #include "GpuSelector.h"
 #include "PresetsManager.h"
 #include "WindowEnumerator.h"
@@ -614,6 +615,28 @@ bool App::StartOverlayCommon(bool vsync, bool dlss, bool fps)
     m_running          = true;
     m_overlayHidden    = false;
     m_sessionStartTime = GetTickCount64();
+
+    // Enjeksiyon acik ve bu oyun (pencere hedefi) icin kayitli bir limit varsa,
+    // kullanici F2'ye basmadan otomatik uygulamak uzere isaretle (asil is
+    // Update -> UpdateAutoApplyLimit'te, non-blocking). Masaustu/monitor modunda
+    // tek bir surec/pid olmadigi icin enjeksiyon gecerli degil.
+    m_autoApply    = AutoApply::Idle;
+    m_autoApplyFps = 0;
+    m_autoApplyExe.clear();
+    if (ConfigManager::Get().Config().injectionLimiter && m_targetHwnd)
+    {
+        std::wstring exe = ResolveTargetExeName();
+        int saved = ConfigManager::Get().GetCalibratedFps(exe);
+        if (!exe.empty() && saved > 0)
+        {
+            m_autoApplyExe = exe;
+            m_autoApplyFps = saved;
+            m_autoApply    = AutoApply::Pending;
+            DLSS_Log("[Limiter] %ls icin kayitli limit bulundu: %d FPS -> otomatik uygulanacak",
+                     exe.c_str(), saved);
+        }
+    }
+
     return true;
 }
 
@@ -1240,9 +1263,9 @@ std::wstring App::ResolveTargetExeName() const
 
 bool App::CalibApplyLimit(int fps)
 {
-    if (!RTSSManager::Get().SetFramerateLimit(m_calibExeName, fps))
+    if (!LimiterManager::Get().ApplyLimit(fps))
     {
-        CalibAbort(L"HATA: RTSS Profili yazilamadi! Klasoru kontrol edin.");
+        CalibAbort(L"HATA: FPS limiti uygulanamadi! (" + LimiterManager::Get().LastError() + L")");
         return false;
     }
 
@@ -1253,7 +1276,8 @@ bool App::CalibApplyLimit(int fps)
     if (m_captureManager) m_captureManager->ResetInputFpsWindow();
     m_calibSettleTicks = 1;
     m_calibNotApplied  = 0;
-    m_calibConfirmCount = 0; // yeni hedef icin dogrulama sayaci sifirlanir
+    m_calibConfirmCount = 0; // yeni hedef icin senkron dogrulama sayaci sifirlanir
+    m_calibDesyncCount  = 0; // ve desenkron dogrulama sayaci
 
     DLSS_Log("[Calib] Limit uygulandi: %d FPS (%ls)", fps, m_calibExeName.c_str());
     return true;
@@ -1261,11 +1285,13 @@ bool App::CalibApplyLimit(int fps)
 
 void App::CalibRestoreOriginalLimit()
 {
-    // Emniyet 6
+    // Emniyet 6. Arka uca gore: RTSS kullanicinin onceki limitini geri yazar;
+    // enjeksiyon DLL'i sinirsiza alip hedeften cekilir. Her ikisi de
+    // LimiterManager::Restore() icinde.
     if (m_calibExeName.empty()) return;
-    RTSSManager::Get().SetFramerateLimit(m_calibExeName, m_calibOriginalLimit);
-    DLSS_Log("[Calib] Orijinal limit geri yuklendi: %d FPS (%ls)",
-             m_calibOriginalLimit, m_calibExeName.c_str());
+    LimiterManager::Get().Restore();
+    DLSS_Log("[Calib] Limiter oturumu kapatildi / orijinal durum geri yuklendi (%ls)",
+             m_calibExeName.c_str());
 }
 
 void App::CalibAbort(const std::wstring& msg)
@@ -1290,7 +1316,17 @@ void App::CalibFinish(int fps)
         if (fps < kCalibMinFps) fps = kCalibMinFps;
     }
 
-    RTSSManager::Get().SetFramerateLimit(m_calibExeName, fps);
+    // Kalibre edilen limiti uygula ve BIRAK (oturumu kapatma). RTSS'te deger
+    // profile yazilir ve VLSS5 kapansa da kalir; enjeksiyonda DLL overlay
+    // boyunca bu FPS'te sinirlamaya devam eder ve StopOverlay'de cekilir.
+    LimiterManager::Get().ApplyLimit(fps);
+
+    // Bulunan degeri oyun bazinda kaydet: bir sonraki overlay oturumunda
+    // (enjeksiyon arka ucunda) otomatik uygulanir, kullanici tekrar F2'ye
+    // basmak zorunda kalmaz. fps==0 (limit gereksiz) kaydedilmez.
+    if (fps > 0)
+        ConfigManager::Get().SetCalibratedFps(m_calibExeName, fps);
+
     m_calibTargetFps    = fps;
     m_calibState        = CalibState::Done;
     m_calibMessage      = (fps == 0)
@@ -1300,6 +1336,63 @@ void App::CalibFinish(int fps)
     DLSS_Log("[Calib] TAMAMLANDI: %d FPS", fps);
 }
 
+// ==========================================================================
+// Kaydedilen limitin otomatik uygulanmasi (enjeksiyon arka ucu)
+//
+// Overlay baslarken bu oyun icin kayitli bir FPS varsa ve enjeksiyon aciksa,
+// kullanici F2'ye basmadan DLL'i yukleyip o limiti uygularız. Render thread'ini
+// bloklamadan, calibrasyon InjectWait ile ayni non-blocking yoklamayi kullanir.
+// ==========================================================================
+void App::UpdateAutoApplyLimit()
+{
+    if (m_autoApply == AutoApply::Idle || m_autoApply == AutoApply::Done) return;
+
+    // Kullanici F2 ile kalibrasyona basladiysa otomatik uygulamayi ona birak.
+    if (m_calibState != CalibState::Idle) { m_autoApply = AutoApply::Done; return; }
+
+    LimiterManager& lim = LimiterManager::Get();
+
+    if (m_autoApply == AutoApply::Pending)
+    {
+        lim.SetBackend(LimiterManager::Backend::Injection);
+        DWORD pid = 0;
+        GetWindowThreadProcessId(m_targetHwnd, &pid);
+        if (pid && lim.Begin(pid, m_autoApplyExe))
+        {
+            m_autoApplyStart = GetTickCount64();
+            m_autoApply      = AutoApply::WaitHook;
+            DLSS_Log("[Limiter] Kaydedilen limit otomatik uygulaniyor: %d FPS (%ls)",
+                     m_autoApplyFps, m_autoApplyExe.c_str());
+        }
+        else
+        {
+            DLSS_Log("[Limiter] Otomatik uygulama baslatilamadi (%ls); atlaniyor",
+                     lim.LastError().c_str());
+            m_autoApply = AutoApply::Done;
+        }
+        return;
+    }
+
+    // WaitHook -- hook kurulana kadar non-blocking bekle.
+    if (lim.IsBackendLive())
+    {
+        lim.ApplyLimit(m_autoApplyFps);
+        m_calibMessage      = L"KAYDEDILEN LIMIT UYGULANDI: " + std::to_wstring(m_autoApplyFps) + L" FPS";
+        m_calibMessageTimer = GetTickCount64();
+        DLSS_Log("[Limiter] Kaydedilen limit uygulandi: %d FPS (hooks=0x%X, modules=0x%X)",
+                 m_autoApplyFps, lim.InstalledHooks(), lim.LoadedModules());
+        m_autoApply = AutoApply::Done;
+        return;
+    }
+    if (GetTickCount64() - m_autoApplyStart > (ULONGLONG)kCalibInjectWaitMs)
+    {
+        DLSS_Log("[Limiter] Otomatik uygulama: hook %d ms'de kurulmadi (dllStatus=%d); vazgecildi",
+                 kCalibInjectWaitMs, lim.DllStatus());
+        lim.Shutdown();
+        m_autoApply = AutoApply::Done;
+    }
+}
+
 void App::UpdateCalibration(const Dlss5Config& cfg)
 {
     const bool calibDown    = (GetAsyncKeyState(cfg.vkCalib) & 0x8000) != 0;
@@ -1307,6 +1400,14 @@ void App::UpdateCalibration(const Dlss5Config& cfg)
     m_prevCalibDown = calibDown;
 
     const bool running = (m_calibState != CalibState::Idle && m_calibState != CalibState::Done);
+
+    // Idle'dayken duran bir bildirim mesajini (orn. "kaydedilen limit uygulandi")
+    // zaman asiminda temizle. Done durumunun kendi temizligi asagida.
+    if (m_calibState == CalibState::Idle && !m_calibMessage.empty() &&
+        GetTickCount64() - m_calibMessageTimer > 4000)
+    {
+        m_calibMessage.clear();
+    }
 
     // ---- Baslat / iptal ----
     if (calibPressed)
@@ -1330,23 +1431,108 @@ void App::UpdateCalibration(const Dlss5Config& cfg)
                 return;
             }
 
-            // Emniyet 6: kullanicinin mevcut ayarini sakla.
+            // Emniyet 6: kullanicinin mevcut ayarini sakla (log/tani icin; asil
+            // geri yukleme LimiterManager::Restore icinde yapilir).
             m_calibOriginalLimit = RTSSManager::Get().GetFramerateLimit(m_calibExeName);
+
+            // Arka ucu sec: ayardan acildiysa enjeksiyon, yoksa RTSS. Enjeksiyon
+            // kurulamazsa (32-bit hedef, erisim reddi, DLL yok) RTSS'e dusuyoruz
+            // ki kalibrasyon yine de calissin.
+            DWORD targetPid = 0;
+            GetWindowThreadProcessId(m_targetHwnd, &targetPid);
+
+            LimiterManager& lim = LimiterManager::Get();
+            lim.SetBackend(cfg.injectionLimiter ? LimiterManager::Backend::Injection
+                                                : LimiterManager::Backend::Rtss);
+
+            if (!lim.Begin(targetPid, m_calibExeName))
+            {
+                DLSS_Log("[Calib] Enjeksiyon limiter kurulamadi (%ls); RTSS'e dusuluyor",
+                         lim.LastError().c_str());
+                lim.SetBackend(LimiterManager::Backend::Rtss);
+                if (!lim.Begin(targetPid, m_calibExeName))
+                {
+                    m_calibMessage      = L"HATA: FPS limiter baslatilamadi.";
+                    m_calibMessageTimer = GetTickCount64();
+                    m_calibState        = CalibState::Done;
+                    return;
+                }
+            }
+            DLSS_Log("[Calib] Limiter arka uci: %ls",
+                     lim.GetBackend() == LimiterManager::Backend::Injection ? L"Enjeksiyon" : L"RTSS");
+
             m_calibSteps         = 0;
             m_calibHiBound       = 0;
             m_calibLoFps         = 0;
             m_calibNotApplied    = 0;
+            m_calibInjectPid     = targetPid;
             m_calibTimer         = GetTickCount64();
-            m_calibState         = CalibState::InitUncap;
-            m_calibMessage       = L"FPS LIMITI SIFIRLANIYOR...";
 
             DLSS_Log("[Calib] Baslatildi: %ls (onceki limit=%d)",
                      m_calibExeName.c_str(), m_calibOriginalLimit);
 
-            // Sinirsiza al ve oyunun gercek tavanini olc.
-            CalibApplyLimit(0);
+            // Enjeksiyon arka ucunda DLL hook'u ANINDA hazir olmayabilir (kurulum
+            // DLL icinde ayri thread'de). Render thread'ini bloklamadan, hook
+            // hazir olana kadar InjectWait'te BEKLE; hazir olunca InitUncap'e gec.
+            // RTSS'te (ya da hook zaten hazirsa) dogrudan olcume basla.
+            if (lim.GetBackend() == LimiterManager::Backend::Injection && !lim.IsBackendLive())
+            {
+                m_calibInjectStart = GetTickCount64();
+                m_calibState       = CalibState::InjectWait;
+                m_calibMessage     = L"ENJEKSIYON KURULUYOR...";
+            }
+            else
+            {
+                m_calibState   = CalibState::InitUncap;
+                m_calibMessage = L"FPS LIMITI SIFIRLANIYOR...";
+                CalibApplyLimit(0); // sinirsiza al ve oyunun gercek tavanini olc
+            }
         }
         return;
+    }
+
+    // ---- Enjeksiyon hook'u bekleniyor (non-blocking) ----
+    // Render thread'ini bloklamadan, DLL hook'unu kurana (dllAttached=1) kadar
+    // her Update'te yoklariz. Hazir olunca olcume gecilir; sure asilirsa (hook
+    // kurulamadi) RTSS'e dusulur. NEDEN kurulamadigini DLL'in dllStatus kodu
+    // soyler, log'a dusuyoruz.
+    if (m_calibState == CalibState::InjectWait)
+    {
+        LimiterManager& lim = LimiterManager::Get();
+        if (lim.IsBackendLive())
+        {
+            DLSS_Log("[Calib] Enjeksiyon hook'u hazir (dllStatus=%d, hooks=0x%X, modules=0x%X), olcume geciliyor",
+                     lim.DllStatus(), lim.InstalledHooks(), lim.LoadedModules());
+            m_calibState   = CalibState::InitUncap;
+            m_calibTimer   = GetTickCount64();
+            m_calibMessage = L"FPS LIMITI SIFIRLANIYOR...";
+            CalibApplyLimit(0);
+            return;
+        }
+        if (GetTickCount64() - m_calibInjectStart > (ULONGLONG)kCalibInjectWaitMs)
+        {
+            DLSS_Log("[Calib] Enjeksiyon hook'u %d ms icinde kurulmadi (dllStatus=%d); RTSS'e dusuluyor",
+                     kCalibInjectWaitMs, lim.DllStatus());
+            // Hook kurulamadi: DLL'i TAMAMEN sok (Shutdown -> shutdownSignal ->
+            // DLL kendini bosaltir). Restore() enjeksiyonda DLL'i yuklu birakirdi;
+            // burada basarisiz bir DLL'i hedefte tutmak istemeyiz. Once
+            // SetBackend(Rtss) yaparsak bu temizlik atlanir, o yuzden Shutdown once.
+            lim.Shutdown();
+            lim.SetBackend(LimiterManager::Backend::Rtss);
+            if (!lim.Begin(m_calibInjectPid, m_calibExeName))
+            {
+                m_calibMessage      = L"HATA: FPS limiter baslatilamadi.";
+                m_calibMessageTimer = GetTickCount64();
+                m_calibState        = CalibState::Done;
+                return;
+            }
+            m_calibState   = CalibState::InitUncap;
+            m_calibTimer   = GetTickCount64();
+            m_calibMessage = L"FPS LIMITI SIFIRLANIYOR...";
+            CalibApplyLimit(0);
+            return;
+        }
+        return; // bekle (render thread donmuyor)
     }
 
     // ---- Mesaj zaman asimi ----
@@ -1393,7 +1579,11 @@ void App::UpdateCalibration(const Dlss5Config& cfg)
     // kaliyordu (bildirilen "93 in / 87 out kilitlendi" hatasi). Kalibrasyon artik
     // ekranda gorunenle AYNI kaynaga (RTSS canli FPS, yoksa WGC'ye dusen) bakiyor.
     int inFps = -1;
-    if (m_targetHwnd)
+    // Enjeksiyon arka ucunda DLL, Present frekansindan oyunun GERCEK FPS'ini
+    // olcer -- en dogru kaynak budur, once ona bak.
+    if (LimiterManager::Get().GetBackend() == LimiterManager::Backend::Injection)
+        inFps = LimiterManager::Get().MeasuredFps();
+    if (inFps <= 0 && m_targetHwnd)
     {
         DWORD targetPid = 0;
         GetWindowThreadProcessId(m_targetHwnd, &targetPid);
@@ -1433,6 +1623,16 @@ void App::UpdateCalibration(const Dlss5Config& cfg)
         DLSS_Log("[Calib] Sinirsiz olcum: giris=%d cikis=%d | monitor=%d Hz -> ust sinir=%d",
                  inFps, outFps, refreshHz, m_calibHiBound);
 
+        // Enjeksiyon tanisi: oyunun gercek present'i hook'ladigimiz bir API'den
+        // geciyor mu? presentApi 0 ise HICBIR hook'umuz ateslenmedi (oyun baska
+        // yoldan present ediyor); measuredFps DLL'in olctugu present frekansi.
+        if (LimiterManager::Get().GetBackend() == LimiterManager::Backend::Injection)
+        {
+            DLSS_Log("[Calib] Enjeksiyon tani: presentApi=%d, measuredFps=%d, hooks=0x%X, modules=0x%X",
+                     LimiterManager::Get().PresentApi(), LimiterManager::Get().MeasuredFps(),
+                     LimiterManager::Get().InstalledHooks(), LimiterManager::Get().LoadedModules());
+        }
+
         // Kaba taramaya TABANDAN basla ve 10'ar 10'ar cik.
         //
         // Neden ikili arama degil: bisection ilk sondayi araligin ortasina atiyordu
@@ -1452,8 +1652,11 @@ void App::UpdateCalibration(const Dlss5Config& cfg)
     case CalibState::CoarseUp:
     {
         // Emniyet 2: limit yazildi ama oyun hala cok daha hizli kosuyorsa RTSS
-        // profili gercekten uygulamiyor demektir.
-        if (inFps > m_calibTargetFps * 3 / 2 + 10)
+        // profili gercekten uygulamiyor demektir. Bu yalnizca RTSS arka ucunda
+        // anlamli; enjeksiyonda DLL Present'i dogrudan geciktirdigi icin "limit
+        // uygulanmiyor" durumu olamaz (ve Begin zaten dllAttached'i dogruladi).
+        if (LimiterManager::Get().GetBackend() == LimiterManager::Backend::Rtss &&
+            inFps > m_calibTargetFps * 3 / 2 + 10)
         {
             if (++m_calibNotApplied >= 2)
             {
@@ -1468,10 +1671,9 @@ void App::UpdateCalibration(const Dlss5Config& cfg)
 
         if (CalibInSync(inFps, outFps))
         {
-            // Kaba adimda da tek sansli bir tike guvenmiyoruz: m_calibLoFps daha
-            // sonra FineUp'ta hic tekrar test edilmeden dogrudan taban olarak
-            // kullaniliyor (capa optimizasyonu), o yuzden burasi da ardisik
-            // dogrulama istiyor.
+            // Araya giren bir gecici desenkron okumasini sil ve ardisik dogrulama
+            // iste: m_calibLoFps dogrudan ikili aramanin tabani olacak.
+            m_calibDesyncCount = 0;
             if (++m_calibConfirmCount < kCalibConfirmTicks)
             {
                 return; // ayni hedefte bir tik daha olc
@@ -1506,107 +1708,79 @@ void App::UpdateCalibration(const Dlss5Config& cfg)
             return;
         }
 
-        // Bozuldu. Tahmin yurutup 1'er inmek yerine, GERCEKTE ulasilan cikis FPS'ini
-        // (outFps) dogrudan gercegin gostergesi olarak kullaniyoruz -- oyun/VLSS5
-        // zaten o hizi teslim edebildigini bu tikte ISPATLADI. Once bir tik daha
-        // bekleyip bu okumayi dogrulayacagiz (AnchorWait), sonra oradan 1'er 1'er
-        // yukari tirmanacagiz.
-        DLSS_Log("[Calib] %d FPS tasinmiyor (giris=%d cikis=%d) -> capa dogrulaniyor",
-                 m_calibTargetFps, inFps, outFps);
-
-        m_calibAnchorCandidate = outFps;
-        m_calibState           = CalibState::AnchorWait;
-        m_calibMessage         = L"SENKRON KAYBEDILDI, DOGRULANIYOR...";
-        return;
-    }
-
-    case CalibState::AnchorWait:
-    {
-        // Limiti degistirmeden bir tik daha olcup ilk okumayi dogruluyoruz;
-        // ikisinin kucugunu alarak gecici bir sicramayi capa yapmaktan kaciniyoruz.
-        const int floorFps = (m_calibLoFps > 0) ? m_calibLoFps : kCalibMinFps;
-        int anchor = (std::min)(m_calibAnchorCandidate, outFps);
-        if (anchor < floorFps) anchor = floorFps;
-        if (anchor >= m_calibTargetFps) anchor = m_calibTargetFps - 1;
-        if (anchor < floorFps) anchor = floorFps;
-
-        // Capa, zaten DOGRULANMIS tabana esitse (outFps taban altina dustugu icin
-        // clamp edildi) onu tekrar test etmeye gerek yok -- bunu zaten biliyoruz.
-        // Direkt bir ustunu dene, bir adim (bir tam olcum donguyu) kazandirir.
-        if (m_calibLoFps > 0 && anchor <= m_calibLoFps)
+        // Desenkron. TEK bir gurultulu okuma (fotometrik reset, odak olayi, kisa
+        // 1.2s pencerede gecici dusus) kaba taramayi erken kesip ince aramaya uzun
+        // bir mesafe yuklemesin diye -- senkron gibi -- ardisik dogrulama istiyoruz.
+        // Araya bir senkron okumasi girerse (yukaridaki dal) sayac sifirlanir ve
+        // tarama yoluna devam eder.
+        m_calibConfirmCount = 0;
+        if (++m_calibDesyncCount < kCalibConfirmTicks)
         {
-            const int next = m_calibLoFps + 1;
-            if (next >= m_calibTargetFps)
-            {
-                CalibFinish(m_calibLoFps);
-                return;
-            }
+            return; // ayni hedefte bir tik daha olc
+        }
 
-            DLSS_Log("[Calib] Capa zaten dogrulanmis taban (%d); dogrudan %d deneniyor",
-                     m_calibLoFps, next);
+        // Desenkron DOGRULANDI. Artik bir bant var:
+        //   lo = son dogrulanmis senkron kaba hiz (m_calibLoFps; yoksa taban)
+        //   hi = bu dogrulanmis desenkron hiz (m_calibTargetFps)
+        // Dogru sinir bu bandin icinde; IKILI ARAMA ile ~log2 adimda buluruz.
+        // (Eski kod capayi cikis FPS'ine sabitleyip 1'er 1'er tirmaniyordu;
+        // bant 20+ FPS genisse bu onlarca adim/dakika aliyordu.)
+        m_calibHiFine = m_calibTargetFps;
+        const int loFps = (m_calibLoFps > 0) ? m_calibLoFps : kCalibMinFps;
 
-            m_calibState   = CalibState::FineUp;
-            m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(next) + L")...";
-            CalibApplyLimit(next);
+        DLSS_Log("[Calib] %d FPS tasinmiyor (giris=%d cikis=%d) -> ikili arama [%d, %d]",
+                 m_calibTargetFps, inFps, outFps, loFps, m_calibHiFine);
+
+        if (m_calibHiFine - loFps <= 1)
+        {
+            CalibFinish(loFps); // bant zaten 1 FPS; alt sinir dogrulanmis senkron
             return;
         }
 
-        DLSS_Log("[Calib] Capa dogrulandi: %d FPS'e sabitleniyor (aday=%d, bu tik=%d)",
-                 anchor, m_calibAnchorCandidate, outFps);
-
-        m_calibState   = CalibState::FineUp;
-        m_calibMessage = L"SENKRON BULUNDU: " + std::to_wstring(anchor) + L" FPS'E SABITLENIYOR...";
-        CalibApplyLimit(anchor);
+        const int mid  = (loFps + m_calibHiFine) / 2;
+        m_calibState   = CalibState::FineBisect;
+        m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(mid) + L")...";
+        CalibApplyLimit(mid);
         return;
     }
 
-    case CalibState::FineUp:
+    case CalibState::FineBisect:
     {
-        // Capa sadece bir TAHMINDI (bozulma anindaki tek okumadan dogrulanmis).
-        // Bu hedefte gercekten senkronsa yukari (1 arttir); degilse capa fazla
-        // iyimserdi demektir, asagi in (1 azalt). Boylece hangi yonden gelinirse
-        // gelinsin dogru sinira 1 FPS hassasiyetle yakinsiyoruz.
+        // Ikili arama: [m_calibLoFps (dogrulanmis senkron) , m_calibHiFine
+        // (dogrulanmis desenkron)]. Mevcut hedef bandin ortasi. Senkronsa tabani
+        // yukselt, degilse tavani indir; iki taraf da kCalibConfirmTicks ile
+        // dogrulanir ki tek gurultulu tik bandi yanlis daraltmasin.
         if (CalibInSync(inFps, outFps))
         {
-            // Tek tik "senkron" gorunup hemen ardindan kalici desenkrona
-            // dusebiliyordu (kisa 1.2s pencere geciciyi yakalayabiliyor).
-            // Bir hedefi DOGRULANMIS saymadan once ust uste kCalibConfirmTicks
-            // tik senkron kalmasini istiyoruz.
+            m_calibDesyncCount = 0;
             if (++m_calibConfirmCount < kCalibConfirmTicks)
             {
-                return; // ayni hedefte bir tik daha olc
-            }
-
-            m_calibLoFps = m_calibTargetFps;   // bu hiz ARDISIK TIKLARLA DOGRULANDI
-
-            if (m_calibTargetFps >= m_calibHiBound)
-            {
-                CalibFinish(m_calibHiBound);
                 return;
             }
-
-            const int next = m_calibTargetFps + 1;
-            m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(next) + L")...";
-            CalibApplyLimit(next);
-            return;
+            m_calibLoFps = m_calibTargetFps; // yeni dogrulanmis taban
         }
-
-        // Bozuk. Dogrulanmis en yuksek hiz (varsa) tabandir; onun altina inmeyiz.
-        m_calibConfirmCount = 0;
-        const int floorFps = (m_calibLoFps > 0) ? m_calibLoFps : kCalibMinFps;
-        const int next      = m_calibTargetFps - 1;
-
-        if (next <= floorFps)
+        else
         {
-            CalibFinish(floorFps);
+            m_calibConfirmCount = 0;
+            if (++m_calibDesyncCount < kCalibConfirmTicks)
+            {
+                return;
+            }
+            m_calibHiFine = m_calibTargetFps; // yeni dogrulanmis tavan
+        }
+
+        // Bant 1 FPS'e indiyse dogrulanmis en yuksek senkron hiz cevaptir.
+        if (m_calibHiFine - m_calibLoFps <= 1)
+        {
+            CalibFinish(m_calibLoFps);
             return;
         }
 
-        DLSS_Log("[Calib] %d FPS tasinmiyor (giris=%d cikis=%d) -> %d deneniyor (geri)",
-                 m_calibTargetFps, inFps, outFps, next);
-
-        m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(next) + L")...";
-        CalibApplyLimit(next);
+        const int mid = (m_calibLoFps + m_calibHiFine) / 2;
+        DLSS_Log("[Calib] ikili arama [%d, %d] -> %d deneniyor",
+                 m_calibLoFps, m_calibHiFine, mid);
+        m_calibMessage = L"SENKRON ARANIYOR (HEDEF: " + std::to_wstring(mid) + L")...";
+        CalibApplyLimit(mid);
         return;
     }
 
@@ -1663,6 +1837,9 @@ void App::Update()
 
     // FPS kalibrasyonu (durum makinesi + kacis emniyetleri ayri fonksiyonda)
     UpdateCalibration(cfg);
+
+    // Kaydedilen limitin otomatik uygulanmasi (varsa; enjeksiyon arka ucu)
+    UpdateAutoApplyLimit();
 
     // Check F10 to toggle DLSS 5 on/off
     const bool vlssDown = (GetAsyncKeyState(cfg.vkToggleVlss) & 0x8000) != 0;
@@ -1863,16 +2040,34 @@ void App::StopOverlay()
     m_running = false;
     m_state   = AppState::Menu;
 
-    // Yarim kalmis bir kalibrasyon varsa kullanicinin RTSS limitini geri yukle.
-    // Aksi halde oyun, arama sirasinda yazilmis gecici bir limitte (ornegin 10 FPS)
-    // takili kalirdi.
-    if (m_calibState != CalibState::Idle && m_calibState != CalibState::Done)
+    // Limiter oturumunu kapat. Iki durumda geri yukleme sart:
+    //   * Yarim kalmis kalibrasyon (her arka uc): oyun arama sirasinda yazilmis
+    //     gecici bir limitte (ornegin 10 FPS) takili kalmasin.
+    //   * Enjeksiyon arka uci (tamamlanmis olsa bile): DLL hedeften cekilip oyun
+    //     tam hiza donmeli -- enjeksiyon limiti VLSS5 oturumuna baglidir, biz
+    //     kapaninca onu guncelleyen kimse kalmaz.
+    // RTSS + TAMAMLANMIS kalibrasyonda limit bilerek birakilir (RTSS profili
+    // VLSS5'ten bagimsiz, kalici bir ayardir).
     {
-        CalibRestoreOriginalLimit();
+        LimiterManager& lim = LimiterManager::Get();
+        const bool midRun = (m_calibState != CalibState::Idle && m_calibState != CalibState::Done);
+        if (lim.GetBackend() == LimiterManager::Backend::Injection)
+        {
+            // Enjeksiyon oturumu overlay boyunca yasadi; simdi TAMAMEN kapat:
+            // DLL hedeften sokulur (uninject) ve oyun tam hiza doner.
+            lim.Shutdown();
+        }
+        else if (midRun)
+        {
+            // RTSS: yalnizca yarim kalmis kalibrasyonda kullanicinin limitini
+            // geri yukle. Tamamlanmis kalibrasyonun degeri RTSS profilinde kalir.
+            lim.Restore();
+        }
     }
     m_calibState   = CalibState::Idle;
     m_calibMessage = L"";
     m_calibExeName.clear();
+    m_autoApply    = AutoApply::Idle; // sonraki oturum icin sifirla
 
     // Stop watchdog before tearing down resources
     StopWatchdog();
