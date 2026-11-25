@@ -3,10 +3,9 @@
 
 // ---------------------------------------------------------------------------
 // ConfirmDialog
-//   Main.cpp'deki CheckRivaTuner()/CheckRivaTunerRunning() icinde tekrar eden
-//   dinamik TaskDialogIndirect yukleme desenini (comctl32 v6 manifest gerekliligi
-//   yuzunden statik baglanti guvenilir degil) paylasilan tek bir Evet/Hayir
-//   onay yardimcisina cikarir. Proc bulunamazsa MessageBoxW(MB_YESNO)'ya duser.
+//   Paylasilan Evet/Hayir onay yardimcisi. TaskDialogIndirect dinamik yuklenir
+//   (comctl32 v6 manifest gerekliligi yuzunden statik baglanti guvenilir degil).
+//   Proc bulunamazsa MessageBoxW(MB_YESNO)'ya duser.
 // ---------------------------------------------------------------------------
 namespace ConfirmDialog
 {

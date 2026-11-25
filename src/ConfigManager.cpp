@@ -75,48 +75,6 @@ std::wstring ConfigManager::GetIniPath() const
     return path;
 }
 
-std::wstring ConfigManager::GetCalibratedIniPath() const
-{
-    wchar_t path[MAX_PATH] = {};
-    GetModuleFileNameW(nullptr, path, MAX_PATH);
-    PathRemoveFileSpecW(path);
-    PathCombineW(path, path, L"vlss5_calibrated.ini");
-    return path;
-}
-
-int ConfigManager::GetCalibratedFps(const std::wstring& exeName) const
-{
-    if (exeName.empty()) return 0;
-    const std::wstring ini = GetCalibratedIniPath();
-    int v = static_cast<int>(GetPrivateProfileIntW(L"Fps", exeName.c_str(), 0, ini.c_str()));
-    return (v > 0) ? v : 0;
-}
-
-void ConfigManager::SetCalibratedFps(const std::wstring& exeName, int fps)
-{
-    if (exeName.empty() || fps <= 0) return;
-    const std::wstring ini = GetCalibratedIniPath();
-
-    // Dosya yoksa UTF-16LE BOM ile olustur (bkz. PresetsManager::EnsureBom):
-    // BOM'suz dosya ANSI kabul edilir ve Turkce/ozel karakterli exe adlari bozulur.
-    if (GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES)
-    {
-        HANDLE h = CreateFileW(ini.c_str(), GENERIC_WRITE, 0, nullptr,
-                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-        if (h != INVALID_HANDLE_VALUE)
-        {
-            const unsigned char bom[2] = { 0xFF, 0xFE };
-            DWORD w = 0;
-            WriteFile(h, bom, sizeof(bom), &w, nullptr);
-            CloseHandle(h);
-        }
-    }
-
-    wchar_t buf[32];
-    swprintf_s(buf, L"%d", fps);
-    WritePrivateProfileStringW(L"Fps", exeName.c_str(), buf, ini.c_str());
-}
-
 void ConfigManager::Load()
 {
     std::wstring ini = GetIniPath();
@@ -206,14 +164,13 @@ void ConfigManager::Load()
     if (m_config.captureBackend < 0) m_config.captureBackend = 0;
     if (m_config.captureBackend > 1) m_config.captureBackend = 1;
 
-    m_config.injectionLimiter = (GetPrivateProfileIntW(sec, L"InjectionLimiter", 0, ini.c_str()) != 0);
+    m_config.gpuRealtimePriority = GetPrivateProfileIntW(sec, L"GpuRealtimePriority", 1, ini.c_str()) != 0;
 
     m_config.splitScreen = (GetPrivateProfileIntW(sec, L"SplitScreen", 0, ini.c_str()) != 0);
     m_config.fullscreenStretch = (GetPrivateProfileIntW(sec, L"FullscreenStretch", 0, ini.c_str()) != 0);
     m_config.mouseMapping      = (GetPrivateProfileIntW(sec, L"MouseMapping", 1, ini.c_str()) != 0);
     m_config.cursorLock        = (GetPrivateProfileIntW(sec, L"CursorLock", 1, ini.c_str()) != 0);
     m_config.hideSystemCursor  = (GetPrivateProfileIntW(sec, L"HideSystemCursor", 1, ini.c_str()) != 0);
-    m_config.suppressRtssRunningWarning = (GetPrivateProfileIntW(sec, L"SuppressRtssRunningWarning", 0, ini.c_str()) != 0);
 
     GetPrivateProfileStringW(sec, L"SplitPos", L"0.5", buf, _countof(buf), ini.c_str());
     m_config.splitPos = static_cast<float>(_wtof(buf));
@@ -230,8 +187,6 @@ void ConfigManager::Load()
     m_config.vkFocus       = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkFocus", VK_F8, ini.c_str()));
     m_config.vkFps         = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkFps", VK_F9, ini.c_str()));
     m_config.vkToggleVlss  = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkToggleVlss", VK_F10, ini.c_str()));
-    m_config.vkCalib       = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkCalib", VK_F2, ini.c_str()));
-    m_config.vkDismissWarning = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkDismissWarning", VK_F3, ini.c_str()));
     m_config.vkStart       = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"VkStart", 'S', ini.c_str()));
     m_config.modStart      = static_cast<UINT>(GetPrivateProfileIntW(L"Hotkeys", L"ModStart", MOD_ALT, ini.c_str()));
 
@@ -245,10 +200,6 @@ void ConfigManager::Load()
     wchar_t dlssGpuBuf[256] = {};
     GetPrivateProfileStringW(L"Hardware", L"DlssGpu", L"", dlssGpuBuf, _countof(dlssGpuBuf), ini.c_str());
     m_config.dlssGpu = (dlssGpuBuf[0] != 0) ? dlssGpuBuf : m_config.selectedGpu;
-
-    wchar_t rtssBuf[MAX_PATH] = {};
-    GetPrivateProfileStringW(L"Paths", L"RtssDirectory", L"", rtssBuf, _countof(rtssBuf), ini.c_str());
-    m_config.rtssDirectory = rtssBuf;
 
     // Buraya kadar okunan her sey, profil API'sinin GERCEKTEN gordugu bolumden
     // geldi. Dosya bozuksa simdi ayni degerlerle temiz bir dosya yaziyoruz;
@@ -316,7 +267,7 @@ void ConfigManager::RepairIni(const std::wstring& path)
     DeleteFileW(path.c_str());
 
     // Dosyayi UTF-16LE BOM ile olustur: WritePrivateProfileStringW bu durumda
-    // Unicode yazar ve ASCII disi yollar (rtssDirectory) bozulmaz. BOM'suz
+    // Unicode yazar ve ASCII disi degerler (or. GPU adi) bozulmaz. BOM'suz
     // olusturulan dosya ANSI kabul edilir.
     HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -367,13 +318,12 @@ void ConfigManager::Save()
     writeFloat(L"VLSS5", L"BoostFactor", m_config.boostFactor);
     writeInt(L"VLSS5", L"OverlayMode", m_config.overlayMode);
     writeInt(L"VLSS5", L"CaptureBackend", m_config.captureBackend);
-    writeInt(L"VLSS5", L"InjectionLimiter", m_config.injectionLimiter ? 1 : 0);
+    writeInt(L"VLSS5", L"GpuRealtimePriority", m_config.gpuRealtimePriority ? 1 : 0);
     writeInt(L"VLSS5", L"SplitScreen", m_config.splitScreen ? 1 : 0);
     writeInt(L"VLSS5", L"FullscreenStretch", m_config.fullscreenStretch ? 1 : 0);
     writeInt(L"VLSS5", L"MouseMapping", m_config.mouseMapping ? 1 : 0);
     writeInt(L"VLSS5", L"CursorLock", m_config.cursorLock ? 1 : 0);
     writeInt(L"VLSS5", L"HideSystemCursor", m_config.hideSystemCursor ? 1 : 0);
-    writeInt(L"VLSS5", L"SuppressRtssRunningWarning", m_config.suppressRtssRunningWarning ? 1 : 0);
     writeFloat(L"VLSS5", L"SplitPos", m_config.splitPos);
     writeInt(L"VLSS5", L"FpsDisplayMode", m_config.fpsDisplayMode);
 
@@ -384,12 +334,9 @@ void ConfigManager::Save()
     writeInt(L"Hotkeys", L"VkFocus", static_cast<int>(m_config.vkFocus));
     writeInt(L"Hotkeys", L"VkFps", static_cast<int>(m_config.vkFps));
     writeInt(L"Hotkeys", L"VkToggleVlss", static_cast<int>(m_config.vkToggleVlss));
-    writeInt(L"Hotkeys", L"VkCalib", static_cast<int>(m_config.vkCalib));
-    writeInt(L"Hotkeys", L"VkDismissWarning", static_cast<int>(m_config.vkDismissWarning));
     writeInt(L"Hotkeys", L"VkStart", static_cast<int>(m_config.vkStart));
     writeInt(L"Hotkeys", L"ModStart", static_cast<int>(m_config.modStart));
 
     writeStr(L"Hardware", L"SelectedGpu", m_config.selectedGpu.c_str());
     writeStr(L"Hardware", L"DlssGpu", m_config.dlssGpu.c_str());
-    writeStr(L"Paths", L"RtssDirectory", m_config.rtssDirectory.c_str());
 }

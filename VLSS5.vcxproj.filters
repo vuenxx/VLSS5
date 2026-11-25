@@ -38,9 +38,6 @@
     <ClCompile Include="src\NvOFManager.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\RTSSManager.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
     <ClCompile Include="src\D3D12Interop.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
@@ -51,9 +48,6 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\SettingsWindow.cpp">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\RtssWindow.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\HotkeysWindow.cpp">
@@ -115,9 +109,6 @@
     <ClInclude Include="src\nvOpticalFlowD3D11.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="src\RTSSManager.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
     <ClInclude Include="src\D3D12Interop.h">
       <Filter>Header Files</Filter>
     </ClInclude>
@@ -128,9 +119,6 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\SettingsWindow.h">
-      <Filter>Header Files</Filter>
-    </ClInclude>
-    <ClInclude Include="src\RtssWindow.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\HotkeysWindow.h">

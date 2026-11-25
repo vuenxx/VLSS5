@@ -30,7 +30,7 @@ struct PresetEntry
 // PresetsManager
 //   VLSS5.exe'nin yanindaki "presets\" klasorunde, pencere/oyun (veya tam ekran
 //   monitor hedefi) basina bir alt klasor olarak nöral ayar on ayarlarini saklar.
-//   RTSSManager ile ayni desen: GetPrivateProfileString/IntW + WritePrivateProfileStringW.
+//   GetPrivateProfileString/IntW + WritePrivateProfileStringW.
 // ---------------------------------------------------------------------------
 class PresetsManager
 {

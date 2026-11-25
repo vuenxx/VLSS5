@@ -99,9 +99,6 @@ function applyState(state) {
   setToggle("swFps", state.fps);
   setToggle("swDlss", state.dlss);
   setToggle("swFullscreen", state.fullscreenStretch);
-  setToggle("swInjectionLimiter", state.injectionLimiter);
-  // Inject modu: tema kirmiziya doner + ana sayfada uyari seridi gorunur.
-  document.body.classList.toggle("inject-mode", !!state.injectionLimiter);
 
   $("fpsModeSelect").value = String(state.fpsDisplayMode || 0);
   $("rowFpsMode").classList.toggle("disabled", !state.fps);
@@ -186,14 +183,6 @@ $("swFullscreen").addEventListener("click", () => {
   vlss5.send("setFullscreen", { value: next });
 });
 
-// Dahili FPS limiter (enjeksiyon). Toggle'i HEMEN degistirmiyoruz: native
-// taraf ban-riski onayini gosterir, gercek durumu "state" mesajiyla geri
-// gonderir (reddedilirse kapali kalir).
-$("swInjectionLimiter").addEventListener("click", () => {
-  const next = !$("swInjectionLimiter").classList.contains("on");
-  vlss5.send("setInjectionLimiter", { value: next });
-});
-
 $("gpuSelect").addEventListener("change", () => {
   vlss5.send("setGpu", { index: $("gpuSelect").selectedIndex });
 });
@@ -245,7 +234,7 @@ TAB_NAMES.forEach((n) => {
 });
 
 // ---------------------------------------------------------------------------
-// Genel Ayarlar sekmesi: RTSS / On Ayarlar / Tuslar akordiyon bolumleri
+// Genel Ayarlar sekmesi: On Ayarlar / Tuslar akordiyon bolumleri
 // ---------------------------------------------------------------------------
 document.querySelectorAll(".accordionHeader").forEach((header) => {
   header.addEventListener("click", () => {
@@ -391,37 +380,6 @@ document.querySelectorAll(".accordionHeader").forEach((header) => {
 })();
 
 // ===========================================================================
-// RTSS AYARLARI sekmesi (bkz. web/rtss/app.js) -- cmd/type "rtss" onekiyle
-// ===========================================================================
-(function () {
-  $("rtssBtnBrowse").addEventListener("click", () => vlss5.send("rtssBrowseFolder"));
-  $("rtssBtnRefresh").addEventListener("click", () => vlss5.send("rtssListProfiles"));
-  $("rtssBtnDelete").addEventListener("click", () => {
-    const sel = $("rtssProfileList").value;
-    if (!sel) return;
-    vlss5.send("rtssDeleteProfile", { name: sel });
-  });
-
-  vlss5.on("rtssDir", (msg) => { $("rtssDirPath").textContent = msg.data || ""; });
-
-  vlss5.on("rtssProfileList", (msg) => {
-    const sel = $("rtssProfileList");
-    const prev = sel.value;
-    sel.innerHTML = "";
-    (msg.data || []).forEach((name) => {
-      const opt = document.createElement("option");
-      opt.value = name;
-      opt.textContent = name;
-      sel.appendChild(opt);
-    });
-    if ([...sel.options].some((o) => o.value === prev)) sel.value = prev;
-  });
-
-  vlss5.send("rtssGetDir");
-  vlss5.send("rtssListProfiles");
-})();
-
-// ===========================================================================
 // ON AYARLAR sekmesi (bkz. web/presets/app.js) -- cmd/type "presets" onekiyle
 // ===========================================================================
 (function () {
@@ -468,8 +426,8 @@ document.querySelectorAll(".accordionHeader").forEach((header) => {
 // ===========================================================================
 // TUSLARI DEGISTIR paneli -- "tusa bas ve bekle" YOK: kullanici bir dropdown'dan
 // dogrudan bir tus SECIYOR (bkz. konusma). hotkeyId <-> native ile birebir ayni
-// (bkz. HotkeysWindow.cpp): 0=Settings, 2=Focus, 3=FPS, 4=VLSS, 5=Calib,
-// 6=Start, 7=DismissWarning. Sadece Settings(0) ve Start(6) modifier (Ctrl/
+// (bkz. HotkeysWindow.cpp): 0=Settings, 2=Focus, 3=FPS, 4=VLSS,
+// 6=Start. Sadece Settings(0) ve Start(6) modifier (Ctrl/
 // Alt/Shift) destekliyor -- digerleri native tarafta zaten bare-key.
 // ===========================================================================
 (function () {
@@ -503,8 +461,6 @@ document.querySelectorAll(".accordionHeader").forEach((header) => {
     2: $("hkSelFocus"),
     3: $("hkSelFps"),
     4: $("hkSelVlss"),
-    5: $("hkSelCalib"),
-    7: $("hkSelDismissWarning"),
   };
   const comboRows = {
     0: { select: $("hkSelSettings"), ctrl: $("hkModSettings-CTRL"), alt: $("hkModSettings-ALT"), shift: $("hkModSettings-SHIFT") },

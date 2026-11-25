@@ -7,7 +7,7 @@
 // ---------------------------------------------------------------------------
 // WebViewHost
 //   Ortak WebView2 tabanli borderless WS_POPUP pencere host'u. SettingsWindow,
-//   HotkeysWindow, RtssWindow ve PresetsWindow'un dorduzu de bunu kullanir.
+//   HotkeysWindow ve PresetsWindow bunu kullanir.
 //
 //   - Tek, paylasimli ICoreWebView2Environment (%LOCALAPPDATA%\VLSS5\WebView2UserData).
 //   - HTML dosyalari SetVirtualHostNameToFolderMapping ile file:// KULLANMADAN,

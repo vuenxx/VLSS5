@@ -51,7 +51,6 @@ MSBuild yolunu `vswhere` ile bulmak gerekirse:
 | `nvngx_dlssnr.dll` | exe yanı (snippet) | `DLSSNRManager` |
 | `nvngx.dll_dlssnr.dll` | exe yanı (forwarder) | `DLSSNRManager` |
 | `nvofapi64.dll` | NVIDIA Optical Flow SDK 5.0 | `NvOFManager` |
-| `RTSSHooks64.dll` | RivaTuner kurulumu | `RTSSManager::NotifyRTSS()` |
 
 Hepsi opsiyoneldir; yoksa ilgili özellik sessizce devre dışı kalır ve log'a düşer.
 
@@ -61,7 +60,7 @@ Hepsi opsiyoneldir; yoksa ilgili özellik sessizce devre dışı kalır ve log'a
 
 | Dosya | Satır | Sorumluluk |
 |---|---:|---|
-| `src/App.cpp/h` | 1550 | **Merkez.** Overlay penceresi, render döngüsü, kısayollar, FPS kalibrasyonu, watchdog |
+| `src/App.cpp/h` | 1550 | **Merkez.** Overlay penceresi, render döngüsü, kısayollar, watchdog |
 | `src/Main.cpp` | 1548 | `wWinMain`, ana menü penceresi (owner-draw GDI), pencere listesi, global hotkey |
 | `src/SettingsWindow.cpp/h` | 1149 | VLSS5 ayar paneli (slider'lar, preset, split screen) |
 | `src/Renderer.cpp/h` | 1099 | D3D11 swap chain, HLSL kaynağı, full-screen üçgen, OSD |
@@ -72,13 +71,8 @@ Hepsi opsiyoneldir; yoksa ilgili özellik sessizce devre dışı kalır ve log'a
 | `src/CaptureManager.cpp/h` | 505 | WGC yakalama, zero-copy SRV, giriş FPS & jitter ölçümü |
 | `src/NvOFManager.cpp/h` | 364 | Donanımsal NVIDIA Optical Flow (OFA) sarmalayıcı |
 | `src/HotkeysWindow.cpp/h` | 348 | Kısayol atama penceresi |
-| `src/RtssWindow.cpp/h` | 286 | RTSS dizini/profil yönetim penceresi |
 | `src/ConfigManager.cpp/h` | 212 | `Dlss5Config` + INI okuma/yazma (singleton) |
 | `src/InputForwarder.cpp/h` | 138 | Kısayol yakalama (hook **yalnızca** atama sırasında) |
-| `src/RTSSManager.cpp/h` | 112 | RTSS profil `.cfg` okuma/yazma |
-| `src/LimiterManager.cpp/h` | — | FPS limiter arka uc soyutlamasi (RTSS / dahili enjeksiyon). Kalibrasyon buradan gecer |
-| `limiter/vlss5_limiter.cpp` | — | Hedef oyuna yuklenen hook DLL'i (Present sarmalama + kare zamanlama). `vlss5_limiter.dll` |
-| `limiter/vlss5_limiter_shared.h` | — | Ana uygulama ↔ hook DLL paylasimli bellek protokolu |
 | `src/WindowEnumerator.cpp/h` | — | Görünür üst-seviye pencere listesi |
 | `src/Common.h` | — | Ortak include'lar, `#pragma comment(lib,...)`, `WindowInfo`, `DLSS_Log` bildirimi |
 
@@ -116,7 +110,7 @@ SetThreadPriority(THREAD_PRIORITY_HIGHEST)
 while (m_running):
   1. PeekMessage döngüsü (WM_QUIT / WM_HOTKEY → çık)
   2. IsWindow(target)? değilse çık
-  3. Update()                       → kısayollar, odak, konum, kalibrasyon
+  3. Update()                       → kısayollar, odak, konum
   4. m_overlayHidden ise: kareyi boşalt, Sleep(25), continue
   5. Yeni kare var mı?
        evet → AcquireCurrentFrameSRV() → Render(srv) → ReleaseCurrentFrame()
@@ -306,108 +300,24 @@ Waitable, `WS_EX_LAYERED` ile tam uyumludur; fare geçirgenliğinden ödün verm
 
 ---
 
-## 8. FPS Kalibrasyonu (`App::UpdateCalibration`, App.cpp:~790)
+## 8. GPU zamanlama önceliği (`ApplyGpuSchedulingPriority`, Main.cpp)
 
-### Amaç
+Oyun GPU'yu %100 doldurduğunda WDDM iki süreci zaman dilimiyle paylaştırır ve VLSS5'in işi oyunun dilimini bekler. `D3DKMTSetProcessSchedulingPriorityClass(REALTIME)` bunu ortadan kaldırır; `WinMain`'de, hiçbir D3D cihazı oluşmadan önce çağrılır.
 
-Oyunun kare üretim hızını, VLSS5'in işleyebildiği hıza **RTSS FPS limiti** ile kilitlemek. Giriş çıkıştan hızlıysa WGC kareleri kuyrukta birikip atılır → girdi gecikmesi + stutter.
+Ölçüm (2026-11-25, RTX 4060, HAGS açık, oyun benzeri %100 yük, submit → bitiş):
 
-### Durum makinesi — kaba tarama + ikili arama
-
-```
-Idle
- └─(kısayol)→ InitUncap    limit=0 (SINIRSIZ), ölç
-       │       üst sınır = max(ölçülen giriş, MONİTÖR YENİLEME HIZI)
-       │
-       └─ CoarseUp   tabandan (kCalibMinFps) kCalibCoarseStep (10) adımlarla ÇIK
-              │   her hedef kCalibConfirmTicks tik DOĞRULANIR (senkron VE desenkron)
-              ├─ senkron + giriş < hedef-5 → Finish(giriş)      "oyunun kendi tavanı"
-              ├─ senkron + hedef >= üst sınır → Finish(üst sınır)
-              ├─ senkron (doğrulandı)      → lo = hedef, hedef += 10
-              └─ desenkron (doğrulandı)    → bant bulundu: [lo, hi=hedef]
-                      │
-                      └─ FineBisect   her adımda hedef = (lo + hi) / 2
-                              │   senkron/desenkron yine kCalibConfirmTicks ile doğrulanır
-                              ├─ senkron   → lo = hedef
-                              ├─ desenkron → hi = hedef
-                              └─ hi - lo <= 1 → Finish(lo)
-```
-
-**Neden iki fazlı?** Kaba tarama gerçek senkron tavanının hangi 10'luk bantta olduğunu bulur; ikili arama o bandı ~log₂ adımda tarar. Eski sürüm bozulma anındaki çıkış FPS'ini çapa yapıp 1'er 1'er tırmanıyordu — bant genişse (ör. çapa 43, gerçek tavan 67) bu onlarca adım/dakika alıyordu (ölçülen gerçek bir hata: 43→67 birer birer, ~90 sn). Çapanın tek gürültülü bir okumadan düşmesini de engellemek için kaba taramada **desenkron da** (senkron gibi) ardışık doğrulanır.
-
-Her adım `kCalibStepMs = 1200` ms ölçer (+ bir oturma tiki). Doğrulama ile bir hedef pratikte ~3 tik ≈ 3.6 sn. Sabitler `App.h`'de.
-
-### ⚠️ Üst sınır neden monitör yenileme hızı?
-
-İlk sürüm üst sınırı **sınırsız fazda ölçülen giriş FPS'ine** eşitliyordu. Bu yanlıştı ve şöyle tezahür etti: arama 10'dan sonra 20'ye çıkamayıp **16'ya kırpıldı** ve orada "tamamlandı" dedi.
-
-Sebep döngüseldi: sınırsız fazda hiçbir limit olmadığı için `Present()` DWM backpressure'ına girer. Gerçek bir oturumun logu:
-
-| Faz | Kare maliyeti | Present | Ölçülen giriş |
-|---|---|---|---|
-| Sınırsız (ölçüm anı) | **84 ms** | 60–100 ms | **16 FPS** |
-| Limit uygulandıktan sonra | **1.65 ms** | normal | — |
-
-Yani *kendi tıkanıklığımızı* "oyunun tavanı" sanıp aramayı oraya hapsediyorduk. Boru hattı gerçekte 1.65 ms/kare (600+ FPS) kapasitesindeydi.
-
-DWM ile kompoze edilen bir overlay zaten monitör yenileme hızının üzerine çıkamaz — gerçek üst sınır budur. Oyun kendi iç limiti yüzünden daha düşükte kalıyorsa `giriş < hedef - 5` dalı onu ayrıca yakalar.
-
-### Altı emniyet — hepsi gerçek bir hata raporundan doğdu
-
-| # | Emniyet | Neden var |
+| Sınıf | ~4 ms'lik iş | ~10 ms'lik iş |
 |---|---|---|
-| 1 | **`kCalibMinFps = 10` tabanı** | RTSS'te `Limit=0` **SINIRSIZ** demektir. İlk sürüm ince aramada sınırsız aşağı sayıyordu; sayaç 0'ı geçince oyun tam hıza salınıyor, desenkron kalıcılaşıyor ve hedef `-1, -2, … -30` diye kaçıyordu. Bildirilen **"-30 FPS"** hatası tam olarak buydu. İkili arama bunu ayrıca yapısal olarak imkânsız kılar: hedef daima `[lo, hi]` aralığının içinde kalır |
-| 2 | **"RTSS uygulamıyor" tespiti** | Limit yazıldığı halde giriş `hedef*1.5+10` üzerinde kalıyorsa RTSS profili gerçekten uygulamıyordur. Üst üste 2 tikte iptal. Eskiden bu durum sonsuz desenkron olarak okunup (1)'deki kaçışı tetikliyordu |
-| 3 | **Bayat ölçüm koruması** | `m_currentInputFps` yalnızca yeni WGC karesi gelince, `m_fpsCurrent` yalnızca `Render()` çalışınca güncellenir. İkisi de donabilir. `GetInputFpsFresh()` / `GetOutputFpsFresh()` bayatsa 0 döner, tik **atlanır ve sayılmaz** |
-| 4 | **Oturma (settle) süresi** | Limit değişince `ResetInputFpsWindow()` çağrılır ve bir tik atlanır; eski rejimin kareleri karara karışmaz |
-| 5 | **`kCalibMaxSteps = 60` tavanı** | Her ne olursa olsun ~3 dk sonra durur |
-| 6 | **Geri yükleme** | Başlarken `GetFramerateLimit()` saklanır; iptal, hata ve `StopOverlay()` yollarının **hepsinde** geri yazılır. Yoksa oyun 10 FPS'te takılı kalırdı |
+| varsayılan (NORMAL) | 15.1 ms | 23.0 ms |
+| HIGH | 15.1 ms | 23.3 ms |
+| **REALTIME** | **4.3 ms** | **11.0 ms** |
 
-### Senkron toleransı
+- HIGH sınıfı ve D3D12 kuyruk önceliği (NORMAL/HIGH) ölçülebilir fark yaratmadı.
+- Toplam GPU gücünü artırmaz. Model ağırsa oyun FPS kaybedebilir (10 ms testinde 43 → 32).
+- `SeIncreaseBasePriorityPrivilege` yalnızca çağrı süresince açılır; açık kalırsa `D3D12Interop`'taki ölçülmemiş `GLOBAL_REALTIME` kuyruğu da devreye girer.
+- Kapatmak için: `GpuRealtimePriority=0` (yeniden başlatma gerekir).
 
-```cpp
-const int tol = max(2, (int)(inFps * 0.05 + 0.5));
-return abs(inFps - outFps) <= tol;
-```
-
-Sabit `<= 1` toleransı fazla dardı: 0.5 sn'lik pencerede tamsayıya yuvarlanan FPS doğal olarak ±2 oynar ve sahte desenkron üretir.
-
-### İptal
-
-Kalibrasyon tuşuna **tekrar basmak** iptal eder ve kullanıcının limitini geri yükler.
-
-### Limiter arka uçları (`LimiterManager`)
-
-Kalibrasyon artık RTSS'e doğrudan bağlı değil; limiti `LimiterManager` üzerinden uygular. İki arka uç var:
-
-| Arka uç | Nasıl sınırlar | Enjeksiyon | Varsayılan |
-|---|---|---|---|
-| **RTSS** | RTSS profil `.cfg`'sine `Limit` yazar | Hayır | ✅ Evet |
-| **Dahili (enjeksiyon)** | `vlss5_limiter.dll`'i hedef oyuna yükler, Present'i sarmalayıp kareyi geciktirir — **DXGI (D3D10/11/12)**, **D3D9**, **D3D8** | Evet | — |
-
-Enjeksiyon arka ucu `Dlss5Config::injectionLimiter` ile açılır; **varsayılan kapalı** ve arayüzden açılırken kullanıcı bir ban-riski uyarısını onaylar (`Main.cpp` → `setInjectionLimiter`). Enjeksiyon kurulamazsa (32-bit hedef, erişim reddi, DLL yok) kalibrasyon sessizce RTSS'e düşer.
-
-**Yaşam döngüsü farkı:** RTSS limiti VLSS5'ten bağımsız, kalıcı bir ayardır — tamamlanan kalibrasyonun değeri bilerek bırakılır. Enjeksiyon limiti overlay oturumuna bağlıdır: `App::StopOverlay` her durumda `LimiterManager::Restore()` ile DLL'i çeker, oyun tam hıza döner.
-
-**İletişim:** PID'ye göre adlandırılmış paylaşımlı bellek (`SharedState`). Ana uygulama yalnızca `targetFps` + `shutdownSignal`'i yazar; DLL yalnızca `dllAttached` / `measuredFps` / `dllStatus` / `heartbeat`'i yazar. Tek alan / tek yazar olduğu için kilit yoktur.
-
-**Enjeksiyon yaşam döngüsü (önemli):** Enjeksiyon kalibrasyona değil, **overlay oturumuna** bağlıdır. İlk kalibrasyonda DLL yüklenir; sonraki kalibrasyonlar aynı yüklü DLL'i **yeniden kullanır** (`LimiterManager::Begin` reuse eder) — çünkü yüklü bir DLL'i ikinci kez `LoadLibrary` etmek `DllMain`'i tekrar çalıştırmaz, hook yeniden kurulmazdı. `Restore()` limit oturumunu bitirir ama DLL'i yüklü bırakır; tam sökme (`Shutdown()`, `shutdownSignal` → DLL kendini boşaltır) yalnızca `App::StopOverlay`'de olur. DLL içinde bir izleme thread'i `shutdownSignal`'i bekler ve hook kurulamamış olsa bile hedeften temizce ayrılır (uninject).
-
-**Kalıcılık / otomatik uygulama:** Kalibrasyon bitince bulunan FPS, exe adına göre ayrı bir dosyaya (`vlss5_calibrated.ini`, ana INI'nin onarım mantığından etkilenmesin diye ayrı) kaydedilir. Overlay bir sonraki sefer o oyunu yakalayınca ve enjeksiyon açıkken, kullanıcı F2'ye basmadan DLL yüklenip kayıtlı limit otomatik uygulanır (`App::UpdateAutoApplyLimit`, non-blocking). RTSS arka ucunda değer zaten RTSS profilinde kalır.
-
-> Enjeksiyon dizisi (`LoadRemoteModule`) `OpenProcess → VirtualAllocEx → WriteProcessMemory → CreateRemoteThread(LoadLibraryW)` standart kalıbıdır; başarı `GetExitCodeThread` ile DEĞİL, DLL'in yazdığı `dllAttached` bayrağı ile doğrulanır (x64'te çıkış kodu HMODULE'un yalnızca alt 32 bitini tutar).
-
-**32-bit (WOW64) oyunlar:** 64-bit DLL 32-bit sürece yüklenemez. Hedef `IsWow64Process` ile 32-bit çıkarsa, `LimiterManager` doğrudan enjeksiyon yerine 32-bit yardımcıyı (`vlss5_inject32.exe <pid> <dll>`) çalıştırır; o da `vlss5_limiter32.dll`'i KENDİ (32-bit) mimarisinde enjekte eder (64→32 çapraz `LoadLibraryW` adres problemi böyle aşılır). `SharedState` işaretçi içermediği için bellek düzeni x86/x64'te aynıdır — 64-bit uygulama ile 32-bit DLL tek named mapping üzerinden konuşur. Her iki 32-bit artefakt (`limiter/vlss5_limiter32.vcxproj`, `limiter/vlss5_inject32.vcxproj`) `VLSS5.vcxproj`'un `BuildWin32Limiter` hedefiyle ana derleme sonrası Win32 olarak üretilir ve exe yanına kopyalanır.
-
-### `RTSSManager` sözleşmesi
-
-| Metot | Not |
-|---|---|
-| `GetFramerateLimit(exe)` | `[Framerate] Limit`. Profil yoksa 0 |
-| `SetFramerateLimit(exe, n)` | `n < 0` **reddedilir** ve log'a düşer. `LimitDenominator=1` de yazılır |
-| `NotifyRTSS()` | `RTSSHooks64.dll` → `UpdateProfiles()` |
-
-> ⚠️ `NotifyRTSS()` her çağrıda DLL'i **kendi sürecimize** `LoadLibrary`/`FreeLibrary` yapıyor. Bunun RTSS sunucu sürecindeki profilleri gerçekten yeniden yükletip yükletmediği **doğrulanmadı**. Emniyet #2 tam da bu belirsizliği görünür kılmak için var — log'da `RTSS limiti uygulanmiyor` görürsen önce buraya bak.
+> FPS kalibrasyonu, RTSS entegrasyonu ve enjeksiyon limiter'ı bu değişiklikten sonra tamamen kaldırıldı. Eski kod git geçmişinde: `840720c`.
 
 ---
 
@@ -439,7 +349,7 @@ INI bölümü `[VLSS5]`, kısayollar `[Hotkeys]`.
 | `fullscreenStretch` | false | **Tam Ekran Yap** (bkz. §5) |
 | `directFlip` | false | ⚠️ **ÖLÜ KOD** — bkz. §11 |
 | `selectedGpu` | `"Auto"` | adaptör açıklaması |
-| `rtssDirectory` | `""` | boşsa `C:\Program Files (x86)\RivaTuner Statistics Server\Profiles` |
+| `gpuRealtimePriority` | true | GPU zamanlama sınıfı REALTIME (bkz. §8). Yalnızca INI: `GpuRealtimePriority` |
 
 ### Kısayollar (hepsi yeniden atanabilir — `HotkeysWindow`)
 
@@ -450,7 +360,6 @@ INI bölümü `[VLSS5]`, kısayollar `[Hotkeys]`.
 | `vkFocus` | `F8` | Overlay ↔ oyun odağı |
 | `vkFps` | `F9` | FPS göstergesi |
 | `vkToggleVlss` | `F10` | VLSS5 aç/kapa |
-| `vkCalib` | `F2` | FPS kalibrasyonu (tekrar bas = iptal) |
 | `vkStart` / `modStart` | `Alt+S` | Başlat / durdur |
 
 Kısayol algılama **hook'suz**: render döngüsünde `GetAsyncKeyState` ile yoklanır (`InputForwarder.h`'deki gerekçeye bak). `WH_KEYBOARD_LL` **yalnızca** menüdeki kısayol atama akışında kurulur ve ilk tuşta kaldırılır. Bu, ReShade ve oyunların tuşları eksiksiz almasını garanti eder — **bozma**.
@@ -464,14 +373,12 @@ Kısayol algılama **hook'suz**: render döngüsünde `GetAsyncKeyState` ile yok
 | Etiket | Kaynak | Ne zaman |
 |---|---|---|
 | `[App]` | App.cpp | Oturum olayları, odak değişimi |
-| `[Calib]` | App.cpp | Her kalibrasyon adımı, iptal, tamamlanma |
 | `[Capture]` | CaptureManager.cpp | WGC kare boşluğu > 200 ms, 5 sn özetler |
 | `[Renderer]` | Renderer.cpp | Swap chain kurulumu |
 | `[Present]` | Renderer.cpp | Present > 50 ms, `DXGI_STATUS_OCCLUDED` |
 | `[Perf]` | App.cpp | `YAVAS KARE` (ort × 3), 5 sn özet (**render/present kırılımlı**) |
 | `[Watchdog]` | App.cpp | Bir aşamada > 2000 ms takılma |
 | `[DLSS]` / `[DLSS-NR]` | DLSSManager / DLSSNRManager | NGX yükleme, feature oluşturma, evaluate sonucu |
-| `[RTSS]` | RTSSManager.cpp | Reddedilen negatif limit |
 
 ```bash
 Get-Content ".\x64\Release\vlss5_logs.log" -Tail 80
@@ -500,20 +407,6 @@ Bu bilinçli: Direct Flip denendi, fare/imleç davranışını bozdu, geri alın
 
 Bkz. §7. Layered'ın kompozisyon tavanı hâlâ geçerli (overlay monitör yenileme hızının üzerine çıkamaz), ama kuyruk taşması ve ondan doğan jitter giderildi.
 
-### 🟢 `NotifyRTSS()` — çözüldü
-
-Eskiden **her çağrıda** `RTSSHooks64.dll` `LoadLibraryW` + `FreeLibrary` ediliyordu, üstelik **render thread'inden**. Bir hooking kütüphanesini sürece alıp çıkarmak `DLL_PROCESS_ATTACH/DETACH` yollarını işletir ve loader kilidini tutar.
-
-Ölçülen sonuç: her limit yazma işleminden **~140 ms sonra** tek bir dev Present stall'ı —
-
-```
-[19:10:39.695] [Calib] Limit uygulandi: 33  →  [19:10:39.837] present=141.24 ms
-[19:10:45.701] [Calib] Limit uygulandi: 35  →  [19:10:45.846] present=128.75 ms
-[19:10:51.718] [Calib] Limit uygulandi: 36  →  [19:10:51.863] present=143.79 ms
-```
-
-Bu stall'lar kalibrasyon ölçümlerini de zehirliyordu. Modül artık bir kez yüklenip süreç ömrü boyunca tutuluyor; `FreeLibrary` yok.
-
 ### 🟡 Thread'ler arası okuma
 
 `m_lastFrameArrivalTime` (LARGE_INTEGER) WGC pool thread'inde yazılıp render thread'inde okunuyor; atomik değil. x64'te 8 baytlık hizalı okuma pratikte bölünmez, ama biçimsel olarak veri yarışı. `m_currentInputFps` (int) için de aynı durum. Şimdiye kadar sorun çıkarmadı.
@@ -530,8 +423,6 @@ Bu stall'lar kalibrasyon ölçümlerini de zehirliyordu. Modül artık bir kez y
 |---|---|---|
 | Overlay pencere stilleri | §6 | Fare/imleç her oyunda bozulur |
 | `Renderer::Resize` / `Init` imzası | §5 | 1:1 modda bulanıklık, DLSS yeniden boyutlanma çökmesi |
-| Kalibrasyon durum makinesi | §8 | Negatif FPS kaçışı geri gelir |
-| Kalibrasyon üst sınırı | §8 | Arama kendi tıkanıklığımıza hapsolur (16 FPS hatası) |
 | `GetAsyncKeyState` yoklaması | `InputForwarder.h` | Oyunlar tuş kaybeder |
 | Alpha 254 | §6 | Oyunun FG/Reflex zamanlaması kısılır |
 | `UpdateOverlayPosition` kısma mantığı | §6 | Kare başına DWM IPC → stutter |
@@ -550,5 +441,4 @@ Bu stall'lar kalibrasyon ölçümlerini de zehirliyordu. Modül artık bir kez y
 | **MPO** | Multi-Plane Overlay — DWM'i atlayan donanımsal katman |
 | **iFlip** | Independent Flip |
 | **FG** | Frame Generation |
-| **RTSS** | RivaTuner Statistics Server |
 | **MMCSS** | Multimedia Class Scheduler Service |

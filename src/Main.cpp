@@ -4,10 +4,8 @@
 #include "DLSSManager.h"
 #include "ConfigManager.h"
 #include "SettingsWindow.h"
-#include "RtssWindow.h"
 #include "HotkeysWindow.h"
 #include "PresetsWindow.h"
-#include "RTSSManager.h"
 #include "CrashHandler.h"
 #include "WebViewHost.h"
 #include "ConfirmDialog.h"
@@ -15,7 +13,6 @@
 #include "resource.h"
 #include "../third_party/json/json.hpp"
 #include <shlwapi.h>
-#include <shobjidl.h>
 #include <shellapi.h>
 #include <commctrl.h>
 #include <uxtheme.h>
@@ -34,7 +31,6 @@ using json = nlohmann::json;
     "name='Microsoft.Windows.Common-Controls' "               \
     "version='6.0.0.0' processorArchitecture='*' "             \
     "publicKeyToken='6595b64144ccf1df' language='*'\"")
-#include <TlHelp32.h>
 #include <algorithm>
 #include <cwctype>
 #pragma comment(lib, "shlwapi.lib")
@@ -50,7 +46,7 @@ using json = nlohmann::json;
 // BASLAT butonu: g_app->Run() TUM yakalama oturumu boyunca BLOKE OLAN bir
 // dongudur. Bunu dogrudan OnMainWebMessage ("startStop") icinden -- yani
 // WebView2'nin kendi WebMessageReceived COM callback'inin ICINDEN -- cagirmak,
-// WM_APP+4 aciklamasindaki (openSettings/openRtss/vs.) AYNI reentrant COM
+// WM_APP+4 aciklamasindaki (openSettings/openHotkeys/vs.) AYNI reentrant COM
 // tuzagina dusuyordu: Run() donene kadar (yani DURDUR'a basilip yakalama
 // bitene kadar) WebView2'nin callback yigini hic geri donmuyor, bu da o sure
 // boyunca JS -> native mesajlarinin (DURDUR dahil) guvenilmez/gec islenmesine
@@ -206,7 +202,6 @@ static json BuildStateJson()
     data["dlss"]              = g_dlssEnabled;
     data["fullscreenStretch"] = g_fullscreenStretch;
     data["fpsDisplayMode"]    = ConfigManager::Get().Config().fpsDisplayMode;
-    data["injectionLimiter"]  = ConfigManager::Get().Config().injectionLimiter;
 
     bool running = IsOverlayRunning();
     data["isCapturing"]        = running;
@@ -251,9 +246,7 @@ static json BuildHotkeyLabelsJson()
     labels["2"] = { {"vk", cfg.vkFocus},        {"mods", 0} };
     labels["3"] = { {"vk", cfg.vkFps},          {"mods", 0} };
     labels["4"] = { {"vk", cfg.vkToggleVlss},   {"mods", 0} };
-    labels["5"] = { {"vk", cfg.vkCalib},        {"mods", 0} };
     labels["6"] = { {"vk", cfg.vkStart},        {"mods", cfg.modStart} };
-    labels["7"] = { {"vk", cfg.vkDismissWarning}, {"mods", 0} };
     return labels;
 }
 
@@ -768,8 +761,8 @@ static void TriggerCaptureToggle(HWND hwnd)
         wchar_t cls[64] = {};
         GetClassNameW(fg, cls, _countof(cls));
 
-        // Kendi surecimize ait HERHANGI bir pencere (VLSS5 Ayarlari, RTSS
-        // Ayarlari, Tuslar, On Ayarlar vs.) asla yakalama hedefi olmamali --
+        // Kendi surecimize ait HERHANGI bir pencere (VLSS5 Ayarlari,
+        // Tuslar, On Ayarlar vs.) asla yakalama hedefi olmamali --
         // aksi halde ALT+S o pencerenin uzerine bir overlay acar, pencere hic
         // kapanmaz, sadece arkada kalmis gibi gorunur (kullanici geri bildirimi).
         DWORD fgPid = 0;
@@ -833,7 +826,7 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
     try { msg = json::parse(ToUtf8(jsonStr)); }
     catch (...) { return; }
 
-    // Son savunma hatti: SettingsWindow/RtssWindow/HotkeysWindow/PresetsWindow'daki
+    // Son savunma hatti: SettingsWindow/HotkeysWindow/PresetsWindow'daki
     // ayni desen -- tum dispatch try/catch icinde, sadece json::parse degil.
     // Bir istisna bu COM callback sinirini asarsa std::terminate cagrilip TUM
     // uygulama sessizce cokebilir (bkz. Faz 1'de bulunan gercek hata).
@@ -901,38 +894,6 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
                 SetStatus(L"Tam Ekran Yap etkin: Pencere, monitörün tamamına gerdirilecek.");
             else
                 SetStatus(L"Tam Ekran Yap kapalı: Overlay pencerenin kendi boyutunda kalacak.");
-        }
-        else if (cmd == "setInjectionLimiter")
-        {
-            const bool want = msg.value("value", false);
-            auto& cfg = ConfigManager::Get().Config();
-
-            // Yalnizca KAPALI -> ACIK gecisinde onay iste. Kapatma ve zaten acik
-            // durum onaysiz gecer.
-            if (want && !cfg.injectionLimiter)
-            {
-                const bool ok = ConfirmDialog::AskYesNo(
-                    hwnd,
-                    L"VLSS5 - Dahili FPS Limiter",
-                    L"Dahili FPS limiteri etkinleştirilsin mi?",
-                    L"Bu seçenek, FPS limitini uygulamak için VLSS5'in küçük bir modülünü "
-                    L"(vlss5_limiter.dll) oyunun içine yükler. RTSS / Special K / MSI Afterburner "
-                    L"ile aynı tekniktir.\n\n"
-                    L"⚠️ DİKKAT: Bazı çevrimiçi oyunların anti-cheat sistemleri her türlü modül "
-                    L"yüklemesini ihlal sayabilir ve HESABINIZI BANLAYABİLİR. (Örnek: 2023'te AMD "
-                    L"Anti-Lag+ aynı nedenle CS2'de banlara yol açtı.)\n\n"
-                    L"Yalnızca çevrimdışı / tek kişilik oyunlarda kullanmanız önerilir. Tüm "
-                    L"sorumluluk size aittir. RTSS kuruluysa onu kullanmak daha güvenlidir.",
-                    L"Anladım, Etkinleştir", L"Vazgeç",
-                    /*defaultIsYes*/false, /*warningIcon*/true);
-                cfg.injectionLimiter = ok;
-            }
-            else
-            {
-                cfg.injectionLimiter = want;
-            }
-            ConfigManager::Get().Save();
-            PushStateToJs(); // gercek durumu JS'e geri bas (onay reddedilebilir)
         }
         else if (cmd == "setGpu")
         {
@@ -1055,10 +1016,6 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
             // dondukten sonra calissin.
             if (!IsOverlayRunning())
                 PostMessageW(hwnd, WM_APP + 4, 0, 0);
-        }
-        else if (cmd == "openRtss")
-        {
-            PostMessageW(hwnd, WM_APP + 4, 1, 0);
         }
         else if (cmd == "openHotkeys")
         {
@@ -1261,103 +1218,6 @@ static void OnMainWebMessage(const std::wstring& jsonStr)
             }
         }
         // -------------------------------------------------------------
-        // Faz 3: "RTSS Ayarları" sekmesi (bkz. RtssWindow::DispatchMessage
-        // ile AYNI mantik).
-        // -------------------------------------------------------------
-        else if (cmd == "rtssGetDir")
-        {
-            std::wstring dir = ConfigManager::Get().Config().rtssDirectory;
-            std::wstring shown = dir.empty() ? (L"(Varsayılan) " + RTSSManager::Get().GetProfilesDir()) : dir;
-
-            wchar_t buf[440] = {};
-            wcsncpy_s(buf, shown.c_str(), _TRUNCATE);
-            PathCompactPathExW(buf, shown.c_str(), 70, 0);
-
-            json out;
-            out["type"] = "rtssDir";
-            out["data"] = ToUtf8(buf);
-            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
-        }
-        else if (cmd == "rtssListProfiles")
-        {
-            json arr = json::array();
-            for (const auto& prof : RTSSManager::Get().GetProfiles())
-                arr.push_back(ToUtf8(prof));
-
-            json out;
-            out["type"] = "rtssProfileList";
-            out["data"] = arr;
-            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
-        }
-        else if (cmd == "rtssBrowseFolder")
-        {
-            IFileDialog* pfd = nullptr;
-            if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&pfd))))
-            {
-                DWORD dwOptions;
-                if (SUCCEEDED(pfd->GetOptions(&dwOptions))) pfd->SetOptions(dwOptions | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM);
-                if (SUCCEEDED(pfd->Show(hwnd)))
-                {
-                    IShellItem* psi = nullptr;
-                    if (SUCCEEDED(pfd->GetResult(&psi)))
-                    {
-                        PWSTR pszPath = nullptr;
-                        if (SUCCEEDED(psi->GetDisplayName(SIGDN_FILESYSPATH, &pszPath)))
-                        {
-                            ConfigManager::Get().Config().rtssDirectory = pszPath;
-                            ConfigManager::Get().Save();
-                            CoTaskMemFree(pszPath);
-
-                            // rtssListProfiles + rtssGetDir esdegeri: guncel
-                            // klasoru/profilleri hemen JS'e geri bas.
-                            json arr = json::array();
-                            for (const auto& prof : RTSSManager::Get().GetProfiles())
-                                arr.push_back(ToUtf8(prof));
-                            json outProfiles;
-                            outProfiles["type"] = "rtssProfileList";
-                            outProfiles["data"] = arr;
-                            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(outProfiles.dump()));
-
-                            std::wstring dir = ConfigManager::Get().Config().rtssDirectory;
-                            wchar_t buf[440] = {};
-                            wcsncpy_s(buf, dir.c_str(), _TRUNCATE);
-                            PathCompactPathExW(buf, dir.c_str(), 70, 0);
-                            json outDir;
-                            outDir["type"] = "rtssDir";
-                            outDir["data"] = ToUtf8(buf);
-                            if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(outDir.dump()));
-                        }
-                        psi->Release();
-                    }
-                }
-                pfd->Release();
-            }
-        }
-        else if (cmd == "rtssDeleteProfile")
-        {
-            std::wstring name = FromUtf8(msg.value("name", std::string()));
-            if (!name.empty())
-            {
-                std::wstring dispMsg = L"\"" + name + L"\" profili silinsin mi?";
-                if (ConfirmDialog::AskYesNo(hwnd, L"VLSS5 - Profili Sil",
-                        L"Bu RTSS profilini silmek istediğinizden emin misiniz?", dispMsg.c_str(),
-                        L"Evet", L"Hayır", /*defaultIsYes*/false, /*warningIcon*/true))
-                {
-                    std::wstring cfgPath = RTSSManager::Get().GetProfilesDir() + L"\\" + name + L".cfg";
-                    DeleteFileW(cfgPath.c_str());
-                    RTSSManager::Get().NotifyRTSS();
-
-                    json arr = json::array();
-                    for (const auto& prof : RTSSManager::Get().GetProfiles())
-                        arr.push_back(ToUtf8(prof));
-                    json out;
-                    out["type"] = "rtssProfileList";
-                    out["data"] = arr;
-                    if (g_mainWebView) g_mainWebView->PostJson(FromUtf8(out.dump()));
-                }
-            }
-        }
-        // -------------------------------------------------------------
         // Faz 3: "Ön Ayarlar" sekmesi (bkz. PresetsWindow::DispatchMessage
         // ile AYNI mantik).
         // -------------------------------------------------------------
@@ -1513,7 +1373,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
 
     case WM_APP + 4:
     {
-        // Bkz. OnMainWebMessage'daki openSettings/openRtss/openHotkeys/openPresets
+        // Bkz. OnMainWebMessage'daki openSettings/openHotkeys/openPresets
         // aciklamasi: alt pencereleri burada, ana webview'in WebMessageReceived
         // callback'inin TAMAMEN disinda acariz -- boylece CreatePopup'in kendi
         // ic-ice WebView2 controller olusturma cagrisi asla reentrant bir COM
@@ -1521,7 +1381,6 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lPara
         switch (static_cast<int>(wParam))
         {
         case 0: SettingsWindow::Toggle(hwnd); break;
-        case 1: RtssWindow::Show(hwnd);       break;
         case 2: HotkeysWindow::Show(hwnd);    break;
         case 3: PresetsWindow::Show(hwnd);    break;
         }
@@ -1641,143 +1500,76 @@ void CheckRequiredFiles()
 }
 
 // ---------------------------------------------------------------------------
-// CheckRivaTuner
+// GPU zamanlama sinifi (D3DKMTSetProcessSchedulingPriorityClass)
+//
+// Oyun GPU'yu %100 doldurdugunda WDDM iki sureci zaman dilimiyle paylastirir;
+// bizim isimiz oyunun dilimini bekler. Olculdu (RTX 4060, HAGS acik, oyun benzeri
+// doygun yuk, kuyruk onceligi HIGH):
+//     is ~4 ms  : submit->bitis 15.1 ms -> 4.3 ms
+//     is ~10 ms : submit->bitis 23.0 ms -> 11.0 ms
+// HIGH sinifi ve kuyruk onceligi (NORMAL/HIGH) OLCULEBILIR FARK YARATMADI; isi
+// yapan yalnizca REALTIME.
+//
+// Cihaz olusturulmadan ONCE cagrilmali.
 // ---------------------------------------------------------------------------
-static void CheckRivaTuner()
+static void ApplyGpuSchedulingPriority()
 {
-    std::wstring rtssDir = ConfigManager::Get().Config().rtssDirectory;
-    bool found = false;
-    
-    // Check configured directory first
-    if (!rtssDir.empty() && GetFileAttributesW(rtssDir.c_str()) != INVALID_FILE_ATTRIBUTES)
+    if (!ConfigManager::Get().Config().gpuRealtimePriority)
     {
-        found = true;
-    }
-    
-    // Check default RTSS directory if not found
-    if (!found)
-    {
-        std::wstring profilesDir = RTSSManager::Get().GetProfilesDir();
-        if (GetFileAttributesW(profilesDir.c_str()) != INVALID_FILE_ATTRIBUTES)
-        {
-            found = true;
-        }
-    }
-
-    if (!found)
-    {
-        typedef HRESULT (WINAPI *TaskDialogIndirect_t)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
-        HMODULE hComCtl = LoadLibraryW(L"comctl32.dll");
-        TaskDialogIndirect_t pTaskDialogIndirect = hComCtl ? (TaskDialogIndirect_t)GetProcAddress(hComCtl, "TaskDialogIndirect") : nullptr;
-
-        if (pTaskDialogIndirect)
-        {
-            TASKDIALOGCONFIG tdc = { sizeof(TASKDIALOGCONFIG) };
-            tdc.hwndParent = nullptr;
-            tdc.hInstance = GetModuleHandle(nullptr);
-            tdc.dwFlags = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
-            tdc.pszWindowTitle = L"VLSS5 - RivaTuner Eksik";
-            tdc.pszMainInstruction = L"DİKKAT! Bilgisayarınızda RivaTuner tespit edilemedi.";
-            tdc.pszContent = L"Oyunlarda otomatik FPS kalibrasyonu çalışmayacaktır. Lütfen RivaTuner'ı bilgisayarınıza kurun!\n\n(Eğer RivaTuner yüklüyse ancak farklı bir dizindeyse, lütfen program açıldıktan sonra 'RTSS AYARLARI' menüsünden klasör yolunu manuel olarak seçin.)";
-            tdc.pszMainIcon = TD_WARNING_ICON;
-
-            TASKDIALOG_BUTTON buttons[] = {
-                { 1001, L"İndir" },
-                { 1002, L"Tamam" }
-            };
-            tdc.cButtons = 2;
-            tdc.pButtons = buttons;
-            tdc.nDefaultButton = 1001;
-
-            int selectedButton = 0;
-            HRESULT hr = pTaskDialogIndirect(&tdc, &selectedButton, nullptr, nullptr);
-
-            if (SUCCEEDED(hr) && selectedButton == 1001)
-            {
-                ShellExecuteW(nullptr, L"open", L"https://www.msi.com/Landing/afterburner", nullptr, nullptr, SW_SHOWNORMAL);
-            }
-        }
-        else
-        {
-            int res = MessageBoxW(nullptr, 
-                L"DİKKAT! Bilgisayarınızda RivaTuner tespit edilemedi.\n\nOyunlarda otomatik FPS kalibrasyonu çalışmayacaktır. Lütfen RivaTuner'ı bilgisayarınıza kurun!\n\n(Eğer RivaTuner yüklüyse ancak farklı bir dizindeyse, lütfen program açıldıktan sonra 'RTSS AYARLARI' menüsünden klasör yolunu manuel olarak seçin.)\n\nİndirme sayfasına gitmek için 'Evet'e basın.", 
-                L"VLSS5 - RivaTuner Eksik", 
-                MB_ICONWARNING | MB_YESNO | MB_TOPMOST);
-            
-            if (res == IDYES)
-            {
-                ShellExecuteW(nullptr, L"open", L"https://www.msi.com/Landing/afterburner", nullptr, nullptr, SW_SHOWNORMAL);
-            }
-        }
-    }
-}
-
-static bool IsProcessRunning(const wchar_t* processName)
-{
-    bool exists = false;
-    PROCESSENTRY32W entry;
-    entry.dwSize = sizeof(PROCESSENTRY32W);
-
-    HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, NULL);
-    if (snapshot == INVALID_HANDLE_VALUE)
-        return false;
-
-    if (Process32FirstW(snapshot, &entry))
-    {
-        do
-        {
-            if (_wcsicmp(entry.szExeFile, processName) == 0)
-            {
-                exists = true;
-                break;
-            }
-        } while (Process32NextW(snapshot, &entry));
-    }
-    CloseHandle(snapshot);
-    return exists;
-}
-
-static void CheckRivaTunerRunning()
-{
-    if (ConfigManager::Get().Config().suppressRtssRunningWarning)
+        DLSS_Log("[Main] GPU zamanlama sinifi: REALTIME INI'den kapatilmis.");
         return;
+    }
 
-    if (IsProcessRunning(L"RTSS.exe"))
-        return;
+    using PFN_SetClass = LONG (APIENTRY*)(HANDLE, int);
+    constexpr int kClassHigh     = 4; // D3DKMT_SCHEDULINGPRIORITYCLASS_HIGH
+    constexpr int kClassRealtime = 5; // D3DKMT_SCHEDULINGPRIORITYCLASS_REALTIME
 
-    const wchar_t* msg =
-        L"UYARI! Arka planda RivaTuner çalışmadığı tespit edildi. Lütfen FPS kalibrasyonu için arkada uygulamayı açık bırakın. Kalibrasyon yapılmadığı sürece FPS çok kötü olabilir.";
-
-    typedef HRESULT (WINAPI *TaskDialogIndirect_t)(const TASKDIALOGCONFIG*, int*, int*, BOOL*);
-    HMODULE hComCtl = LoadLibraryW(L"comctl32.dll");
-    TaskDialogIndirect_t pTaskDialogIndirect = hComCtl ? (TaskDialogIndirect_t)GetProcAddress(hComCtl, "TaskDialogIndirect") : nullptr;
-
-    if (pTaskDialogIndirect)
+    HMODULE gdi32 = GetModuleHandleW(L"gdi32.dll");
+    auto setClass = gdi32
+        ? reinterpret_cast<PFN_SetClass>(GetProcAddress(gdi32, "D3DKMTSetProcessSchedulingPriorityClass"))
+        : nullptr;
+    if (!setClass)
     {
-        TASKDIALOGCONFIG tdc = { sizeof(TASKDIALOGCONFIG) };
-        tdc.hwndParent            = nullptr;
-        tdc.hInstance             = GetModuleHandle(nullptr);
-        tdc.dwFlags               = TDF_ALLOW_DIALOG_CANCELLATION | TDF_POSITION_RELATIVE_TO_WINDOW;
-        tdc.pszWindowTitle        = L"VLSS5 - RivaTuner Çalışmıyor";
-        tdc.pszMainInstruction    = L"UYARI! Arka planda RivaTuner çalışmadığı tespit edildi.";
-        tdc.pszContent            = L"Lütfen FPS kalibrasyonu için arkada uygulamayı açık bırakın. Kalibrasyon yapılmadığı sürece FPS çok kötü olabilir.";
-        tdc.pszMainIcon           = TD_WARNING_ICON;
-        tdc.pszVerificationText   = L"Bir daha gösterme";
-        tdc.dwCommonButtons       = TDCBF_OK_BUTTON;
+        DLSS_Log("[Main] GPU zamanlama sinifi: D3DKMT API'si bulunamadi.");
+        return;
+    }
 
-        BOOL verificationChecked = FALSE;
-        HRESULT hr = pTaskDialogIndirect(&tdc, nullptr, nullptr, &verificationChecked);
-
-        if (SUCCEEDED(hr) && verificationChecked)
+    // Eski Windows surumleri REALTIME icin SeIncreaseBasePriorityPrivilege ister;
+    // yonetici token'inda bulunur ama varsayilan KAPALIDIR. Yalnizca bu cagri
+    // boyunca acilir: acik kalsaydi D3D12Interop'taki (bugune kadar hep reddedilip
+    // HIGH'a dusen, olculmemis) GLOBAL_REALTIME kuyrugu da sessizce devreye girerdi.
+    HANDLE token = nullptr;
+    TOKEN_PRIVILEGES prev = {};
+    DWORD prevSize = sizeof(prev);
+    bool restorePrivilege = false;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY, &token))
+    {
+        TOKEN_PRIVILEGES tp = {};
+        tp.PrivilegeCount           = 1;
+        tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+        if (LookupPrivilegeValueW(nullptr, L"SeIncreaseBasePriorityPrivilege", &tp.Privileges[0].Luid) &&
+            AdjustTokenPrivileges(token, FALSE, &tp, sizeof(prev), &prev, &prevSize))
         {
-            ConfigManager::Get().Config().suppressRtssRunningWarning = true;
-            ConfigManager::Get().Save();
+            restorePrivilege = prev.PrivilegeCount > 0;
         }
+    }
+
+    const LONG rtStatus = setClass(GetCurrentProcess(), kClassRealtime);
+    if (rtStatus >= 0)
+    {
+        DLSS_Log("[Main] GPU zamanlama sinifi: REALTIME");
     }
     else
     {
-        MessageBoxW(nullptr, msg, L"VLSS5 - RivaTuner Çalışmıyor", MB_ICONWARNING | MB_OK | MB_TOPMOST);
+        const LONG highStatus = setClass(GetCurrentProcess(), kClassHigh);
+        DLSS_Log("[Main] GPU zamanlama sinifi: REALTIME reddedildi (0x%08X), HIGH: 0x%08X",
+                 static_cast<unsigned>(rtStatus), static_cast<unsigned>(highStatus));
     }
+
+    if (restorePrivilege)
+        AdjustTokenPrivileges(token, FALSE, &prev, 0, nullptr, nullptr);
+    if (token)
+        CloseHandle(token);
 }
 
 // ---------------------------------------------------------------------------
@@ -1788,8 +1580,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
     CrashHandler::Install();
 
     CheckRequiredFiles();
-    CheckRivaTuner();
-    CheckRivaTunerRunning();
 
     // Single instance check: prevent multiple instances of VLSS5 from running simultaneously
     HANDLE hSingleInstanceMutex = CreateMutexW(nullptr, TRUE, L"Local\\VLSS5_SingleInstance_Mutex");
@@ -1840,6 +1630,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
             ProcessPowerThrottling, &ppt, sizeof(ppt));
     }
     SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS);
+    ApplyGpuSchedulingPriority();
 
     // Automatically ensure nvofapi64.dll is present and preloaded
     EnsureNvofapiAvailable();
@@ -1872,7 +1663,6 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE, LPSTR, int nCmdShow)
 
     // Initialize DLSS 5 settings window class and common controls
     SettingsWindow::Initialize(hInstance);
-    RtssWindow::Initialize(hInstance);
     HotkeysWindow::Initialize(hInstance);
     PresetsWindow::Initialize(hInstance);
 

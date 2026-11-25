@@ -3,15 +3,13 @@ const $ = (id) => document.getElementById(id);
 document.getElementById("btnClose").onclick = () => vlss5.send("close");
 
 // hotkeyId <-> native ile birebir ayni (bkz. HotkeysWindow.cpp StartKeybindCapture):
-// 0=Settings, 2=Focus, 3=FPS, 4=VLSS, 5=Calib, 6=Start, 7=DismissWarning
+// 0=Settings, 2=Focus, 3=FPS, 4=VLSS, 6=Start
 const buttons = {
   0: $("btnSettings"),
   2: $("btnFocus"),
   3: $("btnFps"),
   4: $("btnVlss"),
-  5: $("btnCalib"),
   6: $("btnStart"),
-  7: $("btnDismissWarning"),
 };
 
 let capturingId = -1;

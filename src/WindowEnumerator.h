@@ -17,8 +17,7 @@ public:
     static std::vector<WindowInfo> GetMonitors();
 
     // Hedef pencerenin sahibi process'in TAM exe yolunu dondurur (hata/pencere yoksa "").
-    // App::ResolveTargetExeName'in aksine PathFindFileNameW ile KIRPILMAZ -- preset
-    // eslestirmesi tam yol uzerinden yapildigi icin ayri tutuluyor.
+    // Preset eslestirmesi tam yol uzerinden yapilir.
     static std::wstring ResolveExeFullPath(HWND hwnd);
 
     // Bir HMONITOR'un kalici cihaz adini dondurur (orn. L"\\.\DISPLAY1"; hata/monitor

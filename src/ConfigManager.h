@@ -77,20 +77,10 @@ struct Dlss5Config
     // olursa CaptureManager otomatik WGC'ye duser.
     int   captureBackend     = 0;
 
-    // FPS limiter arka uci (bkz. LimiterManager). Kalibrasyonun oyunun kare
-    // uretim hizini NASIL sinirlayacagini secer:
-    //   false = RTSS (varsayilan) -- RTSS profiline yazar, oyuna enjeksiyon YOK.
-    //   true  = Dahili enjeksiyon  -- vlss5_limiter.dll hedef oyuna yuklenir ve
-    //           Present sarmalanarak FPS sinirlanir (RTSS gerekmez).
-    //
-    // VARSAYILAN KAPALI ve arayuzden acilirken kullanici bir ban-riski uyarisini
-    // ACIKCA onaylar (bkz. Main.cpp setInjectionLimiter). Enjeksiyon cekirdek-
-    // seviye anti-cheat'lerde risklidir; online oyunlarda kullanici kendi
-    // sorumlulugundadir. Acik olsa bile enjeksiyon kurulamazsa (32-bit hedef,
-    // erisim reddi) kalibrasyon sessizce RTSS'e duser.
-    bool  injectionLimiter   = false;
-
-
+    // Surecin GPU zamanlama sinifini REALTIME yap (bkz. Main.cpp ApplyGpuSchedulingPriority).
+    // Arayuzde anahtari yok; bir oyunda/surucude sorun cikarirsa INI'deki
+    // [VLSS5] GpuRealtimePriority=0 ile kapatilir (yeniden baslatma gerekir).
+    bool  gpuRealtimePriority = true;
 
     // Tam Ekran Yap: overlay hedef pencerenin degil, hedefin bulundugu MONITORUN
     // tamamini kaplar; yakalanan kare cikis cozunurlugune gerilir.
@@ -137,10 +127,6 @@ struct Dlss5Config
     UINT  vkFocus       = VK_F8;
     UINT  vkFps         = VK_F9;
     UINT  vkToggleVlss  = VK_F10;
-    UINT  vkCalib       = VK_F2;
-    // Yuksek GPU yuku uyarisini bu oturum boyunca tamamen kapatir. Kullanici
-    // kalibrasyon yapmak zorunda degil; sadece bu uyariyi susturmak isteyebilir.
-    UINT  vkDismissWarning = VK_F3;
     UINT  vkStart       = 'S';
     UINT  modStart      = MOD_ALT; // Modifiers for Start toggle
 
@@ -157,12 +143,6 @@ struct Dlss5Config
     // L"Auto" = RTX oncelikli otomatik secim.
     std::wstring dlssGpu = L"Auto";
     
-    // RTSS directory path
-    std::wstring rtssDirectory = L"";
-
-    // "Bir daha gösterme" ile kapatilan RTSS calismiyor uyarisi (bkz. Main.cpp CheckRivaTunerRunning).
-    bool suppressRtssRunningWarning = false;
-
     std::wstring FormatHotkey() const;
     static std::wstring FormatKey(UINT vk, UINT mod = 0);
 };
@@ -183,20 +163,9 @@ public:
     Dlss5Config& Config() { return m_config; }
     const Dlss5Config& Config() const { return m_config; }
 
-    // ---- Oyun bazli kalibre edilmis FPS limiti ----
-    // Kalibrasyon bitince (CalibFinish) bulunan deger exe adina gore AYRI bir
-    // dosyaya (vlss5_calibrated.ini) kaydedilir; overlay bir sonraki sefer o
-    // oyunu yakalayinca (enjeksiyon arka ucunda) otomatik uygulanir -- kullanici
-    // her acilista F2'ye basmak zorunda kalmaz. Ayri dosya: ana INI'nin onarim
-    // (RepairIni) mantigi bilmedigi bolumleri sildigi icin burada guvende.
-    // 0 = kayit yok.
-    int  GetCalibratedFps(const std::wstring& exeName) const;
-    void SetCalibratedFps(const std::wstring& exeName, int fps);
-
 private:
     ConfigManager() { Load(); }
     std::wstring GetIniPath() const;
-    std::wstring GetCalibratedIniPath() const;
 
     // INI dosyasi profil API'sinin dogru okuyamayacagi bir hale gelmis mi?
     // (UTF-8 BOM veya mukerrer [VLSS5] bolumu -- ayrinti icin .cpp'deki nota bak)

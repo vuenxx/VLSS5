@@ -46,7 +46,7 @@ private:
     static HINSTANCE s_hInstance;
 
     static bool s_rebindingKey;
-    static int s_currentRebindId; // 0=Settings, 2=Focus, 3=FPS, 4=VLSS, 5=Calib, 6=Start, 7=DismissWarning
+    static int s_currentRebindId; // 0=Settings, 2=Focus, 3=FPS, 4=VLSS, 6=Start
 
     static KeyCapturedCallback s_externalCallback;
 };

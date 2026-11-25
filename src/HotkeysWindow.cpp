@@ -89,9 +89,7 @@ void HotkeysWindow::PushHotkeysToJs()
     labels["2"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkFocus));
     labels["3"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkFps));
     labels["4"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkToggleVlss));
-    labels["5"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkCalib));
     labels["6"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkStart, cfg.modStart));
-    labels["7"] = ToUtf8(Dlss5Config::FormatKey(cfg.vkDismissWarning));
 
     json msg;
     msg["type"] = "hotkeys";
@@ -178,9 +176,7 @@ void HotkeysWindow::ApplyAndNotify(int hotkeyId, UINT vk, UINT mod)
     if (hotkeyId == 2) { cfg.vkFocus = vk; }
     if (hotkeyId == 3) { cfg.vkFps = vk; }
     if (hotkeyId == 4) { cfg.vkToggleVlss = vk; }
-    if (hotkeyId == 5) { cfg.vkCalib = vk; }
     if (hotkeyId == 6) { cfg.vkStart = vk; cfg.modStart = mod; }
-    if (hotkeyId == 7) { cfg.vkDismissWarning = vk; }
 
     ConfigManager::Get().Save();
 

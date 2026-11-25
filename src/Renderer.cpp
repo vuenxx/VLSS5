@@ -31,8 +31,7 @@ Texture2D<float4> gModelTex    : register(t0);
 Texture2D<float4> gProxyTex    : register(t1);
 Texture2D<float4> gOriginalTex : register(t2);
 Texture2D<float4> gFpsTex      : register(t3);
-Texture2D<float4> gWarningTex  : register(t4);
-Texture2D<float4> gCursorTex   : register(t5);
+Texture2D<float4> gCursorTex   : register(t4);
 
 SamplerState      gPointSamp   : register(s0);
 SamplerState      gLinearSamp  : register(s1);
@@ -51,17 +50,14 @@ cbuffer FpsConfig : register(b0)
     int    g_splitEnabled;     // 1 = split screen enabled, 0 = disabled
     float  g_splitPos;         // 0.0 to 1.0 (screen x fraction)
     int    g_stretchActive;    // 1 = cikis cozunurlugu yakalamadan buyuk (Tam Ekran Yap)
-    int    g_warningEnabled;   // 1 = uyari goster
-    float2 g_warningBoxSize;   // uyari kutusu boyutu
-    float2 g_cursorPos;        // imlec dokusunun sol-ust kosesi (cikis pikseli)
     int    g_cursorEnabled;    // 1 = overlay kendi imlecini ciziyor
+    float2 g_cursorPos;        // imlec dokusunun sol-ust kosesi (cikis pikseli)
     float2 g_fpsTexSize;       // gFpsTex'in gercek doku boyutu (300, 120) -- SABIT.
                                 // g_fpsBoxSize'dan AYRI tutulur: UV normalizasyonu
                                 // buradan yapilir, boylece kucuk moddaki kutu dokunun
                                 // sol-ust kosesini gerdirmeden (1 piksel = 1 piksel)
                                 // KIRPAR. g_fpsBoxSize ile normalize edilseydi tum
                                 // doku (bos alan dahil) kucuk kutuya sikistirilirdi.
-    float  g_padding3;         // 16-byte alignment (96 bytes total)
 };
 
 float4 PS(float4 pos : SV_Position,
@@ -213,22 +209,6 @@ float4 PS(float4 pos : SV_Position,
         }
     }
     
-    if (g_warningEnabled != 0)
-    {
-        float wMargin = 16.0f;
-        float wLeft   = g_screenSize.x - g_warningBoxSize.x - wMargin;
-        float wRight  = g_screenSize.x - wMargin;
-        float wBottom = g_screenSize.y - wMargin;
-        float wTop    = g_screenSize.y - g_warningBoxSize.y - wMargin;
-
-        if (pos.x >= wLeft && pos.x < wRight && pos.y >= wTop && pos.y < wBottom)
-        {
-            float2 wUv = float2((pos.x - wLeft) / g_warningBoxSize.x, (pos.y - wTop) / g_warningBoxSize.y);
-            float4 wColor = gWarningTex.Sample(gLinearSamp, wUv);
-            color = wColor.rgb * wColor.a + color * (1.0f - wColor.a);
-        }
-    }
-
     // Fare eslemesi acikken gercek OS imleci oyun dikdortgenine tasinir ve
     // SetSystemCursor ile bosaltilir; kullanicinin gordugu imlec budur.
     // Doku PREMULTIPLIED alfa tasir (MouseMapper::RenderCursorToPixels).
@@ -250,8 +230,6 @@ float4 PS(float4 pos : SV_Position,
 static constexpr int kFpsWidth  = 300;
 static constexpr int kFpsHeight = 120;
 static constexpr int kCursorTexSize = 128;   // MouseMapper::kCursorTexSize ile AYNI olmak zorunda
-static constexpr int kWarningWidth = 600;
-static constexpr int kWarningHeight = 40;
 
 // FPS gostergesinin EKRANDA KAPLADIGI kutu boyutu, gorunum moduna gore. gFpsTex
 // dokusu her zaman kFpsWidth x kFpsHeight kalir (yeniden olusturmaya gerek yok);
@@ -283,12 +261,9 @@ struct FpsCBufferData
     int   splitEnabled;        // offset 48 (4 bytes)
     float splitPos;            // offset 52 (4 bytes)
     int   stretchActive;       // offset 56 (4 bytes)
-    int   warningEnabled;      // offset 60 (4 bytes) -> 64 bytes
-    float warningBoxSize[2];   // offset 64 (8 bytes)
-    float cursorPos[2];        // offset 72 (8 bytes) -> 80 bytes
-    int   cursorEnabled;       // offset 80 (4 bytes)
-    float fpsTexSize[2];       // offset 84 (8 bytes) -> 92 bytes -- gFpsTex'in SABIT doku boyutu (bkz. shader notu)
-    float padding3;            // offset 92 (4 bytes) -> 96 bytes
+    int   cursorEnabled;       // offset 60 (4 bytes) -> 64 bytes
+    float cursorPos[2];        // offset 64 (8 bytes)
+    float fpsTexSize[2];       // offset 72 (8 bytes) -> 80 bytes -- gFpsTex'in SABIT doku boyutu (bkz. shader notu)
 };
 
 // -----------------------------------------------------------------------
@@ -685,27 +660,7 @@ bool Renderer::CreateFpsResources(ID3D11Device* device)
     m_hFpsBmp = CreateDIBSection(m_hFpsDC, &bmi, DIB_RGB_COLORS, &m_pFpsBits, nullptr, 0);
     SelectObject(m_hFpsDC, m_hFpsBmp);
 
-    // 4. Create Warning texture
-    td.Width = kWarningWidth;
-    td.Height = kWarningHeight;
-    hr = device->CreateTexture2D(&td, nullptr, &m_warningTexture);
-    if (FAILED(hr)) return false;
-    hr = device->CreateShaderResourceView(m_warningTexture.Get(), &srvd, &m_warningSRV);
-    if (FAILED(hr)) return false;
-
-    BITMAPINFO wBmi = {};
-    wBmi.bmiHeader.biSize        = sizeof(BITMAPINFOHEADER);
-    wBmi.bmiHeader.biWidth       = kWarningWidth;
-    wBmi.bmiHeader.biHeight      = -kWarningHeight; // top-down
-    wBmi.bmiHeader.biPlanes       = 1;
-    wBmi.bmiHeader.biBitCount     = 32;
-    wBmi.bmiHeader.biCompression  = BI_RGB;
-
-    m_hWarningDC  = CreateCompatibleDC(nullptr);
-    m_hWarningBmp = CreateDIBSection(m_hWarningDC, &wBmi, DIB_RGB_COLORS, &m_pWarningBits, nullptr, 0);
-    SelectObject(m_hWarningDC, m_hWarningBmp);
-
-    // 5. Overlay imlec dokusu (128x128 premultiplied BGRA)
+    // 4. Overlay imlec dokusu (128x128 premultiplied BGRA)
     td.Width  = kCursorTexSize;
     td.Height = kCursorTexSize;
     hr = device->CreateTexture2D(&td, nullptr, &m_cursorTexture);
@@ -736,7 +691,7 @@ bool Renderer::CreateFpsResources(ID3D11Device* device)
 // -----------------------------------------------------------------------
 // UpdateOSD
 // -----------------------------------------------------------------------
-void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, bool showWarning, const double* gapHistory, int gapHistoryIdx, bool forceRedraw, const std::wstring& calibMessage, bool fgMarkerActive)
+void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, const double* gapHistory, int gapHistoryIdx, bool forceRedraw, bool fgMarkerActive)
 {
     if (!m_pFpsBits || !m_hFpsDC || !m_fpsTexture) return;
 
@@ -746,13 +701,9 @@ void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, 
     // We redraw every time if OSD is active, because the graph is dynamic!
     // But if we want to save perf, we can redraw every 500ms. We will just draw it.
 
-    if (!calibMessage.empty()) showWarning = true;
-
     m_lastRenderedFps    = outputFps;
     m_lastRenderedDlss   = dlssOn;
     m_lastRenderedDlssNr = dlssnrOn;
-    m_lastRenderedWarning = showWarning;
-    m_lastRenderedCalibMessage = calibMessage;
 
     // gFpsTex her zaman kFpsWidth x kFpsHeight kalir; Sade/Minimal modlarda
     // yalnizca dokunun sol-ust kosesindeki boxW x boxH kadari cizilir ve ekranda
@@ -877,59 +828,6 @@ void Renderer::UpdateOSD(ID3D11DeviceContext* ctx, int outputFps, int inputFps, 
     
     ctx->UpdateSubresource(m_fpsTexture.Get(), 0, nullptr, m_pFpsBits, kFpsWidth * sizeof(uint32_t), 0);
 
-    // ============================================
-    // Warning Texture Update
-    // ============================================
-    if (showWarning && m_hWarningDC && m_pWarningBits && m_warningTexture)
-    {
-        HBRUSH wBgBrush = CreateSolidBrush(RGB(180, 20, 20));
-        HGDIOBJ wOldBrush = SelectObject(m_hWarningDC, wBgBrush);
-        HPEN wPen = CreatePen(PS_SOLID, 1, RGB(255, 50, 50));
-        HGDIOBJ wOldPen = SelectObject(m_hWarningDC, wPen);
-        
-        RoundRect(m_hWarningDC, 0, 0, kWarningWidth, kWarningHeight, 5, 5);
-        
-        HFONT wFont = CreateFontW(-16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
-        HGDIOBJ wOldFont = SelectObject(m_hWarningDC, wFont);
-        SetBkMode(m_hWarningDC, TRANSPARENT);
-        SetTextColor(m_hWarningDC, RGB(255, 255, 255));
-        
-        const wchar_t* wText = L"YÜKSEK GPU YÜKÜ! FPS'İ SABİTLEYİN! (F2)  |  Uyarıyı Kapat (F3)";
-        if (!calibMessage.empty())
-        {
-            wText = calibMessage.c_str();
-        }
-        RECT wRc = { 0, 0, kWarningWidth, kWarningHeight };
-        DrawTextW(m_hWarningDC, wText, -1, &wRc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        
-        SelectObject(m_hWarningDC, wOldFont);
-        DeleteObject(wFont);
-        SelectObject(m_hWarningDC, wOldPen);
-        SelectObject(m_hWarningDC, wOldBrush);
-        DeleteObject(wPen);
-        DeleteObject(wBgBrush);
-        
-        uint32_t* wp = static_cast<uint32_t*>(m_pWarningBits);
-        for (int i = 0; i < kWarningWidth * kWarningHeight; ++i)
-        {
-            uint32_t pixel = wp[i];
-            uint8_t r = (pixel >> 16) & 0xFF;
-            uint8_t g = (pixel >> 8) & 0xFF;
-            uint8_t b = pixel & 0xFF;
-
-            if (r == 0 && g == 0 && b == 0)
-                wp[i] = 0;
-            else if (r > 100 || g > 100 || b > 100)
-                wp[i] = (255 << 24) | (r << 16) | (g << 8) | b;
-            else
-                wp[i] = (200 << 24) | (r << 16) | (g << 8) | b;
-        }
-        
-        ctx->UpdateSubresource(m_warningTexture.Get(), 0, nullptr, m_pWarningBits, kWarningWidth * sizeof(uint32_t), 0);
-    }
-
     UpdateFpsConstantBuffer(ctx);
 }
 
@@ -993,9 +891,6 @@ void Renderer::UpdateFpsConstantBuffer(ID3D11DeviceContext* ctx)
     cb.splitPos          = m_splitPos;
     // Cikis yakalama cozunurlugunden buyukse son gecis lineer filtre kullansin.
     cb.stretchActive     = (m_outWidth > m_width || m_outHeight > m_height) ? 1 : 0;
-    cb.warningEnabled    = m_lastRenderedWarning ? 1 : 0;
-    cb.warningBoxSize[0] = static_cast<float>(kWarningWidth);
-    cb.warningBoxSize[1] = static_cast<float>(kWarningHeight);
     cb.cursorEnabled     = (m_cursorEnabled && m_cursorHasImage) ? 1 : 0;
     cb.cursorPos[0]      = m_cursorPos[0];
     cb.cursorPos[1]      = m_cursorPos[1];
@@ -1248,8 +1143,8 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     // t1: Model Input Proxy (work resolution)
     // t2: Original Native Game Frame (full display resolution)
     // t3: FPS Counter Texture
-    // t4: Warning Texture
-    ID3D11ShaderResourceView* srvs[6];
+    // t4: Overlay Cursor Texture
+    ID3D11ShaderResourceView* srvs[5];
     if (usedDlssNr && m_d3d12Interop)
     {
         srvs[0] = m_d3d12Interop->GetOutputSRV();
@@ -1263,9 +1158,8 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
         srvs[2] = renderSRV;
     }
     srvs[3] = m_fpsSRV.Get();
-    srvs[4] = m_warningSRV.Get();
-    srvs[5] = m_cursorSRV.Get();
-    ctx->PSSetShaderResources(0, 6, srvs);
+    srvs[4] = m_cursorSRV.Get();
+    ctx->PSSetShaderResources(0, 5, srvs);
 
     // Bind samplers: s0 = Point sampler (for native original), s1 = Linear sampler (for model/proxy)
     ID3D11SamplerState* samplers[2] = { m_sampler.Get(), m_linearSampler.Get() };
@@ -1278,8 +1172,8 @@ void Renderer::RenderFrame(ID3D11DeviceContext* ctx, ID3D11ShaderResourceView* s
     ctx->Draw(3, 0);
 
     // Clear SRVs to prevent pipeline hazards
-    ID3D11ShaderResourceView* nullSRVs[6] = { nullptr, nullptr, nullptr, nullptr, nullptr, nullptr };
-    ctx->PSSetShaderResources(0, 6, nullSRVs);
+    ID3D11ShaderResourceView* nullSRVs[5] = { nullptr, nullptr, nullptr, nullptr, nullptr };
+    ctx->PSSetShaderResources(0, 5, nullSRVs);
 }
 
 // -----------------------------------------------------------------------
@@ -1357,20 +1251,13 @@ void Renderer::Cleanup()
     if (m_hFpsDC)  { DeleteDC(m_hFpsDC);       m_hFpsDC  = nullptr; }
     m_pFpsBits        = nullptr;
 
-    if (m_hWarningBmp) { DeleteObject(m_hWarningBmp); m_hWarningBmp = nullptr; }
-    if (m_hWarningDC)  { DeleteDC(m_hWarningDC);       m_hWarningDC  = nullptr; }
-    m_pWarningBits        = nullptr;
-
     m_lastRenderedFps = -1;
-    m_lastRenderedWarning = false;
 
     m_cursorSRV.Reset();
     m_cursorTexture.Reset();
     m_cursorEnabled  = false;
     m_cursorHasImage = false;
 
-    m_warningSRV.Reset();
-    m_warningTexture.Reset();
     m_fpsCBuffer.Reset();
     m_fpsSRV.Reset();
     m_fpsTexture.Reset();
